@@ -45,7 +45,9 @@ def main():
     ap = argparse.ArgumentParser()
     here = os.path.dirname(os.path.abspath(__file__))
     local_zones = os.path.join(os.environ.get("M3SIM_DATA", os.path.join(here, "data")), "zones")
-    ap.add_argument("--zones", default=local_zones if os.path.isdir(local_zones) else "/data/philei/m3_traffic_sim/data/zones")
+    ap.add_argument(
+        "--zones", default=local_zones if os.path.isdir(local_zones) else "/data/philei/m3_traffic_sim/data/zones"
+    )
     ap.add_argument("--matrix", default="/data/philei/notes/m3_matrix_2026-09-27_c_pod3")
     ap.add_argument("--out", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "calib_data.json"))
     a = ap.parse_args()
