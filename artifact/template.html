@@ -400,10 +400,10 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Dense layer:</b> ring-joint attention plus the dense MLP and its collectives.</li>
     </ul>
     <p>For every op the model computes its FLOPs, DRAM bytes and ethernet bytes for the given mesh, chunk, request lengths and cache depth. From these it takes the time the op would need at peak hardware rates, its "roofline": 608 TFLOP/s LoFi / 304 HiFi2 per chip, 512 GB/s DRAM, 100 GB/s bidirectional ethernet per mesh axis.</p>
-    <p><b>Step 1: per-op efficiency from profiles.</b> Profiles of one prefill chunk (5120 tokens attending a 51,200-token cache) give each op's measured time on [2,4], [8,4] and [4,2] stages. Each op's efficiency is <span class="mono">roofline / (measured − fixed latency)</span>. Examples at [2,4]: <span class="mono">experts_mm</span> runs at 28% of its roofline and <span class="mono">sparse_sdpa</span> at 4% (Model tab). Other chunk sizes and cache depths are predicted by scaling each op's roofline at that fixed efficiency. [4,4] has no profile and uses the geometric midpoint of [2,4] and [8,4].</p>
+    <p><b>Step 1: per-op efficiency from profiles.</b> Profiles of one prefill chunk (5120 tokens attending a 51,200-token cache) give each op's measured time on [2,4], [8,4] and [4,2] stages. Each op's efficiency is <span class="mono">roofline / (measured − fixed latency)</span>. Examples at [2,4]: <span class="mono">experts_mm</span> runs at 28% of max(weight read, compute) (45% of their sum, which is how today&#39;s kernel behaves) and <span class="mono">sparse_sdpa</span> at 4% (Model tab). Other chunk sizes and cache depths are predicted by scaling each op's roofline at that fixed efficiency. [4,4] has no profile and uses the geometric midpoint of [2,4] and [8,4].</p>
     <p><b>Step 2: pipeline-level fit.</b> The profiles come from a single-stage harness with small cache capacity, so they miss a few things the real 16-stage pipeline shows. A small number of extra parameters is fitted to 7,840 per-stage, per-chunk-position timings of runs A/B/C:</p>
     <ul>
-      <li><b>MoE multiplier ≈ 1.03:</b> MoE layers run about 3% slower in the pipeline. The pipeline uses the 2D fabric, where one dispatch fast path is disabled.</li>
+      <li><b>MoE multiplier ≈ 1.06 at chunk 5120, 1.10 at 2048:</b> MoE layers run 6-10% slower in the pipeline than in the single-stage profile. The pipeline uses the 2D fabric, where one dispatch fast path is disabled.</li>
       <li><b>Dense attention = compute part + capacity-scan part</b>, whichever is larger. Compute runs at 30% efficiency. The scan walks the whole slot capacity every chunk at 1.4% efficiency, about 100 ms per 1M-token slot per dense layer per chunk. The profiles cannot separate the two because their capacity was only 56k.</li>
       <li><b>Handoff between stages.</b>
         <ul>
@@ -542,6 +542,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
 </div>
 
 <script type="text/plain" id="simcore">/*__SIM_CORE__*/</script>
+<script type="text/plain" id="sweepcore">/*__SWEEP__*/</script>
 <script type="text/plain" id="trafficB64">__TRAFFIC_B64__</script>
 <script>
 (function () {
@@ -553,6 +554,9 @@ const VALID = "__VALIDATION__";
 const THEAD = "__TRAFFIC_HEADER__";
 const simText = document.getElementById('simcore').textContent;
 (new Function(simText))();
+const sweepText = document.getElementById('sweepcore').textContent;
+(new Function(sweepText))();
+const SWEEP = self.M3SWEEP;
 const SIM = self.M3SIM;
 const $ = (id) => document.getElementById(id);
 const fmtK = (x) => (x == null || !isFinite(x) ? '–' : x >= 1e4 ? (x / 1000).toFixed(1) + 'k' : x >= 1000 ? (x / 1000).toFixed(2) + 'k' : Math.round(x).toString());
@@ -596,35 +600,17 @@ function slim(r, c) {
 onmessage = (e) => {
   const m = e.data;
   if (m.init) { TR = M3SIM.loadTraffic(m.buf, m.header); CAL = m.cal; postMessage({ ready: true }); return; }
-  const j = m.job; let over = 0, prevU = -1; const pts = [];
-  const one = (c, refine) => {
+  const j = m.job;
+  // grid + extension + cliff bisection: lib/sweep.js, the same code the study runs
+  M3SWEEP.sweep(j.concs, j.slo, (c, tag) => {
     let r; try { r = M3SIM.simulate(TR, CAL, Object.assign({}, j.cfg, { concurrency: c })); } catch (err) { r = { error: String(err) }; }
-    const p = slim(r, c); pts.push(p); postMessage({ id: j.id, point: p, refine: !!refine }); return p;
-  };
-  for (const c of j.concs) {
-    const p = one(c);
-    if (p.error) break;
-    if (p.ttftP90 > 4 * j.slo && p.usefulTps <= prevU * 1.02) over++; else over = 0;
-    prevU = Math.max(prevU, p.usefulTps);
-    if (over >= 2) break;
-  }
-  // bisect in log concurrency between the best point that meets the SLO and the next one that fails it
-  // (same rule as lib/pool.js refineCliff): the cache cliff is steep, grid spacing alone can miss ~10%
-  const ok = (p) => !p.error && p.ttftP90 <= j.slo;
-  for (let i = 0; i < 4; i++) {
-    const s = pts.filter((p) => !p.error).sort((a, b) => a.conc - b.conc);
-    let lo = null; for (const p of s) if (ok(p) && (!lo || p.usefulTps >= lo.usefulTps)) lo = p;
-    if (!lo) break;
-    const hi = s.find((p) => p.conc > lo.conc && !ok(p)); if (!hi) break;
-    const mid = Math.round(Math.sqrt(lo.conc * hi.conc) / 8) * 8;
-    if (mid <= lo.conc || mid >= hi.conc) break;
-    if (one(mid, true).error) break;
-  }
+    const p = slim(r, c); postMessage({ id: j.id, point: p, tag }); return p;
+  });
   postMessage({ id: j.id, done: true });
 };`;
 let workerUrl = null;
 function mkWorker() {
-  if (!workerUrl) workerUrl = URL.createObjectURL(new Blob([simText, GLUE], { type: 'text/javascript' }));
+  if (!workerUrl) workerUrl = URL.createObjectURL(new Blob([simText, sweepText, GLUE], { type: 'text/javascript' }));
   const w = new Worker(workerUrl);
   w.postMessage({ init: true, buf: trafficBuf.slice(0), header: THEAD, cal: CAL });
   return w;
@@ -777,20 +763,8 @@ function drawTriple(ids, series, slo) {
   lineChart($(ids[2]), series.map((s) => ({ name: s.name, color: s.color, points: s.pts.map((p) => ({ x: p.conc, y: p.hitRate })) })), { yFmt: (v) => pct(v), yMin: 0, yMax: 1 });
 }
 
-// ---------------------------------------------------------------- goodput (same rule as lib/pool.js)
-function summarize(points, slo) {
-  let best = null, g = 0, peak = null;
-  const pts = points.filter((p) => !p.error).sort((a, b) => a.conc - b.conc);
-  for (let i = 0; i < pts.length; i++) {
-    const p = pts[i]; if (!peak || p.usefulTps > peak.usefulTps) peak = p;
-    if (p.ttftP90 <= slo) {
-      if (!best || p.usefulTps > best.usefulTps) best = p; g = Math.max(g, p.usefulTps);
-      const q = pts[i + 1];
-      if (q && q.ttftP90 > slo && q.usefulTps > p.usefulTps) { const w = (Math.log(slo) - Math.log(Math.max(1e-3, p.ttftP90))) / (Math.log(q.ttftP90) - Math.log(Math.max(1e-3, p.ttftP90))); g = Math.max(g, p.usefulTps + Math.min(1, Math.max(0, w)) * (q.usefulTps - p.usefulTps)); }
-    }
-  }
-  return { goodput: g, at: best, peak };
-}
+// ---------------------------------------------------------------- goodput: lib/sweep.js (same code as the study)
+const summarize = SWEEP.summarize;
 
 // ---------------------------------------------------------------- run
 let run = null, pinned = null, workers = [];
@@ -806,8 +780,8 @@ function render() {
   const R = run ? summarize(run.real, slo) : null, I = run && run.inf.length ? summarize(run.inf, slo) : null, P = pinned ? summarize(pinned.real, slo) : null;
   const a = R && R.at;
   const tiles = [
-    ['Goodput', R ? fmtK(R.goodput) : '–', 'useful tok/s @ p90 ≤ ' + slo + ' s', P ? `pinned ${fmtK(P.goodput)} (${R && P.goodput ? (R.goodput / P.goodput).toFixed(2) + 'x' : '–'})` : ''],
-    ['With infinite cache', I ? fmtK(I.goodput) : '–', 'same config, nothing evicted', R && I && I.goodput ? `real = ${pct(R.goodput / I.goodput)} of ∞` : ''],
+    ['Goodput', R ? (R.atEdge ? '≥ ' : '') + fmtK(R.goodput) : '–', 'useful tok/s @ p90 ≤ ' + slo + ' s', R && R.atEdge ? 'still under the SLO at the highest concurrency simulated' : P ? `pinned ${fmtK(P.goodput)} (${R && P.goodput ? (R.goodput / P.goodput).toFixed(2) + 'x' : '–'})` : ''],
+    ['With infinite cache', I ? (I.atEdge ? '≥ ' : '') + fmtK(I.goodput) : '–', 'same config, nothing evicted', R && I && I.goodput ? `real = ${I.atEdge ? '≤ ' : ''}${pct(R.goodput / I.goodput)} of ∞` : ''],
     ['TTFT at goodput point', a ? `${fmtS(a.ttftP50)}<small> / ${fmtS(a.ttftP90)} s</small>` : '–', 'p50 / p90', a ? `C = ${a.conc} lanes` : ''],
     ['Hit rate there', a ? pct(a.hitRate, 1) : '–', 'prefix-cache hit, token-weighted', a ? `∞-cache ${pct(a.infHitRate, 1)}` : ''],
     ['Peak useful', R && R.peak ? fmtK(R.peak.usefulTps) : '–', 'any TTFT', R && R.peak ? `C = ${R.peak.conc}, p90 ${fmtS(R.peak.ttftP90)} s` : ''],
@@ -816,7 +790,9 @@ function render() {
   // breakdown
   const bp = a || (R && R.peak);
   if (bp) {
-    const proc = bp.processedTps, pad = bp.padFrac * proc, nw = proc - pad, rep = bp.reprefillFrac * nw, use = nw - rep;
+    // useful comes straight from the simulator (same number as the Goodput tile); re-prefill = prefilled new tokens - useful
+    const proc = bp.processedTps, nw = bp.newTps != null ? bp.newTps : proc * (1 - bp.padFrac), pad = Math.max(0, proc - nw);
+    const use = Math.min(nw, bp.usefulTps), rep = Math.max(0, nw - use);
     const parts = [['useful', use, cssv('--s1')], ['re-prefill (evicted / misaligned)', rep, cssv('--s2')], ['padding', pad, cssv('--ink-3')]];
     $('bdBar').innerHTML = parts.map(([n, v, c]) => `<span style="width:${100 * v / proc}%;background:${c}" title="${n}: ${fmtK(v)} tok/s"></span>`).join('');
     $('bdLegend').innerHTML = parts.map(([n, v, c]) => `<span><i style="background:${c};height:8px;width:8px"></i>${n} <b class="mono">${fmtK(v)}</b> (${pct(v / proc)})</span>`).join('');
@@ -841,14 +817,14 @@ function startRun() {
   const jobs = [{ id: 'real', cfg }];
   if ($('compareInf').checked && cfg.cache !== 'inf') jobs.push({ id: 'inf', cfg: Object.assign({}, cfg, { cache: 'inf', hostTier: false }) });
   $('runBtn').disabled = true; $('runBtn').dataset.busy = '1'; $('pinBtn').disabled = true;
-  let pending = jobs.length; const total = (concs.length + 4) * jobs.length; let got = 0; const t0 = performance.now();
+  let pending = jobs.length; const total = (concs.length + 7) * jobs.length; let got = 0; const t0 = performance.now();
   $('statusTxt').textContent = 'Simulating…'; $('progBar').style.width = '0%';
   $('resTitle').textContent = 'Results: ' + name;
   jobs.forEach((j, i) => {
     const w = workers[i] || (workers[i] = mkWorker());
     w.onmessage = (e) => {
       const m = e.data; if (m.ready) return;
-      if (m.point) { run[m.id].push(m.point); run[m.id].sort((a, b) => a.conc - b.conc); got++; $('progBar').style.width = Math.min(100, 100 * got / total) + '%'; if (m.refine) $('statusTxt').textContent = 'Refining the cliff…'; render(); }
+      if (m.point) { run[m.id].push(m.point); run[m.id].sort((a, b) => a.conc - b.conc); got++; $('progBar').style.width = Math.min(100, 100 * got / total) + '%'; if (m.tag === 'refine') $('statusTxt').textContent = 'Refining the cliff…'; else if (m.tag === 'extend') $('statusTxt').textContent = 'Still under the SLO, extending the grid…'; render(); }
       if (m.done) { if (--pending === 0) { $('runBtn').dataset.busy = '0'; $('runBtn').disabled = false; $('pinBtn').disabled = false; $('progBar').style.width = '100%'; $('statusTxt').textContent = `Done in ${((performance.now() - t0) / 1000).toFixed(1)} s`; render(); } }
     };
     w.postMessage({ job: { id: j.id, cfg: j.cfg, concs, slo } });
@@ -935,7 +911,7 @@ function renderRoadmap() {
   $('roadHead').innerHTML = `<h2>What moves goodput on AgentX</h2>
   <p>Goodput = useful tok/s with p90 TTFT ≤ ${STUDY.slo} s. Baseline → best configuration found: <b>4 galaxies</b> ${fmtK(g0.greedy[0].goodput)} → <b>${fmtK(g0.grid[0].goodput)}</b> with today's kernels, ${fmtK(g1.grid[0].goodput)} with roofline kernels; <b>8 galaxies</b> ${fmtK(h0.greedy[0].goodput)} → <b>${fmtK(h0.grid[0].goodput)}</b> today, ${fmtK(h1.grid[0].goodput)} with roofline kernels.</p>
   <p>P0 features: ${top.map((k) => `<span class="pill p0">${esc(k)}</span>`).join(' ')}. The ordering, gains and complexity are below; hover the orange ticks for the infinite-cache ceiling of each step.</p>
-  <p>On AgentX traffic, KV-cache capacity limits throughput more than compute: even the best configurations reach only about a third to two thirds of their own infinite-cache goodput. The features that add effective KV capacity therefore come first: the paged pool, the host-DRAM tier and the index-cache layout. "Today's kernels" / "roofline kernels", greedy vs leave-one-out, tiers and scope are defined in the <a href="#method">Method</a> tab.</p>`;
+  <p>On AgentX traffic, KV-cache capacity limits throughput more than compute: even the best configurations reach only about 40-70% of their own infinite-cache goodput. The features that add effective KV capacity therefore come first: the paged pool, the host-DRAM tier and the index-cache layout. "Today's kernels" / "roofline kernels", greedy vs leave-one-out, tiers and scope are defined in the <a href="#method">Method</a> tab.</p>`;
 }
 
 // ---------------------------------------------------------------- model tab
@@ -961,7 +937,7 @@ function renderModel() {
     ['MoE layer multiplier (2D fabric)', `${P.moeMult[0].toFixed(3)} + ${P.moeMult[1].toFixed(3)}·5120/T`],
     ['Stage overhead per chunk', `${P.stageOv[0].toFixed(2)} ms`],
     ['Dense ring-joint compute eff', pct(P.ringC, 1)],
-    ['Dense capacity-scan eff', pct(P.ringScan, 2) + ` (≈${(0.5 * 1e6 * 272 / 1e11 / P.ringScan * 1000 / 1000).toFixed(0)} ms per 1M-token lane per chunk)`],
+    ['Dense capacity-scan eff', pct(P.ringScan, 2) + ` (≈${(0.5 * 1e6 * 272 / 1e11 / P.ringScan * 1000).toFixed(0)} ms per 1M-token lane per chunk)`],
     ['Embedding', `${P.embed.toFixed(2)} ms`],
     ['Blocking send', `${Math.max(0, P.block[0] + P.block[1] * 5.12).toFixed(1)} ms @5120, ${Math.max(0, P.block[0] + P.block[1] * 2.048).toFixed(1)} ms @2048`],
     ['Hop latency', `${Math.max(0.5, P.hop[0] + P.hop[1] * 5.12).toFixed(1)} ms @5120, ${Math.max(0.5, P.hop[0] + P.hop[1] * 2.048).toFixed(1)} ms @2048`],
@@ -980,8 +956,8 @@ updatePlan(); renderRoadmap(); renderModel();
 // show the study curves for the starting preset until the viewer runs one
 (function seed() {
   const S = STUDY.scenarios.g4_k0;
-  run = { name: 'today-C (from the study)', real: S.curves.base, inf: [] };
-  $('resTitle').textContent = 'Results: today-C (precomputed; press Run for a live sweep)';
+  run = { name: 'study baseline, 4 gx', real: S.curves.base, inf: [] };
+  $('resTitle').textContent = 'Results: study baseline for 4 galaxies (16x[2,4], chunk 2048, auto split, static slots; precomputed, press Run for a live sweep)';
   render();
 })();
 setTimeout(() => { decodeTraffic(); $('statusTxt').textContent = 'Ready. Press Run sweep.'; }, 30);

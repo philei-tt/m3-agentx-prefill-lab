@@ -73,10 +73,14 @@ def main():
             per_rank = []
             for r in range(16):
                 per_rank.append({int(x[1]): float(x[3]) for x in csv.reader(open(f"{d}/rank{r}.csv"))})
-            rows.append(dict(cached=cached, rank_ms=[round(st.median(list(v.values())), 2) for v in per_rank]))
-            # segment the chunk stream into cells: per cached level the runner restarts at chunk 0; each cell is
-            # its idle iterations (c_first..c_last) followed by its loaded block (total_chunks, contiguous)
+            # segment the chunk stream into cells. Per cached level the runner first processes cache-fill chunks
+            # (cached/chunk x users), then each cell is its idle iterations (c_first..c_last, which also skips the
+            # fill) followed by its loaded block (total_chunks, contiguous)
             nxt = 0
+            matrix_idx = set()
+            for rec in recs:
+                if rec.get("cached") == cached and rec.get("mode") == "idle":
+                    matrix_idx.update(range(rec["c_first"], rec["c_last"] + 1))
             for rec in recs:
                 if rec.get("cached") != cached:
                     continue
@@ -85,6 +89,7 @@ def main():
                     continue
                 n_ch, users, C = rec["chunks_per_req"], rec["users"], rec["chunk"]
                 idx = range(nxt, nxt + rec["total_chunks"])
+                matrix_idx.update(idx)
                 nxt += rec["total_chunks"]
                 # producer interleaves users round-robin at chunk granularity: position = (i // users) % n_ch
                 pos_ms = [[[] for _ in range(n_ch)] for _ in range(16)]
@@ -103,6 +108,13 @@ def main():
                         period_ms=rec.get("chunk_period_ms_median"),
                     )
                 )
+            # per-rank medians over the matrix chunks only (cache-fill chunks excluded)
+            rows.append(
+                dict(
+                    cached=cached,
+                    rank_ms=[round(st.median([v[c] for c in matrix_idx if c in v]), 2) for v in per_rank],
+                )
+            )
         out["pipeline"][run] = dict(meta, rows=rows, cells=cells)
         tab = []
         for r in csv.DictReader(open(f"{a.matrix}/run{run}/table.csv")):

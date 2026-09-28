@@ -27,11 +27,17 @@ ssh -L 8765:localhost:8765 <remote-host>     # then, on the remote host: node se
 
 The page is self-contained: the simulator runs in your browser (Web Workers), so the server only serves one file.
 Fonts come from Google Fonts when reachable, with system fallbacks otherwise.
-`node server.js --rebuild` forces a rebuild; the server also rebuilds automatically when any input is newer than `dist/index.html`.
+`node server.js --rebuild` forces a rebuild; at startup the server also rebuilds when any input is newer than `dist/index.html`.
 
 ## Metric
 
-**Goodput = useful tok/s at p90 TTFT ≤ 10 s**, maximised over concurrency. The cache cliff is steep (neighbouring grid points can differ by 10%+), so after the grid sweep `refineCliff` (lib/pool.js, same rule in the artifact worker) bisects 4 times in log concurrency between the best passing and the next failing point. When the failing point has higher throughput, goodput is also interpolated to the SLO crossing.
+**Goodput = useful tok/s at p90 TTFT ≤ 10 s**, maximised over concurrency. The sweep and the goodput rule live in one file, `lib/sweep.js`, used by the study and inlined into the web page:
+* **Grid:** an ascending concurrency grid, stopped early once well past the knee.
+* **Extension:** the grid is extended ×1.5 (up to 3 times) while its top point still meets the SLO. A result that still passes at the top is flagged as a lower bound, shown as "≥" on the page.
+* **Cliff bisection:** the cache cliff is steep (neighbouring grid points can differ by 10%+), so the sweep bisects the SLO crossing 4 times in log concurrency, without re-running any point.
+* **Interpolation:** when the first failing point has higher throughput, goodput is interpolated to the SLO crossing.
+
+A point where no request finished (TTFT undefined) never passes. Useful tokens per request are capped at the tokens it actually prefilled.
 *Useful* tokens are the tokens an infinite prefix cache would still have to prefill (`in - 64·lcp_best`). Re-prefilled tokens
 (evicted, misaligned, never materialised) and padding count as processed but not useful. Each result also reports the same
 configuration with an infinite cache, TTFT p50/p90, the hit rate against the ∞-cache hit rate, and the split of processed
@@ -48,7 +54,9 @@ tokens into useful, re-prefill and padding.
 | `run.js` | One configuration or a concurrency sweep from the CLI (`--preset`, `--set key=value`, `--conc`). |
 | `study.js` | Greedy feature roadmap, leave-one-out, topology/budget/lane grid and sensitivity, over {4, 8} galaxies × {today's kernels, roofline kernels}. |
 | `analyze.js`, `tools/study_detail.js` | Print study results. |
-| `lib/pool.js` | Worker-thread pool plus the goodput rule (early stop past the cache cliff). |
+| `lib/pool.js`, `lib/sweep.js` | Worker-thread pool; the concurrency sweep and the goodput rule (shared with the page). |
+| `lib/scope.js` | Complexity bin and one-line summary per feature (Roadmap and README tables). |
+| `tests/` | `node tests/test_sweep.js`, `node tests/test_model.js` (or `npm test`): sweep/goodput rule and cost-model/replay regression checks. |
 | `build_artifact.js`, `artifact/template.html` | Build the single-file page: the core, calibration, 4 MB of traffic as base64, the study summary and the presets. `--standalone` wraps it as a full HTML document for `server.js`. |
 | `server.js`, `package.json` | Zero-dependency local web server (see Quick start); `npm start` / `npm run build` / `npm run study` are shortcuts. |
 | `feature_details.js` | The per-feature explanations shown when a feature is expanded in the Roadmap table. |
@@ -108,7 +116,7 @@ Each layer is decomposed into the ops the implementation runs.
 **Calibration.**
 1. **Zone profiles.** `eff = roofline / (zone time − latency floor)`, using the zone profiles (chunk 5120, 51k cached) for [2,4], [8,4] and [4,2]. [4,4] is the geometric midpoint of [2,4] and [8,4].
 2. **Pipeline fit.** A fit on 7,840 per-rank, per-chunk-position medians of the 16×[2,4] runs A/B/C produces:
-   * an MoE multiplier of 1.03 (2D fabric);
+   * an MoE multiplier of about 1.06 at chunk 5120 and 1.10 at 2048 (pipeline vs single-stage profile, 2D fabric);
    * dense ring-joint efficiencies: compute 30%, capacity scan 1.4%, i.e. about 100 ms per 1M-token lane per chunk;
    * embedding 1.5 ms;
    * a blocking send of 18 ms at 5120 and 7.5 ms at 2048;
@@ -128,16 +136,21 @@ Each layer is decomposed into the ops the implementation runs.
 * `reserveGB` per chip plus activation buffers;
 * KV: 1088 B/token/layer for K/V (bf8), plus index_k at 128 × (2 B bf16 | 1.0625 B bf8) × (TP replicas | 1).
 
-KV capacity is the minimum over stages. At 4 galaxies with bf16 index_k replicated ×4, that is 21.5M tokens, or 20 static 1M slots.
+KV capacity is the minimum over stages. At 4 galaxies with bf16 index_k replicated ×4, that is about 21.4M tokens, or 20 static 1M slots.
+
+Every buffer that must hold a whole request (slots, fixed lanes, the lane arena) must be at least 990,016 tokens, the largest AgentX request; `makePlan` rejects smaller ones.
 
 ## KV residency
 
 * **`slots`** (today): one 1M slot per stream; LRU over idle slots. The hit is the prefix shared with the stream's previous request, floored to a chunk multiple unless `unaligned`.
-* **`pool`**: lanes (fixed `lanes`×1M per stage, or request-sized in an arena) plus a content-addressed paged pool with **exact LRU**.
-  * The prefix tree is compressed into pieces cut at branch points and request ends, so every request touches whole pieces. That makes LRU over pieces identical to LRU over 64-token pages.
+* **`pool`**: lanes (fixed `lanes`×1M per stage, or request-sized in an arena) plus a content-addressed paged pool with LRU over prefix-tree pieces.
+  * The prefix tree is compressed into pieces cut at branch points and request ends, so every request touches whole pieces. LRU over pieces matches LRU over 64-token pages except that a piece is evicted whole. Against a brute-force page LRU, total hits agree within 0.15%.
+  * The hit is looked up when the request becomes ready (which refreshes it in the LRU, but does not pin it), and re-checked when the request starts. Pages evicted meanwhile are recomputed; pages demoted to host meanwhile are fetched over PCIe before the first chunk.
+  * The new KV enters the pool when the lane is freed: with per-stage lanes, when stage 0 finishes the request's last chunk (later stages follow in FIFO order); with global lanes, at prefill completion.
   * Copy-in/out is DRAM-bound per stage and overlapped with a 25% contention charge.
-  * With `hostTier`, device evictions are demoted to host DRAM. Host hits are fetched over PCIe before admission, and write-backs share the link.
-* **`paging`**: an ideal paged kernel (no lanes, no copies).
+  * With `hostTier`, device evictions are demoted to host DRAM. Host hits are fetched over PCIe before admission, and write-backs share the link. Host copies store index_k once (no TP replicas; re-broadcast on fetch).
+  * Known approximation: KV fetched from host at READY is staged on device without being counted against capacity until the request starts.
+* **`paging`**: an ideal paged kernel (no lanes, no copies). The pages a request is writing are reserved in the pool from start to completion. The host tier also works behind paging.
 * **`inf`**: infinite cache.
 
 ## Findings (study of Sep 28 2026, decode 180 tok/s, cliff-refined sweep, `results/study.json`)

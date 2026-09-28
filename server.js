@@ -14,7 +14,7 @@ const port = Number(get('--port', process.env.PORT || 8765));
 const host = get('--host', process.env.HOST || '127.0.0.1');
 const page = path.join(P.DIST, 'index.html');
 
-const inputs = ['artifact/template.html', 'sim_core.js', 'presets.js', 'feature_details.js', 'study.js', 'build_artifact.js', 'calib_data.json']
+const inputs = ['artifact/template.html', 'sim_core.js', 'lib/sweep.js', 'lib/paths.js', 'presets.js', 'feature_details.js', 'study.js', 'build_artifact.js', 'calib_data.json']
   .map((f) => path.join(__dirname, f)).concat([path.join(P.DATA, 'traffic.bin'), path.join(P.DATA, 'traffic.json'), P.STUDY]);
 for (const f of inputs) if (!fs.existsSync(f)) { console.error(`missing input ${f} (see README: data/ and results/)`); process.exit(1); }
 const mtime = (f) => fs.statSync(f).mtimeMs;

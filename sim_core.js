@@ -49,7 +49,8 @@
   function roofTok(op, c) {
     const { sp, tp, P, T } = c;
     const E = M3.E, tl = T / sp;
-    // routed tokens: the padded chunk tail is trimmed from routing/dispatch/experts/combine (padding_config actual_isl)
+    // routed tokens: the padded chunk tail is trimmed from dispatch/experts/combine/moe_reduce (padding_config
+    // actual_isl); the router itself still scores the whole padded chunk
     const Tr = c.Tr === undefined ? T : c.Tr, trl = Tr / sp;
     const rsBytes = (tp - 1) / tp * tl * E * BF16;
     const a2a = (m) => (sp > 1 ? sp * m / (4 * HW.linkUni) : m / HW.dram); // linear SP line, bisection-bound
@@ -121,6 +122,7 @@
   // ------------------------------------------------------------------------------------------------------
   const ZONE_T = 5120, ZONE_K = 51200, ZONE_CAP = 56320;
   const IMB0 = 1.2; // expert-load imbalance assumed in the roofline (calibration and DEFAULTS.expertImb)
+  const MAX_REQ = 990016; // largest request in the AgentX corpus (the dataset caps input at 990,016 tokens)
 
   function zoneEff(zones, mesh, idxB) {
     const [sp, tp] = mesh;
@@ -259,10 +261,11 @@
   function opMs(op, roofS, eff, lat) {
     return (isCcl(op) ? lat.ccl : lat.op) + roofS * 1e3 / eff[op];
   }
-  function layerMs(kind, c, segs, eff, lat, attn) {
+  // attention part of a layer, per-request (seq) or one kernel over the whole chunk (fused)
+  function attnMs(kind, c, segs, eff, lat, fused) {
+    const z = waveFactor(ZONE_T, c);
     let t = 0;
     if (kind === 'moe') {
-      for (const op of OPS_MOE) t += (op === 'norm_ag' ? 2 : 1) * opMs(op, roofTok(op, c), eff, lat);
       for (const op of OPS_MSA_SEG) {
         if (op === 'kv_a2a' && !c.varLayout) continue;
         if ((op === 'ag_kv' || op === 'ag_idx') && c.sp <= 1) continue;
@@ -270,23 +273,28 @@
         const l = isCcl(op) ? lat.ccl : lat.op;
         const wave = WAVE_OPS.has(op);
         let sum = 0;
-        for (const s of segs) sum += roofSeg(op, c, s) * 1e3 / eff[op] * (wave && attn !== 'fused' ? waveFactor(s.n, c) / waveFactor(ZONE_T, c) : 1);
-        if (wave && attn === 'fused') sum *= waveFactor(c.T, c) / waveFactor(ZONE_T, c);
-        t += sum + (attn === 'fused' ? l : l * segs.length);
+        for (const s of segs) sum += roofSeg(op, c, s) * 1e3 / eff[op] * (wave && !fused ? waveFactor(s.n, c) / z : 1);
+        if (wave && fused) sum *= waveFactor(c.T, c) / z;
+        t += sum + (fused ? l : l * segs.length);
       }
     } else {
-      for (const op of OPS_DENSE) t += (op === 'norm_ag' ? 2 : 1) * opMs(op, roofTok(op, c), eff, lat);
-      let sum = 0;
-      const wf = attn === 'fused' ? waveFactor(c.T, c) / waveFactor(ZONE_T, c) : 0;
+      const wf = fused ? waveFactor(c.T, c) / z : 0;
       for (const s of segs) {
-        const w = attn === 'fused' ? wf : waveFactor(s.n, c) / waveFactor(ZONE_T, c);
+        const w = fused ? wf : waveFactor(s.n, c) / z;
         const rc = roofSeg('ring_c', c, s) * 1e3 / eff.ring_c * w, rs = roofSeg('ring_scan', c, s) * 1e3 / eff.ring_scan;
-        sum += Math.max(rc, rs);
-        if (c.varLayout && c.sp > 1) sum += roofSeg('kv_a2a', c, s) * 1e3 / eff.kv_a2a;
+        t += Math.max(rc, rs);
+        if (c.varLayout && c.sp > 1) t += roofSeg('kv_a2a', c, s) * 1e3 / eff.kv_a2a;
       }
-      t += sum + (attn === 'fused' ? lat.op : lat.op * segs.length);
+      t += fused ? lat.op : lat.op * segs.length;
     }
     return t;
+  }
+  function layerMs(kind, c, segs, eff, lat, attn) {
+    let t = 0;
+    for (const op of kind === 'moe' ? OPS_MOE : OPS_DENSE) t += (op === 'norm_ag' ? 2 : 1) * opMs(op, roofTok(op, c), eff, lat);
+    // a fused multi-user kernel can always fall back to the per-request schedule, so it is never slower
+    const seq = attnMs(kind, c, segs, eff, lat, false);
+    return t + (attn === 'fused' ? Math.min(seq, attnMs(kind, c, segs, eff, lat, true)) : seq);
   }
 
   // ------------------------------------------------------------------------------------------------------
@@ -354,22 +362,26 @@
     const a = cfg.opEff;
     const eff = { moe: {}, dense: {} };
     for (const k of ['moe', 'dense']) for (const op in effMeas[k]) {
-      let em = effMeas[k][op];
-      if (k === 'moe' && cal.pipe.moeMult) em = em; // pipeline multiplier applied on the layer total below
+      let em = effMeas[k][op]; // MoE: the pipeline multiplier is applied on the layer total below
       if (k === 'dense' && op === 'ring_c' && cal.pipe.ringC) em = cal.pipe.ringC * (effMeas.dense.ring_c / cal.effs['2x4'].dense.ring_c);
       if (k === 'dense' && op === 'ring_scan') em = cal.pipe.ringScan;
-      const et = TARGET_EFF[OP_CLASS[op] || 'matmul'];
-      eff[k][op] = Math.exp((1 - a) * Math.log(Math.min(em, et)) + a * Math.log(et));
+      // opEff 0 = exactly the measured efficiency; the target never makes an op slower than it measures today
+      const et = Math.max(em, TARGET_EFF[OP_CLASS[op] || 'matmul']);
+      eff[k][op] = Math.exp((1 - a) * Math.log(em) + a * Math.log(et));
     }
     const lat = { ccl: (1 - a) * LAT_MEAS.ccl + a * LAT_TGT.ccl, op: (1 - a) * LAT_MEAS.op + a * LAT_TGT.op };
     const idxB = cfg.idxBf16 ? BF16 : BF8;
     const ctxT = (T) => ({ sp, tp, P, T, idxB, imb: cfg.expertImb, varLayout: cfg.layout === 'var', bounded: cfg.boundedDense, msaLocal: cfg.msaLocal });
     const pm = cal.pipe;
-    const moeMult = (T) => (1 - a) * (pm.moeMult[0] + pm.moeMult[1] * 5120 / T) + a * 1;
-    const stageOv = (T) => (1 - a) * Math.max(0, pm.stageOv[0] + pm.stageOv[1] * T / 1000) + a * 0.3;
-    const embedMs = (1 - a) * pm.embed + a * 0.3;
+    // the 1/T term was fitted on chunks of 2048 and 5120 tokens; clamp so small chunks do not extrapolate it
+    const moeMult = (T) => (1 - a) * (pm.moeMult[0] + pm.moeMult[1] * 5120 / Math.max(T, 2048)) + a * 1;
+    const ov0 = (T) => Math.max(0, pm.stageOv[0] + pm.stageOv[1] * T / 1000);
+    const stageOv = (T) => (1 - a) * ov0(T) + a * Math.min(ov0(T), 0.3);
+    const embedMs = (1 - a) * pm.embed + a * Math.min(pm.embed, 0.3);
     const actBytes = (T) => 12 * (T / sp) * M3.E * BF16;
-    const Tmax = cfg.layout === 'var' || cfg.batch ? Math.max(cfg.chunk, cfg.batch ? cfg.budget : cfg.chunk) : cfg.chunk;
+    // largest chunk: the budget when batching on a variable layout, whole chunks otherwise
+    const Tchunk = cfg.batch ? (cfg.layout === 'var' ? cfg.budget : Math.max(cfg.budget, cfg.chunk)) : cfg.chunk;
+    const Tmax = Tchunk;
     // handoff: measured = blocking send + hop latency (fitted, per chunk); async = link-rate transfer, overlapped
     const actXfer = (T) => T * M3.E * BF16 / (P * HW.linkUni * 0.5) * 1e3; // ms, each chip ships its shard
     const blockMs = (T) => (cfg.asyncHandoff ? 0 : Math.max(0, pm.block[0] + pm.block[1] * T / 1000));
@@ -383,8 +395,9 @@
     };
     // representative-chunk objective for the auto split
     const repPts = [[60e3, 0.3], [140e3, 0.3], [310e3, 0.25], [550e3, 0.15]];
-    const Trep = cfg.batch ? cfg.budget : cfg.chunk;
-    const laneCap = cfg.cache === 'slots' ? cfg.slotLen : cfg.laneLen;
+    const Trep = Tchunk;
+    // capacity the dense ring-joint scans: fixed-size slots/lanes; 0 = request-sized (arena, paging, inf) -> kv_len
+    const laneCap = cfg.cache === 'slots' ? cfg.slotLen : cfg.cache === 'pool' && !cfg.laneArena ? cfg.laneLen : 0;
     const repCost = repPts.map(([kv, w]) => {
       const segs = [{ n: Trep, k: kv, cap: laneCap }];
       return { w, tm: layer('moe', Trep, segs), td: layer('dense', Trep, segs) };
@@ -426,11 +439,17 @@
     } else if (cfg.cache === 'paging') poolTok = capTok;
     else poolTok = Infinity;
     if (cfg.cache === 'slots' && nSlots < 1) errors.push('no 1M slot fits in memory');
-    const hostTok = cfg.hostTier && (cfg.cache === 'pool' || cfg.cache === 'paging') ? cfg.hostGBPerGalaxy * GB * (cfg.galaxies / cfg.replicas) / (M3.L * kvbL) : 0;
+    // every buffer that must hold a whole request has to fit the largest AgentX request (990,016 tokens)
+    if (cfg.cache === 'slots' && cfg.slotLen < MAX_REQ) errors.push(`slots must hold the largest request (${MAX_REQ} tokens)`);
+    if (cfg.cache === 'pool' && !cfg.laneArena && cfg.laneLen < MAX_REQ) errors.push(`lanes must hold the largest request (${MAX_REQ} tokens)`);
+    if (cfg.cache === 'pool' && cfg.laneArena && arena < MAX_REQ) errors.push(`the lane arena must hold the largest request (${MAX_REQ} tokens)`);
+    // host copies do not need the TP replicas of index_k (re-broadcast on fetch)
+    const kvbHost = kvBytesPerTokenLayer(Object.assign({}, cfg, { idxDerep: true }), tp);
+    const hostTok = cfg.hostTier && (cfg.cache === 'pool' || cfg.cache === 'paging') ? cfg.hostGBPerGalaxy * GB * (cfg.galaxies / cfg.replicas) / (M3.L * kvbHost) : 0;
     const gran = 32 * sp;
     return {
       cfg, sp, tp, P, S, counts, stages, eff, lat, layer, stageOv, embedMs, blockMs, hopMs, errors,
-      capTok, nSlots, poolTok, lanes, arena, hostTok, kvbL, gran, laneCap,
+      capTok, nSlots, poolTok, lanes, arena, hostTok, kvbL, kvbHost, gran, laneCap,
       pcieBps: cfg.pcieGBsPerGalaxy * GB * (cfg.galaxies / cfg.replicas),
       maxInflight: cfg.maxInflight > 0 ? cfg.maxInflight : 2 * S + 4,
       tokensPerSec: null,
@@ -476,30 +495,38 @@
   // ------------------------------------------------------------------------------------------------------
   function mulberry32(a) { return function () { a |= 0; a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
 
-  class EvHeap { // (time, seq) ordered events with payload objects
-    constructor() { this.t = []; this.p = []; }
+  class EvHeap { // (time, seq) ordered events with payload objects: equal times pop in insertion (FIFO) order
+    constructor() { this.t = []; this.s = []; this.p = []; this.seq = 0; }
     get size() { return this.t.length; }
     push(t, p) {
-      const T = this.t, Pp = this.p; let i = T.length; T.push(t); Pp.push(p);
-      while (i > 0) { const j = (i - 1) >> 1; if (T[j] <= t) break; T[i] = T[j]; Pp[i] = Pp[j]; i = j; }
-      T[i] = t; Pp[i] = p;
+      const T = this.t, Q = this.s, Pp = this.p, q = this.seq++; let i = T.length; T.push(t); Q.push(q); Pp.push(p);
+      while (i > 0) { const j = (i - 1) >> 1; if (T[j] < t || (T[j] === t && Q[j] < q)) break; T[i] = T[j]; Q[i] = Q[j]; Pp[i] = Pp[j]; i = j; }
+      T[i] = t; Q[i] = q; Pp[i] = p;
     }
     peekT() { return this.t[0]; }
     pop() {
-      const T = this.t, Pp = this.p; const top = Pp[0]; const lt = T.pop(), lp = Pp.pop(); const n = T.length;
+      const T = this.t, Q = this.s, Pp = this.p; const top = Pp[0]; const lt = T.pop(), lq = Q.pop(), lp = Pp.pop(); const n = T.length;
+      const lessThan = (a, b) => T[a] < T[b] || (T[a] === T[b] && Q[a] < Q[b]);
       if (n > 0) {
         let i = 0;
-        while (true) { let l = 2 * i + 1; if (l >= n) break; const r = l + 1; if (r < n && T[r] < T[l]) l = r; if (T[l] >= lt) break; T[i] = T[l]; Pp[i] = Pp[l]; i = l; }
-        T[i] = lt; Pp[i] = lp;
+        while (true) {
+          let l = 2 * i + 1; if (l >= n) break; const r = l + 1; if (r < n && lessThan(r, l)) l = r;
+          if (T[l] > lt || (T[l] === lt && Q[l] > lq)) break;
+          T[i] = T[l]; Q[i] = Q[l]; Pp[i] = Pp[l]; i = l;
+        }
+        T[i] = lt; Q[i] = lq; Pp[i] = lp;
       }
       return top;
     }
     shiftAll(dt) { for (let i = 0; i < this.t.length; i++) this.t[i] -= dt; }
   }
 
-  class LruHeap { // min-heap on (t, -depth) over piece keys, lazy invalidation
+  class LruHeap { // min-heap on (t, -depth, key) over piece keys, lazy invalidation; fully deterministic order
     constructor() { this.t = new Float64Array(1024); this.d = new Int32Array(1024); this.k = new Int32Array(1024); this.n = 0; }
-    less(i, j) { return this.t[i] < this.t[j] || (this.t[i] === this.t[j] && this.d[i] > this.d[j]); }
+    less(i, j) {
+      const t = this.t, d = this.d;
+      return t[i] < t[j] || (t[i] === t[j] && (d[i] > d[j] || (d[i] === d[j] && this.k[i] < this.k[j])));
+    }
     push(t, d, k) {
       if (this.n === this.t.length) { const g = (A, C) => { const B = new C(A.length * 2); B.set(A); return B; }; this.t = g(this.t, Float64Array); this.d = g(this.d, Int32Array); this.k = g(this.k, Int32Array); }
       let i = this.n++; this.t[i] = t; this.d[i] = d; this.k[i] = k;
@@ -561,9 +588,16 @@
       }
       this.evict();
     }
-    refresh(n, now) {
-      for (let i = 0; i < n; i++) { const k = this.path[i]; if (this.tier[k] === 1) { this.t[k] = now; this.heap.push(now, this.dep[k], k); } }
+    refresh(n, now) { // LRU-refresh the resident part of the path (both tiers); it does not pin
+      for (let i = 0; i < n; i++) {
+        const k = this.path[i];
+        if (this.tier[k] === 1) { this.t[k] = now; this.heap.push(now, this.dep[k], k); }
+        else if (this.tier[k] === 2) { this.t[k] = now; this.hheap.push(now, this.dep[k], k); }
+      }
     }
+    // space held by KV that is being written but not yet inserted (paging: pages written in place)
+    reserve(blocks) { this.used += blocks; this.evict(); }
+    unreserve(blocks) { this.used -= blocks; }
     evict() {
       while (this.used > this.cap && this.heap.n > 0) {
         const k = this.heap.pop(); const t = this.heap.ot;
@@ -633,7 +667,7 @@
     }
     // device -> host demotions (write-back) occupy the same PCIe link as host -> device fetches
     for (const rp of reps) if (rp.pool && plan.hostTok > 0) {
-      rp.pool.onDemote = (blocks) => { rp.pcieFree = Math.max(rp.pcieFree, now) + blocks * B * M3.L * plan.kvbL / plan.pcieBps; };
+      rp.pool.onDemote = (blocks) => { rp.pcieFree = Math.max(rp.pcieFree, now) + blocks * B * M3.L * plan.kvbHost / plan.pcieBps; };
     }
     // stats
     const st = { done: 0, useful: 0, newTok: 0, processed: 0, hitTok: 0, inTok: 0, infHitTok: 0, hostTok: 0, reprefill: 0, alignLoss: 0,
@@ -723,12 +757,12 @@
         const pool = rep.pool; const n = pool.walk(tree.ns, TR.req_leaf[r] - TR.tr_pc0[tree.trace]);
         pool.hit(n);
         let dev = pool.hDev, host = pool.hHost;
-        pool.refresh(n, now); // pin: LRU-refresh the resident part of the path while the request is queued
+        pool.refresh(n, now); // LRU-refresh the resident part of the path; tryStart re-checks what is left
         q.hitRaw = dev + host; q.host = host;
         if (host > 0 && plan.hostTok > 0) { // fetch host part over PCIe before it can be admitted
-          const bytes = host * B * M3.L * plan.kvbL;
+          const bytes = host * B * M3.L * plan.kvbHost;
           const t = Math.max(now, rep.pcieFree) + bytes / plan.pcieBps; rep.pcieFree = t; q.fetchedAt = t;
-          st.hostTok += host * B;
+          if (warmDone) st.hostTok += host * B;
           ev.push(t, { e: EV_FETCHED, q }); return;
         }
       }
@@ -762,7 +796,18 @@
         q.lane = 1;
         // dense ring-joint scans the whole lane: fixed lanes are laneLen; arena lanes / paged kernels are request-sized
         q.laneCap = cfg.cache === 'pool' && !cfg.laneArena ? cfg.laneLen : need;
-        q.hitTok = hitTokens(q, q.hitRaw);
+        // re-check the hit: the READY-time refresh does not pin, so pages may have been evicted (lost) or demoted to
+        // host (need a PCIe fetch) while the request was queued. Blocks fetched at READY are staged on device.
+        const pool = rep.pool; const n = pool.walk(tree.ns, TR.req_leaf[r] - TR.tr_pc0[tree.trace]); pool.hit(n);
+        const devNow = pool.hDev, hostNow = pool.hHost, fetched = q.host || 0;
+        const hitB = Math.min(q.hitRaw, devNow + Math.max(hostNow, fetched));
+        const extra = plan.hostTok > 0 ? Math.max(0, hitB - devNow - fetched) : 0;
+        if (extra > 0) {
+          const t = Math.max(now, rep.pcieFree) + extra * B * M3.L * plan.kvbHost / plan.pcieBps; rep.pcieFree = t; q.readyAt = t;
+          if (warmDone) st.hostTok += extra * B;
+        }
+        q.hitTok = hitTokens(q, hitB);
+        if (cfg.cache === 'paging' && plan.poolTok !== Infinity) { q.resv = (TR.req_blocks[r] * B - q.hitTok) / B; pool.reserve(q.resv); }
       }
       q.started = true; q.tStart = now;
       q.pos = q.hitTok; q.rem = TR.req_blocks[r] * B - q.hitTok; q.first = true;
@@ -776,38 +821,47 @@
           const aw = now - a.tReady > mw, bw = now - b.tReady > mw;
           if (aw !== bw) return aw ? -1 : 1;
           if (aw) return a.tReady - b.tReady;
-          return (TR.req_blocks[a.r] - (a.hitRaw || 0)) - (TR.req_blocks[b.r] - (b.hitRaw || 0));
+          return estNew(a, rep) - estNew(b, rep);
         });
       }
+    }
+    function estNew(q, rep) { // expected new blocks: pool hit known at READY; slots hit if the stream still owns its slot
+      if (!rep.slots) return TR.req_blocks[q.r] - (q.hitRaw || 0);
+      const key = q.tree.key * 4096 + (TR.req_stream[q.r] - q.tree.s0);
+      return TR.req_blocks[q.r] - (rep.slots.of.has(key) ? TR.req_lcp_prev[q.r] : 0);
     }
     // pull segments into one chunk
     function formChunk(rep) {
       const segs = []; let T = 0; const C = cfg.chunk;
-      const budget = cfg.batch ? Math.max(cfg.budget, C) : C;
+      const fixed = cfg.layout === 'fixed';
+      // chunk token budget: batching on a variable layout packs up to the budget; a fixed layout packs whole chunks
+      const budget = cfg.batch ? (fixed ? Math.max(cfg.budget, C) : cfg.budget) : C;
+      const room = () => (fixed ? budget - T >= C : budget - T >= plan.gran); // space for one more segment
       const cands = rep.active;
-      const take = (q, maxTok) => { // one segment of q, <= maxTok padded tokens
+      // one segment per request per chunk (a request's tokens in a chunk form one attention call, whatever the
+      // layout): fixed layout = a whole number of chunks, variable layout = any multiple of 32*SP tokens
+      const take = (q, maxTok) => {
         let n, npad;
-        if (cfg.layout === 'fixed') { if (maxTok < C) return false; n = Math.min(q.rem, C); npad = C; }
+        if (fixed) { const units = Math.floor(maxTok / C); if (units < 1) return false; n = Math.min(q.rem, units * C); npad = Math.ceil(n / C) * C; }
         else { const cap = cfg.batch ? maxTok : Math.min(maxTok, C); if (cap < plan.gran) return false; n = Math.min(q.rem, cap - (cap % plan.gran)); if (n <= 0) return false; npad = Math.ceil(n / plan.gran) * plan.gran; }
         segs.push({ q, n, npad, k: q.pos, first: q.first, last: n === q.rem });
         q.first = false; q.pos += n; q.rem -= n; T += npad;
         return true;
       };
       // 1) continue active requests (they hold lanes), in start order
-      for (let i = 0; i < cands.length && T < budget; i++) {
-        const q = cands[i];
-        while (q.rem > 0 && T < budget) { if (!take(q, budget - T)) break; if (!cfg.batch) break; }
+      for (let i = 0; i < cands.length && room(); i++) {
+        if (cands[i].rem > 0) take(cands[i], budget - T);
         if (!cfg.batch && segs.length) break;
       }
-      // 2) start new requests from the queue
-      if (T < budget && (cfg.batch || segs.length === 0)) {
+      // 2) start new requests from the queue (only while the chunk has room for them)
+      if (room() && (cfg.batch || segs.length === 0)) {
         queueOrder(rep);
         let i = 0;
-        while (i < rep.queue.length && T < budget) {
+        while (i < rep.queue.length && room()) {
           const q = rep.queue[i];
           if (!tryStart(q, rep)) { if (rep.slots) { i++; continue; } break; }
           rep.queue.splice(i, 1); rep.active.push(q);
-          while (q.rem > 0 && T < budget) { if (!take(q, budget - T)) break; if (!cfg.batch) break; }
+          take(q, budget - T);
           if (!cfg.batch) break;
         }
       }
@@ -843,16 +897,20 @@
         }
       }
       const blk = plan.blockMs(T) / 1e3, hop = plan.hopMs(T) / 1e3;
-      let arr = now, end = now, end0 = now;
+      // a request whose prefix had to be re-fetched from host at admission cannot start before the fetch lands
+      let arr = now;
+      for (const s of segs) if (s.first && s.q.readyAt > arr) arr = s.q.readyAt;
+      let end = arr, end0 = arr;
       for (let s = 0; s < S; s++) {
         const dt = scratch[s] / 1e3;
         const start = Math.max(rep.free[s], arr); end = start + dt;
-        rep.free[s] = end + blk; if (warmDone && end > t0 && start < tEnd) rep.busy[s] += dt;
+        rep.free[s] = end + blk;
+        if (warmDone) rep.busy[s] += Math.max(0, Math.min(end, tEnd) - Math.max(start, t0)); // busy inside the window
         if (s === 0) end0 = end;
         arr = end + hop;
       }
       heapPushNum(rep.exits, end);
-      if (warmDone) { st.chunks++; st.segs += segs.length; st.processed += T; }
+      if (warmDone && end >= t0 && end <= tEnd) { st.chunks++; st.segs += segs.length; st.processed += T; }
       for (const s of segs) {
         if (s.last) {
           ev.push(end, { e: EV_DONE, q: s.q });
@@ -867,19 +925,28 @@
       if (q.arena) { rep.arenaUsed -= q.arena; q.arena = 0; }
       q.lane = -1; pump(rep);
     }
+    // copy-out: the request's KV enters the pool. With per-stage lanes that happens when the lane is freed (stage 0
+    // finished the last chunk; later stages follow in FIFO order), otherwise at prefill completion.
+    function insertKV(q, rep) {
+      if (q.inserted) return; q.inserted = true;
+      const pool = rep.pool;
+      if (q.resv) { pool.unreserve(q.resv); q.resv = 0; }
+      const n = pool.walk(q.tree.ns, TR.req_leaf[q.r] - TR.tr_pc0[q.tree.trace]); pool.touch(n, now);
+    }
+    function onLaneFree(q, rep) { releaseLane(q, rep); insertKV(q, rep); }
     function onDone(q) { // prefill complete (TTFT)
       const tree = q.tree, rep = tree.rep, r = q.r;
       q.tDone = now;
       if (rep.slots) { rep.slots.release(q.slot, now); pump(rep); }
       else {
         if (cfg.laneScope !== 'stage') releaseLane(q, rep);
-        const pool = rep.pool; const n = pool.walk(tree.ns, TR.req_leaf[r] - TR.tr_pc0[tree.trace]); pool.touch(n, now);
+        insertKV(q, rep);
       }
       const inTok = TR.req_blocks[r] * B;
       if (q.primer) { st.primerTok += inTok - q.hitTok; primersLeft--; if (primersLeft === 0 && !warmDone) startProfiling(now); ev.push(now, { e: EV_END, q }); return; }
       if (warmDone && now >= t0 && now <= tEnd) {
         const useful = (TR.req_blocks[r] - TR.req_lcp_best[r]) * B;
-        st.done++; st.useful += useful; st.newTok += inTok - q.hitTok; st.hitTok += q.hitTok; st.inTok += inTok;
+        st.done++; st.useful += Math.min(useful, inTok - q.hitTok); st.newTok += inTok - q.hitTok; st.hitTok += q.hitTok; st.inTok += inTok;
         st.infHitTok += TR.req_lcp_best[r] * B; st.reprefill += Math.max(0, (inTok - q.hitTok) - useful);
         st.ttft.push(now - q.tReady);
       }
@@ -939,7 +1006,7 @@
         case EV_DONE: onDone(p.q); break;
         case EV_END: onEnd(p.q); break;
         case EV_PUMP: if (p.rep.pumpAt === t) p.rep.pumpAt = -1; pump(p.rep); break;
-        case EV_LANE: releaseLane(p.q, p.rep); break;
+        case EV_LANE: onLaneFree(p.q, p.rep); break;
       }
     }
     // ---------- results
@@ -1025,7 +1092,7 @@
         const o = new Float64Array(16);
         chunkStageMs(plan, T, [{ n: T, na: row.new, k: Math.floor(row.cached / T) * T, cap: row.cached + 51200 }], o);
         const sum = o.reduce((a, b) => a + b, 0), mx = Math.max(...o);
-        pts[T].push({ block: periodMeas - mx, hop: (row.idle_ttft_ms_median - sum) / 16 });
+        pts[T].push({ block: periodMeas - mx, hop: (row.idle_ttft_ms_median - 1 - sum) / 15 });
       }
     }
     const med = (a, k) => { const v = a.map((p) => p[k]).sort((x, y) => x - y); return v[Math.floor(v.length / 2)]; };

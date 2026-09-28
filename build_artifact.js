@@ -24,21 +24,7 @@ const bin = fs.readFileSync(path.join(dataDir, 'traffic.bin'));
 const study = JSON.parse(fs.readFileSync(studyF));
 
 // ---- rough implementation complexity (low / med / high) + what it takes, per feature
-const SCOPE = {
-  bounded: ['low', 'Pass kv_len into the dense ring-joint SDPA and gather only [0, kv_len) (the MSA path already does this).'],
-  unaligned: ['low', 'PR #57636 (in review): resume at any 32-token boundary instead of a chunk multiple.'],
-  pool: ['high', 'Paged KV pool + per-stage lane table, page-list gather/scatter op for copy-in/out, LRU, scheduler overlap of copies.'],
-  arena: ['med', 'Lanes allocated contiguously at request size from one arena (kernels take offset+length), fragmentation handling.'],
-  host: ['high', 'Host-DRAM tier: async PCIe DMA of KV pages, write-back on eviction, prefetch while queued. Depends on the pool.'],
-  idxdedup: ['med', 'Store index_k once per SP row instead of on all 4 TP columns; broadcast/all-gather it in the indexer.'],
-  idxbf8: ['low', 'Default runner dtype is already bf8 (M3_INDEX_CACHE_BF16=1 opts into bf16); needs a PCC sign-off.'],
-  var: ['high', 'Decouple chunk size from the SP KV layout: absolute-position RoPE, all-to-all KV write, MoE buffers sized to the budget, MSA read without chunk alignment.'],
-  batch: ['high', 'Several requests per chunk: per-segment metadata (slot, start, len), sequential per-request attention, MoE on the concatenated tokens, packing scheduler.'],
-  fused: ['high', 'Multi-user attention kernels. The model finds no gain over sequential per-request attention.'],
-  async: ['med', 'Non-blocking stage-to-stage D2D (double-buffered send overlapped with the next chunk).'],
-  msa: ['high', 'SP-local index scoring + top-k merge, fetch only the selected K/V blocks. Small gain at [2,4].'],
-  srpt: ['low', 'Scheduler-only: shortest-new-first with 30 s aging.'],
-};
+const SCOPE = require('./lib/scope.js');
 
 // ---- trim the study for the page
 const slim = (a) => (a ? { conc: a.conc, usefulTps: a.usefulTps, processedTps: a.processedTps, ttftP50: a.ttftP50, ttftP90: a.ttftP90, hitRate: a.hitRate, infHitRate: a.infHitRate, reprefillFrac: a.reprefillFrac, padFrac: a.padFrac, maxUtil: a.maxUtil, avgChunkTok: a.avgChunkTok, avgSegsPerChunk: a.avgSegsPerChunk } : null);
@@ -82,6 +68,7 @@ const simSrc = fs.readFileSync(path.join(__dirname, 'sim_core.js'), 'utf8');
 const js = (x) => JSON.stringify(x).replace(/</g, '\\u003c');
 let html = tpl
   .replace('/*__SIM_CORE__*/', () => simSrc)
+  .replace('/*__SWEEP__*/', () => fs.readFileSync(path.join(__dirname, 'lib', 'sweep.js'), 'utf8'))
   .replace('"__CAL__"', () => js(cal))
   .replace('"__STUDY__"', () => js(S))
   .replace('"__PRESETS__"', () => js(presets))
