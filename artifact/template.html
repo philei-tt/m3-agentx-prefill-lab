@@ -192,6 +192,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="hint" id="chunkHint" hidden>Not used: with batching on a variable layout, the token budget below is the chunk size.</div>
     <div class="row check"><input id="batch" type="checkbox"><label for="batch">Batch several requests per chunk</label></div>
     <div class="row"><label for="budget">Token budget</label><select id="budget"><option>4096</option><option>8192</option><option>16384</option><option>32768</option></select></div>
+    <div class="row check"><input id="batchDynShape" type="checkbox"><label for="batchDynShape">Size each chunk to its tokens (a trace per size)</label></div>
+    <div class="hint">Off: one static budget-sized shape; a partly filled batch pays for the whole budget.</div>
     <div class="row"><label for="attn">Attention</label><select id="attn"><option value="seq">sequential per request</option><option value="fused">fused multi-user</option></select></div>
     <div class="row check"><input id="kvDedup" type="checkbox"><label for="kvDedup">One attention call per request per chunk (prefix gathered once)</label></div>
     <div class="hint">Off: with a fixed layout, each chunk-unit of a request makes its own call and re-gathers the cached prefix.</div>
@@ -501,6 +503,13 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li>With it off, small chunks collapse. Chunk 2048 becomes the best, and it is 2–14% below the de-duplicated best.</li>
         </ul>
       </li>
+      <li><b>Chunk sized to its tokens</b> (on by default). A batched chunk is costed at the tokens it holds, a multiple of the chunk size (fixed layout) or of 32·SP (variable layout). This assumes a compiled trace for every size up to the budget.
+        <ul>
+          <li>Off, every batched chunk has one static budget-sized shape. A partly filled batch pays for the whole budget in every token-proportional op and in the stage-to-stage send. Routed MoE ops still trim to the real tokens, as they do for a padded chunk tail today.</li>
+          <li>With few requests per batch this hurts large budgets: on today's 4-galaxy config with pool and host tier, a static 16k shape drops 25.0k → 14.9k, below no batching (21.5k).</li>
+          <li>A static shape near the typical fill (4–8k) loses at most 3%, and on the best stacks, which fill batches better, static 16k costs 0–6%.</li>
+        </ul>
+      </li>
       <li><b>Prefetch of KV-prefix gathers</b> (off by default). The cached-prefix gather does not depend on the current chunk, so it can overlap the layer's non-collective compute: projections, experts, and the other requests' attention. Only the part beyond that window stays exposed.
         <ul>
           <li>It is worth 0.2–1.3% on AgentX. At 8 galaxies the bottleneck is the single-dense-layer stages, where compute already covers most of the gather.</li>
@@ -663,7 +672,7 @@ function mkWorker() {
 }
 
 // ---------------------------------------------------------------- form <-> cfg
-const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'attn', 'kvDedup', 'prefetchKV', 'policy',
+const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'batchDynShape', 'attn', 'kvDedup', 'prefetchKV', 'policy',
   'cache', 'laneScope', 'copyMode', 'lanes', 'laneArena', 'arenaTokens', 'unaligned', 'hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'duration', 'seed'];
 const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'lanes', 'arenaTokens', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'reserveGB', 'decodeTps', 'duration', 'seed']);
 function setForm(cfg) {
@@ -697,7 +706,7 @@ function syncUi() {
   for (const id of ['hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy']) $(id).disabled = !paged;
   $('arenaTokens').disabled = !pool || !$('laneArena').checked;
   $('lanes').disabled = !pool || $('laneArena').checked;
-  $('budget').disabled = !$('batch').checked; $('attn').disabled = !$('batch').checked;
+  $('budget').disabled = !$('batch').checked; $('attn').disabled = !$('batch').checked; $('batchDynShape').disabled = !$('batch').checked;
   $('unaligned').disabled = $('layout').value === 'var';
   // with batching on a variable layout the token budget is the chunk size; the chunk field is unused
   const chunkUnused = $('batch').checked && $('layout').value === 'var';

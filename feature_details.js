@@ -64,6 +64,8 @@ module.exports = {
       'Chunk metadata per segment: lane/slot, start position, length.',
       'An attention loop over segments; each segment\'s KV is read and written in its own lane.',
       'MoE dispatch/combine buffers and activations sized for the budget instead of the chunk.',
+      'Traces per chunk size (or a few buckets, e.g. 4k/8k/16k), so a partly filled batch is not padded to the budget. With one static 16k shape the batches here (1.2-3 requests) are 40-65% padding: -6% on the best stacks, and below no batching on today\'s config.',
+      'One attention call per request per chunk, so a request\'s several chunk-units share one KV-prefix gather.',
       'A packing scheduler: fill the budget, split long requests across chunks, keep segments of one request in order.',
       'Needs the variable layout for token packing; with the fixed layout only whole chunks can be packed.',
     ],

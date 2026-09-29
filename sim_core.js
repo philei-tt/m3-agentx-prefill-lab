@@ -360,6 +360,9 @@
     //   gather of its cached prefix); false = one call and one prefix gather per C-unit (today's kernels process
     //   one chunk at a time). prefetchKV: overlap the KV-prefix gathers with the layer's non-collective compute.
     kvDedup: true, prefetchKV: false,
+    // batchDynShape: a batched chunk is costed at the tokens it holds (a multiple of the chunk / 32*SP granule), i.e.
+    //   traces compiled for every size up to the budget; false = one static budget-sized shape, padded when not full
+    batchDynShape: true,
     cache: 'slots',        // slots | pool | paging | inf
     lanes: 3, laneScope: 'stage', laneLen: M3.maxCtx, laneArena: false, arenaTokens: 4e6,
     slotLen: M3.maxCtx, unaligned: false,
@@ -1004,7 +1007,11 @@
     }
     function schedPump(rep, t) { if (rep.pumpAt >= 0 && rep.pumpAt <= t + 1e-12 && rep.pumpAt >= now) return; rep.pumpAt = t; ev.push(t, { e: EV_PUMP, rep }); }
     function runChunk(rep, ch) {
-      const { segs, T } = ch;
+      const { segs } = ch;
+      // batchDynShape off: batched chunks have one static shape (the budget), so a partly filled batch still pays
+      // the full budget in every token-proportional op and in the stage-to-stage send; routed MoE ops keep
+      // trimming to the real tokens (padding_config actual_isl), as they do for a padded chunk tail today
+      const T = cfg.batch && !cfg.batchDynShape ? Math.max(ch.T, cfg.layout === 'fixed' ? Math.max(cfg.budget, cfg.chunk) : cfg.budget) : ch.T;
       let cs = segs.map((s) => ({ n: s.npad, na: s.n, k: s.k, cap: s.q.laneCap || plan.laneCap }));
       if (!cfg.kvDedup && cfg.layout === 'fixed' && cs.some((s) => s.n > cfg.chunk)) { // one attention call per C-unit
         const C = cfg.chunk;
