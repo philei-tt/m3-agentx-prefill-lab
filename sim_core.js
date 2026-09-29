@@ -292,8 +292,10 @@
   function opMs(op, roofS, eff, lat, c) {
     return (isCcl(op) ? cclLat(op, c, lat) : lat.op) + roofS * 1e3 / eff[op];
   }
-  // attention part of a layer, per-request (seq) or one kernel over the whole chunk (fused)
-  function attnMs(kind, c, segs, eff, lat, fused) {
+  // attention part of a layer, per-request (seq) or one kernel over the whole chunk (fused).
+  // acc.g collects the KV-gather time that a prefetch could hide (MSA ag_kv/ag_idx; the dense ring's gather beyond
+  // its compute).
+  function attnMs(kind, c, segs, eff, lat, fused, acc) {
     const z = waveFactor(ZONE_T, c);
     let t = 0;
     if (kind === 'moe') {
@@ -306,6 +308,8 @@
         let sum = 0;
         for (const s of segs) sum += roofSeg(op, c, s) * 1e3 / eff[op] * (wave && !fused ? waveFactor(s.n, c) / z : 1);
         if (wave && fused) sum *= waveFactor(c.T, c) / z;
+        if (acc && (op === 'ag_kv' || op === 'ag_idx')) acc.g += sum;
+        if (acc && (op === 'indexer' || op === 'sparse')) acc.w += sum;
         t += sum + (fused ? l : l * segs.length);
       }
     } else {
@@ -314,6 +318,7 @@
         const w = fused ? wf : waveFactor(s.n, c) / z;
         const rc = roofSeg('ring_c', c, s) * 1e3 / eff.ring_c * w, rs = roofSeg('ring_scan', c, s) * 1e3 / eff.ring_scan;
         t += Math.max(rc, rs);
+        if (acc) acc.g += Math.max(0, rs - rc);
         if (c.varLayout && c.sp > 1) t += cclLat('kv_a2a', c, lat) + roofSeg('kv_a2a', c, s) * 1e3 / eff.kv_a2a;
       }
       t += (fused ? 1 : segs.length) * (lat.op + (lat.denseFix || 0)); // per ring-joint call
@@ -321,11 +326,22 @@
     return t;
   }
   function layerMs(kind, c, segs, eff, lat, attn) {
-    let t = 0;
-    for (const op of kind === 'moe' ? OPS_MOE : OPS_DENSE) t += (op === 'norm_ag' ? 2 : 1) * opMs(op, roofTok(op, c), eff, lat, c);
+    let t = 0, w = 0;
+    for (const op of kind === 'moe' ? OPS_MOE : OPS_DENSE) {
+      const m = (op === 'norm_ag' ? 2 : 1) * opMs(op, roofTok(op, c), eff, lat, c);
+      t += m; if (!isCcl(op)) w += m;
+    }
+    // KV prefetch: the gather of the cached prefix does not depend on this chunk, so it can run on the links while
+    // the cores do the layer's non-collective work (projections, experts, misc, the other segments' attention
+    // compute); only the gather time beyond that window stays exposed
+    const at = (fused) => {
+      const acc = c.prefetch ? { g: 0, w: 0 } : null;
+      const x = attnMs(kind, c, segs, eff, lat, fused, acc);
+      return acc ? x - Math.min(acc.g, w + acc.w) : x;
+    };
     // a fused multi-user kernel can always fall back to the per-request schedule, so it is never slower
-    const seq = attnMs(kind, c, segs, eff, lat, false);
-    return t + (attn === 'fused' ? Math.min(seq, attnMs(kind, c, segs, eff, lat, true)) : seq);
+    const seq = at(false);
+    return t + (attn === 'fused' ? Math.min(seq, at(true)) : seq);
   }
 
   // ------------------------------------------------------------------------------------------------------
@@ -340,6 +356,10 @@
     msaLocal: false,       // MSA: SP-local indexer + top-k merge, fetch only selected K/V blocks (no prefix all-gather)
     idxBf16: true, idxDerep: false, // index_k cache dtype / de-replicated over TP (today: bf16 x TP replicas)
     chunk: 5120, layout: 'fixed', batch: false, budget: 16384, attn: 'seq', policy: 'fcfs',
+    // kvDedup: a request that takes several C-units of a batched fixed-layout chunk makes ONE attention call (one
+    //   gather of its cached prefix); false = one call and one prefix gather per C-unit (today's kernels process
+    //   one chunk at a time). prefetchKV: overlap the KV-prefix gathers with the layer's non-collective compute.
+    kvDedup: true, prefetchKV: false,
     cache: 'slots',        // slots | pool | paging | inf
     lanes: 3, laneScope: 'stage', laneLen: M3.maxCtx, laneArena: false, arenaTokens: 4e6,
     slotLen: M3.maxCtx, unaligned: false,
@@ -419,7 +439,7 @@
     const fix0 = cal.pipe.denseFix || 0;
     const lat = { ccl: (1 - a) * LAT_MEAS.ccl + a * LAT_TGT.ccl, op: (1 - a) * LAT_MEAS.op + a * LAT_TGT.op, denseFix: (1 - a) * fix0 + a * Math.min(fix0, 1) };
     const idxB = cfg.idxBf16 ? BF16 : BF8;
-    const ctxT = (T) => ({ sp, tp, P, T, idxB, imb: cfg.expertImb, varLayout: cfg.layout === 'var', bounded: cfg.boundedDense, msaLocal: cfg.msaLocal, ringSp, ringTp });
+    const ctxT = (T) => ({ sp, tp, P, T, idxB, imb: cfg.expertImb, varLayout: cfg.layout === 'var', bounded: cfg.boundedDense, msaLocal: cfg.msaLocal, ringSp, ringTp, prefetch: !!cfg.prefetchKV });
     const pm = cal.pipe;
     // the 1/T term was fitted on chunks of 2048 and 5120 tokens; clamp so small chunks do not extrapolate it
     const moeMult = (T) => (1 - a) * (pm.moeMult[0] + pm.moeMult[1] * 5120 / Math.max(T, 2048)) + a * 1;
@@ -985,7 +1005,11 @@
     function schedPump(rep, t) { if (rep.pumpAt >= 0 && rep.pumpAt <= t + 1e-12 && rep.pumpAt >= now) return; rep.pumpAt = t; ev.push(t, { e: EV_PUMP, rep }); }
     function runChunk(rep, ch) {
       const { segs, T } = ch;
-      const cs = segs.map((s) => ({ n: s.npad, na: s.n, k: s.k, cap: s.q.laneCap || plan.laneCap }));
+      let cs = segs.map((s) => ({ n: s.npad, na: s.n, k: s.k, cap: s.q.laneCap || plan.laneCap }));
+      if (!cfg.kvDedup && cfg.layout === 'fixed' && cs.some((s) => s.n > cfg.chunk)) { // one attention call per C-unit
+        const C = cfg.chunk;
+        cs = cs.flatMap((s) => Array.from({ length: s.n / C }, (_, u) => ({ n: C, na: Math.max(0, Math.min(C, s.na - u * C)), k: s.k + u * C, cap: s.cap })));
+      }
       chunkStageMs(plan, T, cs, scratch);
       // pool copy-in (first segment of a request) / copy-out (last) per stage, DRAM bound (read + write at 50%)
       const copies = rep.pool && cfg.cache === 'pool' && plan.poolTok !== Infinity;

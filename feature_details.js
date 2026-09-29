@@ -78,7 +78,7 @@ module.exports = {
       'MSA cache read and ring attention without chunk-aligned starts.',
       'MoE buffers sized for the maximum budget; compile/trace buckets for variable token counts.',
     ],
-    notes: 'Includes unaligned resume. Most of its value is realised together with batching. A small fixed chunk plus batching gets nearly all of it: fixed chunk 1024 with a 16k budget is within 0.2-2.4% of variable layout + fused ("ragged") attention in every scenario (tools/layout_ab.js). Chunk 1024 is extrapolated (calibrated at 2048 and 5120).',
+    notes: 'Includes unaligned resume. Most of its value is realised together with batching. A small fixed chunk plus batching gets nearly all of it, as long as a request\'s chunk-units in one batch form one attention call (its prefix is gathered once). Fixed chunk 128-256 with a 16k budget matches variable layout + fused ("ragged") attention within 1% in every scenario; chunk 1024 is 0.2-2.4% behind (tools/layout_ab.js). Chunks below 2048 are extrapolated (calibrated at 2048 and 5120).',
   },
   unaligned: {
     what: 'Resume a conversation at any 32-token boundary instead of rounding the cached prefix down to a chunk multiple. PR #57636, in review.',

@@ -226,11 +226,22 @@ Takeaways:
 5. **index_k stored once: ×1.06–1.16;** bf8 index_k adds another ×1.05–1.11.
 6. **Variable chunk / a2a KV write is worth 2–18%.** The top of that range comes when it is added before batching at 4 gx. The a2a KV write before the cache write is costed on every layer.
    * **A small fixed chunk plus batching gets nearly all of it** (`tools/layout_ab.js`, `results/layout_ab.json`, same stack and topology as the best grid config).
-     * The best fixed combination is chunk 1024 with a 16k budget in every scenario; chunk 2048 with 16k is 1–3% behind.
-     * Variable layout + fused attention adds only 0.2–2.4% on top: 44.2k → 45.3k at 4 gx today, 100.0k → 101.5k at 8 gx today, 161.7k → 162.8k at 8 gx roofline.
+     * The budget is always 16k. The best chunk is 128–256 (45.2k / 81.7k / 100.6k / 162.5k), which matches variable layout + fused attention within 1%.
+     * Chunk 1024 is 0.2–2.4% behind that, and chunk 2048 is 1–3% behind 1024.
      * Batching itself is worth ×1.15–1.24 over the best unbatched fixed chunk.
      * Fixed layout here means each request takes whole C-token units, padded to C (8% padding at C=1024).
      * Chunk 1024 is extrapolated: the model was calibrated at 2048 and 5120.
+   * **Batch size and compute:** per-token MoE cost at [4,2] (today's kernels) falls 12% from 4k to 8k, 6% from 8k to 16k and 3% from 16k to 32k. The expert matmuls cross from weight-bound to compute-bound at about 8k tokens per chunk. Goodput is 1–2.4% higher at 16k than at 8k; 4k is 6–10% worse; 32k is worse with today's kernels, because the longer period pushes p90 TTFT over the SLO.
+   * **Smaller chunks (down to 32·SP = 128)** only cut padding once a request's chunk-units form one attention call. C=128 matches the variable layout and is 1–2% better than C=1024.
+   * **One prefix gather per request per chunk (`kvDedup`) is essential for small chunks.** With one attention call and prefix gather per chunk-unit instead:
+     * small chunks collapse, e.g. C=128 at 16k gives 2.2k instead of 100.5k at 8 gx today;
+     * the best choice becomes C=2048, which is 2–14% below the de-duplicated best (8 gx today: 87.0k vs 100.6k).
+     * Example: a cold 16k-token segment at 140k context pays 2.7 ms of gather per MoE layer as one call, but 41 ms as 16 × 1024 units.
+   * **Prefetching the KV-prefix gathers (`prefetchKV`) is worth only 0.2–1.3%.**
+     * In a synthetic 16k batch of 8 requests at 140k context it cuts the MoE layer 69 → 48 ms.
+     * On AgentX at the goodput point, batches average 1.8–3 requests, so the gathers are small.
+     * At 8 gx the bottleneck is the three single-dense-layer stages (93–95% utilisation vs 86% for MoE stages). Their full ring-joint attention is compute-bound, so prefetch barely helps them.
+     * The next lever there is dense attention itself: ring-joint compute runs at 33% efficiency, or the dense layers could get more chips.
    * Variable layout + fused attention is the model's version of **ragged (varlen) attention**: packed segments padded only to 32·SP, one attention launch per chunk, and each segment attends only to its own context. It assumes today's per-op efficiencies, not a faster kernel.
 7. **Topology** (best of the grid per topology; seeds move results by ±3%):
    * [4,2] is best or tied everywhere; it needs KV heads sharded 2 per chip.

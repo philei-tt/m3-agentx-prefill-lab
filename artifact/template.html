@@ -188,11 +188,14 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
   <fieldset>
     <legend>Chunking &amp; batching</legend>
     <div class="row"><label for="layout">KV layout</label><select id="layout"><option value="fixed">fixed chunk (block-cyclic)</option><option value="var">variable chunk (a2a KV write)</option></select></div>
-    <div class="row"><label for="chunk">Chunk size</label><select id="chunk"><option>1024</option><option>2048</option><option>4096</option><option>5120</option><option>8192</option></select></div>
+    <div class="row"><label for="chunk">Chunk size</label><select id="chunk"><option>128</option><option>256</option><option>512</option><option>1024</option><option>2048</option><option>4096</option><option>5120</option><option>8192</option></select></div>
     <div class="hint" id="chunkHint" hidden>Not used: with batching on a variable layout, the token budget below is the chunk size.</div>
     <div class="row check"><input id="batch" type="checkbox"><label for="batch">Batch several requests per chunk</label></div>
     <div class="row"><label for="budget">Token budget</label><select id="budget"><option>4096</option><option>8192</option><option>16384</option><option>32768</option></select></div>
     <div class="row"><label for="attn">Attention</label><select id="attn"><option value="seq">sequential per request</option><option value="fused">fused multi-user</option></select></div>
+    <div class="row check"><input id="kvDedup" type="checkbox"><label for="kvDedup">One attention call per request per chunk (prefix gathered once)</label></div>
+    <div class="hint">Off: with a fixed layout, each chunk-unit of a request makes its own call and re-gathers the cached prefix.</div>
+    <div class="row check"><input id="prefetchKV" type="checkbox"><label for="prefetchKV">Prefetch KV-prefix gathers (overlap with compute)</label></div>
     <div class="row"><label for="policy">Queue order</label><select id="policy"><option value="fcfs">FCFS</option><option value="srpt">shortest first (30 s aging)</option></select></div>
   </fieldset>
   <fieldset>
@@ -491,7 +494,19 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li><b>Fused attention</b> runs once per chunk.</li>
           <li>Both include a penalty for short segments that leave some of the 110 cores idle.</li>
         </ul>
-        With fixed layout, batching packs whole chunks.</li>
+        With fixed layout, batching packs whole chunks: a request takes a whole number of chunk-units.</li>
+      <li><b>One attention call per request per chunk</b> ("prefix gathered once", on by default). A request that takes several chunk-units of a batched chunk (a cold prefill) makes one attention call over all of them, so its cached prefix is gathered once. Off, each unit is its own call and re-gathers the prefix.
+        <ul>
+          <li>With it on, smaller chunks only cut padding: chunk 128 (32·SP) matches the variable layout, and is 1–2% better than 1024.</li>
+          <li>With it off, small chunks collapse. Chunk 2048 becomes the best, and it is 2–14% below the de-duplicated best.</li>
+        </ul>
+      </li>
+      <li><b>Prefetch of KV-prefix gathers</b> (off by default). The cached-prefix gather does not depend on the current chunk, so it can overlap the layer's non-collective compute: projections, experts, and the other requests' attention. Only the part beyond that window stays exposed.
+        <ul>
+          <li>It is worth 0.2–1.3% on AgentX. At 8 galaxies the bottleneck is the single-dense-layer stages, where compute already covers most of the gather.</li>
+          <li>Batches average only 2–3 requests per chunk, so the gathers are small next to the layer.</li>
+        </ul>
+      </li>
       <li><b>Queue order.</b> First-come-first-served, or shortest-first with 30 s aging.</li>
       <li><b>Memory per stage.</b> Weights (bf4 experts, bf8 attention, bf16 shared expert and dense MLP; embedding on the first stage, LM head on the last) + a reserve per chip (default 3 GB) + activation buffers for the largest chunk. The remainder is KV. A replica's KV capacity is the minimum over its stages, because every token needs KV in every layer.</li>
     </ul>
@@ -648,7 +663,7 @@ function mkWorker() {
 }
 
 // ---------------------------------------------------------------- form <-> cfg
-const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'attn', 'policy',
+const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'attn', 'kvDedup', 'prefetchKV', 'policy',
   'cache', 'laneScope', 'copyMode', 'lanes', 'laneArena', 'arenaTokens', 'unaligned', 'hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'duration', 'seed'];
 const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'lanes', 'arenaTokens', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'reserveGB', 'decodeTps', 'duration', 'seed']);
 function setForm(cfg) {
