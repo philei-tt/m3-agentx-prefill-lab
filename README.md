@@ -220,7 +220,12 @@ Takeaways:
    * Host DRAM size matters much more than PCIe bandwidth: 0.5 → 2 TB/galaxy moves 4-gx goodput 36.8k → 54.5k (today's kernels) and 68.3k → 104k (roofline kernels). Dropping PCIe from 64 to 16 GB/s costs at most 13%.
    * The lane table must be per stage: a global lane table (today's slot_id) drops the best configs 3–4× with today's kernels (4 gx 45.3k → 13.8k).
 2. **Async stage handoff: ×1.12–1.62,** growing with pipeline depth and kernel speed. The measured blocking send is 6–23 ms per chunk per stage.
-3. **Batching: ×1.14–1.33.** Sequential per-request attention is as good as fused, so the proposed plan (batch the MoE, attention per request) is the right one, and fused attention is not worth building. Best budget: 16k.
+3. **Batching: ×1.14–1.33.** Batches hold few requests at the goodput point.
+   * On today's 4-gx config + pool + host tier they average 1.27 requests; the average chunk is 7.5k of the 16k budget.
+   * Most of the gain comes from one request taking several chunk-units at once (big cold prefills in fewer, larger chunks), not from mixing users.
+   * The budget is a cap: a chunk is costed at the tokens it holds (a multiple of the chunk size), never padded to the budget. A runner that compiles only the budget-sized shape would pay for the full 16k every time. Bucketed traces (multiples of the chunk size) avoid that.
+   * With pool but no host tier, batching adds only 5% (13.1k → 13.8k): the goodput point is set by cache misses (39% of prefilled tokens are re-prefill), not compute.
+   * Paging vs pool: +13% without the host tier (14.8k vs 13.1k; paging frees the 4M lane tokens), identical with it (21.6k vs 21.5k). Pool/paging + host tier already reach the ∞-cache goodput of this compute config (21.6k), so further gains must come from compute and TTFT. Sequential per-request attention is as good as fused, so the proposed plan (batch the MoE, attention per request) is the right one, and fused attention is not worth building. Best budget: 16k.
 4. **Bounded dense gather is already done** (tt-metal #47539). Without it (the old whole-lane gather), the best 4-gx config with 4 fixed 1M lanes would drop 45.3k → 31.1k. Configs with arena lanes are unaffected.
    * The M3 comments that say the dense layers gather the whole cache shard (`prefill.py`, `tt_prefill_runtime.reconfigure_capacity`, README `PREFILL_MAX_SEQ_LEN`) are stale. Only the gather buffer is capacity-sized, which costs memory, not time.
 5. **index_k stored once: ×1.06–1.16;** bf8 index_k adds another ×1.05–1.11.

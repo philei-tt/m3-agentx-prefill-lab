@@ -832,6 +832,7 @@ function render() {
     ['TTFT at goodput point', a ? `${fmtS(a.ttftP50)}<small> / ${fmtS(a.ttftP90)} s</small>` : '–', 'p50 / p90', a ? `C = ${a.conc} lanes` : ''],
     ['Hit rate there', a ? pct(a.hitRate, 1) : '–', 'prefix-cache hit, token-weighted', a ? `∞-cache ${pct(a.infHitRate, 1)}` : ''],
     ['Peak useful', R && R.peak ? fmtK(R.peak.usefulTps) : '–', 'any TTFT', R && R.peak ? `C = ${R.peak.conc}, p90 ${fmtS(R.peak.ttftP90)} s` : ''],
+    ['Requests per chunk', a ? a.avgSegsPerChunk.toFixed(2) : '–', 'average, at the goodput point', a ? `chunk ${Math.round(a.avgChunkTok)} tokens, stage busy ${pct(a.maxUtil)}` : ''],
   ];
   $('tiles').innerHTML = tiles.map(([k, v, s, d]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="k">${s}</div><div class="d">${d}</div></div>`).join('');
   // breakdown
@@ -848,8 +849,8 @@ function render() {
   } else { $('bdBar').innerHTML = ''; $('bdLegend').innerHTML = ''; $('bdNote').textContent = ''; }
   // points table
   const rows = [];
-  for (const [nm, arr] of [['config', run ? run.real : []], ['∞ cache', run ? run.inf : []]]) for (const p of arr) rows.push(`<tr><td>${nm}</td><td class="n">${p.conc}</td><td class="n">${fmtK(p.usefulTps)}</td><td class="n">${fmtK(p.processedTps)}</td><td class="n">${fmtS(p.ttftP50)}</td><td class="n">${fmtS(p.ttftP90)}</td><td class="n">${pct(p.hitRate, 1)}</td><td class="n">${pct(p.reprefillFrac)}</td><td class="n">${pct(p.padFrac)}</td><td class="n">${pct(p.maxUtil)}</td><td class="n">${Math.round(p.avgChunkTok)}</td></tr>`);
-  $('ptsTable').innerHTML = rows.length ? `<table><thead><tr><th>run</th><th class="n">C</th><th class="n">useful</th><th class="n">processed</th><th class="n">TTFT p50</th><th class="n">p90</th><th class="n">hit</th><th class="n">re-prefill</th><th class="n">pad</th><th class="n">util</th><th class="n">chunk</th></tr></thead><tbody>${rows.join('')}</tbody></table>` : '<p class="hint">No run yet.</p>';
+  for (const [nm, arr] of [['config', run ? run.real : []], ['∞ cache', run ? run.inf : []]]) for (const p of arr) rows.push(`<tr><td>${nm}</td><td class="n">${p.conc}</td><td class="n">${fmtK(p.usefulTps)}</td><td class="n">${fmtK(p.processedTps)}</td><td class="n">${fmtS(p.ttftP50)}</td><td class="n">${fmtS(p.ttftP90)}</td><td class="n">${pct(p.hitRate, 1)}</td><td class="n">${pct(p.reprefillFrac)}</td><td class="n">${pct(p.padFrac)}</td><td class="n">${pct(p.maxUtil)}</td><td class="n">${Math.round(p.avgChunkTok)}</td><td class="n">${p.avgSegsPerChunk != null ? p.avgSegsPerChunk.toFixed(2) : '–'}</td></tr>`);
+  $('ptsTable').innerHTML = rows.length ? `<table><thead><tr><th>run</th><th class="n">C</th><th class="n">useful</th><th class="n">processed</th><th class="n">TTFT p50</th><th class="n">p90</th><th class="n">hit</th><th class="n">re-prefill</th><th class="n">pad</th><th class="n">util</th><th class="n">chunk</th><th class="n">req/chunk</th></tr></thead><tbody>${rows.join('')}</tbody></table>` : '<p class="hint">No run yet.</p>';
 }
 function startRun() {
   if (!trafficBuf) decodeTraffic();
