@@ -225,6 +225,13 @@ Takeaways:
    * The M3 comments that say the dense layers gather the whole cache shard (`prefill.py`, `tt_prefill_runtime.reconfigure_capacity`, README `PREFILL_MAX_SEQ_LEN`) are stale. Only the gather buffer is capacity-sized, which costs memory, not time.
 5. **index_k stored once: ×1.06–1.16;** bf8 index_k adds another ×1.05–1.11.
 6. **Variable chunk / a2a KV write is worth 2–18%.** The top of that range comes when it is added before batching at 4 gx. The a2a KV write before the cache write is costed on every layer.
+   * **A small fixed chunk plus batching gets nearly all of it** (`tools/layout_ab.js`, `results/layout_ab.json`, same stack and topology as the best grid config).
+     * The best fixed combination is chunk 1024 with a 16k budget in every scenario; chunk 2048 with 16k is 1–3% behind.
+     * Variable layout + fused attention adds only 0.2–2.4% on top: 44.2k → 45.3k at 4 gx today, 100.0k → 101.5k at 8 gx today, 161.7k → 162.8k at 8 gx roofline.
+     * Batching itself is worth ×1.15–1.24 over the best unbatched fixed chunk.
+     * Fixed layout here means each request takes whole C-token units, padded to C (8% padding at C=1024).
+     * Chunk 1024 is extrapolated: the model was calibrated at 2048 and 5120.
+   * Variable layout + fused attention is the model's version of **ragged (varlen) attention**: packed segments padded only to 32·SP, one attention launch per chunk, and each segment attends only to its own context. It assumes today's per-op efficiencies, not a faster kernel.
 7. **Topology** (best of the grid per topology; seeds move results by ±3%):
    * [4,2] is best or tied everywhere; it needs KV heads sharded 2 per chip.
    * **[4,4] torus stages:** with ring collectives they tie with [4,2] at 4 gx today (44.5k vs 45.3k) and at 8 gx with roofline kernels (162.8k vs 162.0k), but lose at 8 gx today (87.1k vs 101.5k).

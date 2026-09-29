@@ -182,7 +182,6 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <legend>Kernels</legend>
     <div class="row"><label for="opEff">Op efficiency <span class="mono" id="opEffV"></span></label><input id="opEff" type="range" min="0" max="1" step="0.1"></div>
     <div class="hint">0 = today's measured kernels, 1 = roofline targets (70% matmul, 80% DRAM/link, overlapped expert weight reads).</div>
-    <div class="row check"><input id="boundedDense" type="checkbox"><label for="boundedDense">Dense gather bounded to kv_len (today; off = pre-#47539 whole-lane gather)</label></div>
     <div class="row check"><input id="asyncHandoff" type="checkbox"><label for="asyncHandoff">Async stage handoff</label></div>
     <div class="row check"><input id="msaLocal" type="checkbox"><label for="msaLocal">MSA SP-local indexer</label></div>
   </fieldset>
@@ -649,7 +648,7 @@ function mkWorker() {
 }
 
 // ---------------------------------------------------------------- form <-> cfg
-const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'boundedDense', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'attn', 'policy',
+const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'attn', 'policy',
   'cache', 'laneScope', 'copyMode', 'lanes', 'laneArena', 'arenaTokens', 'unaligned', 'hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'duration', 'seed'];
 const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'lanes', 'arenaTokens', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'reserveGB', 'decodeTps', 'duration', 'seed']);
 function setForm(cfg) {
