@@ -48,7 +48,7 @@ tokens into useful, re-prefill and padding.
 | file | what |
 |---|---|
 | `sim_core.js` | **The whole model** (no dependencies): per-op roofline + calibration, stage plan and memory, KV residency (static slots / paged pool with lanes / host tier / paging / ∞), and the closed-loop replay. The artifact inlines it and node requires it. |
-| `prep_traffic.py` | Corpus → `traffic.bin` + `traffic.json`: DAG, end-to-start delays, sub-agent spawn/join, prefix-tree pieces. Takes 14 s on 32 cores. |
+| `prep_traffic.py` | Corpus → `traffic.bin` + `traffic.json`: agent-chain split, DAG, end-to-start delays, spawn/join, replay barriers, prefix-tree pieces. Takes 23 s on 4 cores. |
 | `collect_calib.py` | Measured data → `calib_data.json` (committed): zone profiles, per-rank per-chunk-position medians of runs A/B/C, matrix tables. |
 | `validate.js` | Calibration report: fitted efficiencies, per-rank stage times, and all 105 matrix cells, model vs measured. |
 | `run.js` | One configuration or a concurrency sweep from the CLI (`--preset`, `--set key=value`, `--conc`). |
@@ -65,7 +65,7 @@ tokens into useful, re-prefill and padding.
 | `tools/` | Helpers: `feature_table.js` (README tables), `study_detail.js`, `grid_by_topology.js`, `dump_cells.js` (per-cell stage medians), `traffic_stats.js`, `smoke.sh` (every feature path), `investigate.sh`. |
 
 Data:
-* `data/traffic.bin` + `traffic.json`: the preprocessed corpus, 4 MB, derived from the Apache-2.0 HF dataset.
+* `data/traffic.bin` + `traffic.json`: the preprocessed corpus, 5 MB, derived from the Apache-2.0 HF dataset.
 * `data/zones/`: `parse_zone_perf.py` outputs of the per-op profiles, the inputs to `collect_calib.py`.
 * `results/study.json`: the full study, which the page's Roadmap tab and presets are built from.
 
@@ -91,14 +91,15 @@ One simulation of 1800 s of traffic at C=1024 takes 0.3–0.5 s. The full study 
 
 ## Traffic replay (AIPerf `inferencex-agentx-mvp` semantics)
 
-The replay rules below were read from the AIPerf source (`ai-dynamo/aiperf`, `timing/strategies/agentic_replay.py`, `dataset/loader/weka_trace.py`).
+The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ `c78644090ff`: `timing/strategies/agentic_replay.py`, `timing/trajectory_source.py`, `timing/branch_orchestrator.py`, `timing/replay_dependencies.py`, `dataset/loader/weka_trace.py`, `dataset/loader/weka_agent_chains.py`). `prep_traffic.py` reproduces AIPerf's streams, spawn/join/offsets, replay scopes and barrier predecessors exactly on all 393 traces (checked against AIPerf's own loader code), and the sim's t* snapshots match `TrajectorySource._snapshot_for`.
 
 * **Corpus.** `semianalysisai/cc-traces-weka-062126`, full variant: 393 sessions, 98,827 requests, 21.6B input tokens, contexts up to 990k. The ∞-cache hit rate is 98.3%.
-* **Lanes.** `concurrency` = N lanes, each replaying one tree (the main chain plus its sub-agents).
-  * **Start.** t* is uniform over the session (AgentX uses a 0–1 ratio). Every stream active at t* gets a primer: its last turn before t*, as a real prefill with `max_tokens=1`. Profiling starts when all primers are done.
+* **Lanes.** `concurrency` = N lanes, each replaying one tree: the root chain plus its child streams. Children are the sub-agents, each split into its own agent chains by hash-id LCP detection, and the flattened agent chains that the same detection splits off the top-level requests (`WEKA_SPLIT_FLATTENED_AGENTS`, 49% of top-level requests). 9,843 streams in all.
+  * **Start.** t* is uniform between the first and the last recorded request start (AgentX uses a 0–1 ratio). Every stream live at t* resumes at its first request at/after t* and gets a primer: its last request before t*, as a real prefill with `max_tokens=1`. A branch that starts after t* is spawned later by its spawn turn. When t* is after the last root start the lane is rootless (its children drain, then it recycles). Profiling starts when all primers are done.
   * **Recycle.** A drained tree recycles to the next session, sequentially, from turn 0 with a new cache-bust. Trees share nothing.
-* **Delays.** Each next request waits `max(0, t_k − t_{k−1} − api_time_{k−1})` after the live end of the previous one. The delay is **not capped**. Main-agent gaps have a median of 4.9 s, a mean of 395 s and a p99 of 54 min. The only cap is AIPerf's 10 s system-idle cap. `gapCap` exists as a knob, default off.
-* **Sub-agents.** They spawn when the spawning turn returns, or at issue on the overlap path. The join turn fires immediately once the last child ends.
+* **Delays.** Each next request waits `max(0, t_k − t_{k−1} − api_time_{k−1})` after the live end of the previous one. The delay is **not capped**. Root-chain gaps have a median of 4.5 s, a mean of 285 s and a p99 of 51 min. The only cap is AIPerf's 10 s system-idle cap. `gapCap` exists as a knob, default off.
+* **Children.** Sub-agents (and, separately, flat chains) that share a spawn turn and a join turn form one branch. The branch starts at its earliest marker; it overlaps its spawn turn (dispatch at the spawn turn's issue instead of its return) when that start is before the spawn turn's recorded end. Each child's first request is offset from the spawn turn's issue (overlap) or from the branch start. The join turn fires immediately once the last child ends.
+* **Barriers.** AIPerf's cross-stream replay barriers: within a replay scope (the root with its flat chains, or one sub-agent with its chains) a request waits, on every other stream, for the latest request that had completed at its recorded start. 62% of requests have such predecessors (76k edges, `pred_head`/`pred_list` in `traffic.bin`, optional). Requests before t* count as completed; primers are not gated.
 * **Decode.** A request ends at prefill done + `out / decodeTps` (default 180 tok/s).
 * **Window.** The profiling window is 1800 s.
 

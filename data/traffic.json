@@ -70,107 +70,134 @@
    "name": "st_kind",
    "dtype": "u1",
    "offset": 3360152,
-   "n": 2090
+   "n": 9843
+  },
+  {
+   "name": "st_role",
+   "dtype": "u1",
+   "offset": 3370000,
+   "n": 9843
   },
   {
    "name": "st_spawn",
    "dtype": "i4",
-   "offset": 3362248,
-   "n": 2090
+   "offset": 3379848,
+   "n": 9843
   },
   {
    "name": "st_join",
    "dtype": "i4",
-   "offset": 3370608,
-   "n": 2090
+   "offset": 3419224,
+   "n": 9843
   },
   {
    "name": "st_off",
    "dtype": "f4",
-   "offset": 3378968,
-   "n": 2090
+   "offset": 3458600,
+   "n": 9843
   },
   {
    "name": "st_ovl",
    "dtype": "u1",
-   "offset": 3387328,
-   "n": 2090
+   "offset": 3497976,
+   "n": 9843
   },
   {
    "name": "st_t0",
    "dtype": "f4",
-   "offset": 3389424,
-   "n": 2090
+   "offset": 3507824,
+   "n": 9843
   },
   {
    "name": "st_t1",
    "dtype": "f4",
-   "offset": 3397784,
-   "n": 2090
+   "offset": 3547200,
+   "n": 9843
   },
   {
    "name": "st_first",
    "dtype": "u4",
-   "offset": 3406144,
-   "n": 2090
+   "offset": 3586576,
+   "n": 9843
   },
   {
    "name": "st_cnt",
    "dtype": "u2",
-   "offset": 3414504,
-   "n": 2090
+   "offset": 3625952,
+   "n": 9843
   },
   {
    "name": "pc_parent",
    "dtype": "i4",
-   "offset": 3418688,
+   "offset": 3645640,
    "n": 101839
   },
   {
    "name": "pc_len",
    "dtype": "u2",
-   "offset": 3826048,
+   "offset": 4053000,
    "n": 101839
   },
   {
    "name": "tr_req0",
    "dtype": "u4",
-   "offset": 4029728,
+   "offset": 4256680,
    "n": 393
   },
   {
    "name": "tr_st0",
    "dtype": "u4",
-   "offset": 4031304,
+   "offset": 4258256,
    "n": 393
   },
   {
    "name": "tr_pc0",
    "dtype": "u4",
-   "offset": 4032880,
+   "offset": 4259832,
    "n": 393
   },
   {
    "name": "tr_dur",
    "dtype": "f4",
-   "offset": 4034456,
+   "offset": 4261408,
    "n": 393
+  },
+  {
+   "name": "pred_head",
+   "dtype": "u4",
+   "offset": 4262984,
+   "n": 98828
+  },
+  {
+   "name": "pred_list",
+   "dtype": "u4",
+   "offset": 4658296,
+   "n": 76423
   }
  ],
  "stats": {
   "traces": 393,
   "requests": 98827,
-  "streams": 2090,
+  "streams": 9843,
+  "streams_by_role": {
+   "root": 393,
+   "subagent": 1697,
+   "subagent_sibling": 6331,
+   "flat_chain": 1422
+  },
   "pieces": 101839,
   "input_tokens": 21635381376,
   "new_tokens_inf": 365899840,
   "inf_hit_rate": 0.983087895071455,
-  "prev_stream_hit_rate": 0.9572124604640943,
+  "prev_stream_hit_rate": 0.972095888419619,
   "pathlen_mean": 68.20486304350025,
   "pathlen_p99": 403.0,
   "pathlen_max": 790,
   "pathlen_sum": 6740482,
-  "bytes": 4036028
+  "barrier_edges": 76423,
+  "barrier_edges_dag_implied": 18307,
+  "barrier_gated_requests": 61136,
+  "bytes": 4963988
  },
  "source": "/data/philei/agentx_data/062126/traces.jsonl",
  "block": 64

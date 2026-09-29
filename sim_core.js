@@ -484,10 +484,12 @@
       trReqs[t] = (t + 1 < nT ? A.tr_req0[t + 1] : nR) - A.tr_req0[t];
       trStreams[t] = (t + 1 < nT ? A.tr_st0[t + 1] : nS) - A.tr_st0[t];
     }
-    // spawn lists: main request -> subagent streams it spawns
+    // spawn lists: main request -> child streams (subagents, their sibling chains, flat chains) it spawns
     const spawnHead = new Int32Array(nR).fill(-1), spawnNext = new Int32Array(nS).fill(-1);
-    for (let s = nS - 1; s >= 0; s--) if (A.st_kind[s] === 1 && A.st_spawn[s] >= 0) { spawnNext[s] = spawnHead[A.st_spawn[s]]; spawnHead[A.st_spawn[s]] = s; }
-    return Object.assign(A, { nT, nR, nS, nP, pdepth, trPieces, trReqs, trStreams, spawnHead, spawnNext, stats: header.stats });
+    for (let s = nS - 1; s >= 0; s--) if (A.st_kind[s] !== 0 && A.st_spawn[s] >= 0) { spawnNext[s] = spawnHead[A.st_spawn[s]]; spawnHead[A.st_spawn[s]] = s; }
+    // cross-stream replay barriers (optional CSR arrays; older traffic.bin files have none)
+    const hasPred = !!(A.pred_head && A.pred_list && A.pred_head.length === nR + 1);
+    return Object.assign(A, { nT, nR, nS, nP, pdepth, trPieces, trReqs, trStreams, spawnHead, spawnNext, hasPred, stats: header.stats });
   }
 
   // ------------------------------------------------------------------------------------------------------
@@ -671,50 +673,82 @@
     }
     // stats
     const st = { done: 0, useful: 0, newTok: 0, processed: 0, hitTok: 0, inTok: 0, infHitTok: 0, hostTok: 0, reprefill: 0, alignLoss: 0,
-      ttft: [], chunks: 0, segs: 0, laneWait: 0, reqs: 0, primers: 0, warmupS: 0, idleWarps: 0, primerTok: 0 };
+      ttft: [], chunks: 0, segs: 0, laneWait: 0, reqs: 0, primers: 0, warmupS: 0, idleWarps: 0, primerTok: 0,
+      gated: 0, gateWait: 0, legacyStarts: 0, skippedTraces: 0 };
     let nextTrace = 0; const nsKey = { v: 0 };
     const scratch = new Float64Array(S);
 
     // ---------- trees (one per concurrency lane)
+    // A tree replays one trace: the root chain plus every child stream it spawns. Per tree:
+    //   ended[local req]  requests that have ENDed (or that precede t* and so count as completed history)
+    //   waiters           request -> barrier-gated requests waiting for it to END
+    //   pend / waiting    join counters and root turns waiting on them
     function newTree(lane, trace, tstar, now) {
       const rep = reps.reduce((a, b) => (b.trees < a.trees ? b : a), reps[0]);
       rep.trees++;
-      const tree = { lane, trace, rep, ns: rep.pool ? rep.pool.allocNs(trace) : 0, key: nsKey.v++, live: 0, waiting: new Map(), pend: new Map(), streamsLeft: 0 };
+      const tree = { lane, trace, rep, ns: rep.pool ? rep.pool.allocNs(trace) : 0, key: nsKey.v++, live: 0, waiting: new Map(), pend: new Map(),
+        r0: TR.tr_req0[trace], ended: TR.hasPred ? new Uint8Array(TR.trReqs[trace]) : null, waiters: new Map() };
       const s0 = TR.tr_st0[trace], ns = TR.trStreams[trace];
       tree.s0 = s0;
       const mainFirst = TR.st_first[s0], mainCnt = TR.st_cnt[s0];
       if (tstar === null) { // recycled: start at turn 0 with fresh join counters
-        tree.streamsLeft = ns;
         initPend(tree);
         dispatch(tree, mainFirst, now);
         return tree;
       }
-      // initial tree: split every stream at t*
-      let cur = mainFirst; while (cur < mainFirst + mainCnt && TR.req_t[cur] < tstar) cur++;
-      const mainIdx = cur - mainFirst;
-      const prof = []; // [req, offset]
-      if (cur - 1 >= mainFirst) primer(tree, cur - 1);
-      tree.streamsLeft = 1;
-      const mainNext = cur < mainFirst + mainCnt ? cur : -1;
+      // initial tree: AIPerf TrajectorySource._snapshot_for / _replay_resume_boundaries at t* (ai-dynamo/aiperf @ c78644090ff,
+      // timing/trajectory_source.py). A branch whose start is after t* is spawned later by its spawn turn unless that turn
+      // started before t*; every stream resumes at its first request at/after t* (its previous one is the primer); every
+      // request before t* is completed history for the barriers; t* after the last root start leaves a rootless lane.
+      const nextAt = (first, cnt) => { for (let c = first; c < first + cnt; c++) if (TR.req_t[c] >= tstar) return c; return -1; };
+      const seed = (from, to) => { if (tree.ended) for (let r = from; r < to; r++) tree.ended[r - tree.r0] = 1; };
+      const rootNext = nextAt(mainFirst, mainCnt), rootIdx = rootNext >= 0 ? rootNext - mainFirst : -1;
+      const prof = [], primers = [], live = new Set(); // prof: [req, offset, isRoot]
       for (let s = s0 + 1; s < s0 + ns; s++) {
-        const sp = TR.st_spawn[s] - mainFirst, first = TR.st_first[s], cnt = TR.st_cnt[s];
-        if (sp >= mainIdx) { // spawned later by a main turn
-          tree.streamsLeft++;
-          const j = TR.st_join[s]; if (j >= 0) tree.pend.set(j, (tree.pend.get(j) || 0) + 1);
-          continue;
+        const sp = TR.st_spawn[s] - mainFirst, first = TR.st_first[s], cnt = TR.st_cnt[s], j = TR.st_join[s];
+        if (tstar < TR.st_t0[s]) { // branch not started at t*: spawned later unless its spawn turn already completed
+          const notCompleted = tstar < TR.req_t[mainFirst + sp] || (rootIdx >= 0 && rootIdx <= sp);
+          if (notCompleted) { if (j >= 0) tree.pend.set(j, (tree.pend.get(j) || 0) + 1); continue; }
         }
-        if (TR.st_t1[s] <= tstar) continue;                  // finished before t*
-        let c = first; while (c < first + cnt && TR.req_t[c] < tstar) c++;
-        if (c >= first + cnt) continue;                       // only an in-flight request at t*: skip
-        tree.streamsLeft++;
-        if (c - 1 >= first) primer(tree, c - 1);
-        prof.push([c, Math.max(0, TR.req_t[c] - tstar)]);
-        const j = TR.st_join[s]; if (j >= 0 && j >= cur) tree.pend.set(j, (tree.pend.get(j) || 0) + 1);
+        const c = nextAt(first, cnt);
+        if (c < 0) { seed(first, first + cnt); continue; } // no request at/after t*: completed history
+        seed(first, c);
+        if (c - 1 >= first) primers.push(c - 1);
+        prof.push([c, Math.max(0, TR.req_t[c] - tstar), false]);
+        if (j >= 0) { tree.pend.set(j, (tree.pend.get(j) || 0) + 1); live.add(j); }
       }
-      if (mainNext >= 0) prof.push([mainNext, Math.max(0, TR.req_t[mainNext] - tstar), true]);
-      else tree.streamsLeft--; // main already done
+      if (rootNext >= 0) {
+        seed(mainFirst, rootNext);
+        if (rootNext - 1 >= mainFirst) primers.push(rootNext - 1);
+        prof.push([rootNext, Math.max(0, TR.req_t[rootNext] - tstar), true]);
+      } else seed(mainFirst, mainFirst + mainCnt); // t* after the last root turn: no root state, no root primer
+      // AIPerf returns no snapshot when nothing is dispatchable (empty, or only a root gated on a join) and falls back
+      // to the legacy turn-index split of the root (below)
+      const dispatchable = prof.some(([r, , isRoot]) => !isRoot || !live.has(r));
+      if (!dispatchable) return legacyTree(tree, trace, mainFirst, mainCnt);
+      for (const r of primers) primer(tree, r);
       tree.prof = prof;
-      if (tree.streamsLeft === 0) tree.dead = true;
+      return tree;
+    }
+    // AIPerf _build_trajectory_for_lane fallback (timestamp-less split): warm root turn k, resume at k+1 at once.
+    // Unreachable with tr_dur = last recorded start (t* < that start, so some stream is always live at t*). AIPerf seeds
+    // only root turns 0..k as completed here; this treats every request that is not replayed as completed history.
+    function legacyTree(tree, trace, mainFirst, mainCnt) {
+      const n = mainCnt;
+      if (n <= 1) { st.skippedTraces++; tree.rep.trees--; return null; } // unspawnable: the sampler draws the next trace
+      st.legacyStarts++;
+      const kMin = Math.min(Math.floor(cfg.startMin * n), n - 2), kMax = Math.max(kMin, Math.min(Math.floor(cfg.startMax * n), n - 2));
+      const k = kMin + Math.floor(rnd() * (kMax - kMin + 1));
+      tree.pend = new Map(); tree.waiting = new Map();
+      if (tree.ended) { tree.ended.fill(1); for (let r = mainFirst + k + 1; r < mainFirst + mainCnt; r++) tree.ended[r - tree.r0] = 0; }
+      const s0 = tree.s0, ns = TR.trStreams[trace];
+      for (let s = s0 + 1; s < s0 + ns; s++) {
+        if (TR.st_spawn[s] - mainFirst <= k) continue; // spawned by an already-played turn: not replayed
+        const j = TR.st_join[s]; if (j >= 0) tree.pend.set(j, (tree.pend.get(j) || 0) + 1);
+        if (tree.ended) for (let r = TR.st_first[s]; r < TR.st_first[s] + TR.st_cnt[s]; r++) tree.ended[r - tree.r0] = 0;
+      }
+      primer(tree, mainFirst + k);
+      tree.prof = [[mainFirst + k + 1, 0, true]];
       return tree;
     }
     function primer(tree, r) {
@@ -724,13 +758,13 @@
     function mkReq(tree, r, isPrimer) {
       return { r, tree, primer: isPrimer, tReady: 0, tStart: -1, tDone: 0, hit: 0, host: 0, rem: 0, pos: 0, lane: -1, slot: -1, started: false, fetchedAt: 0 };
     }
-    function dispatch(tree, r, t, isJoinImmediate) {
+    function dispatch(tree, r, t) {
       const q = mkReq(tree, r, false); tree.live++; ev.push(t, { e: EV_READY, q });
     }
     function startProfiling(t) {
       t0 = t; tEnd = t + cfg.duration; warmDone = true; st.warmupS = t;
       for (const tr of trees) {
-        if (!tr.prof) continue;
+        if (!tr || !tr.prof) continue;
         for (const [r, off, isMain] of tr.prof) {
           if (isMain && (tr.pend.get(r) || 0) > 0) { tr.waiting.set(r, true); continue; }
           dispatch(tr, r, t + off);
@@ -745,7 +779,26 @@
       trees[tree.lane] = newTree(tree.lane, trace, null, t);
     }
     // ---------- request lifecycle
+    // AIPerf ReplayBarrierCoordinator (timing/replay_dependencies.py @ c78644090ff; edges from
+    // infer_cross_stream_predecessors per replay scope, see prep_traffic.py): a due request is retained until its
+    // recorded cross-stream predecessors in the same tree have ENDed (history before t* counts as ended); it is issued
+    // the moment the last one ends. Primers bypass it (AIPerf activates barriers after cache priming). Retained requests
+    // hold their tree (tree.live) but are not in flight (idle warp) until issued; TTFT counts from the issue.
     function onReady(q) {
+      const tree = q.tree, r = q.r;
+      if (!q.primer && tree.ended) {
+        let need = 0;
+        for (let i = TR.pred_head[r], e = TR.pred_head[r + 1]; i < e; i++) {
+          const p = TR.pred_list[i];
+          if (tree.ended[p - tree.r0]) continue;
+          need++;
+          const w = tree.waiters.get(p); if (w) w.push(q); else tree.waiters.set(p, [q]);
+        }
+        if (need > 0) { q.need = need; q.gatedAt = now; if (warmDone) st.gated++; return; }
+      }
+      issue(q);
+    }
+    function issue(q) {
       const tree = q.tree, rep = tree.rep, r = q.r;
       q.tReady = now; inflightReqs++;
       const blocks = TR.req_blocks[r];
@@ -955,6 +1008,14 @@
     function onEnd(q) {
       const tree = q.tree, r = q.r;
       inflightReqs--; tree.live--;
+      if (tree.ended) {
+        tree.ended[r - tree.r0] = 1;
+        const w = tree.waiters.get(r);
+        if (w) {
+          tree.waiters.delete(r);
+          for (const g of w) if (--g.need === 0) { if (warmDone) st.gateWait += now - g.gatedAt; issue(g); }
+        }
+      }
       if (!q.primer) {
         const s = TR.req_stream[r], first = TR.st_first[s], cnt = TR.st_cnt[s];
         if (s === tree.s0) {
@@ -962,11 +1023,10 @@
           if (r + 1 < first + cnt) {
             if ((tree.pend.get(r + 1) || 0) > 0) tree.waiting.set(r + 1, true);
             else dispatch(tree, r + 1, now + Math.min(cfg.gapCap, TR.req_delay[r + 1]));
-          } else tree.streamsLeft--;
+          }
         } else {
           if (r + 1 < first + cnt) dispatch(tree, r + 1, now + Math.min(cfg.gapCap, TR.req_delay[r + 1]));
           else {
-            tree.streamsLeft--;
             const j = TR.st_join[s];
             if (j >= 0) {
               const left = (tree.pend.get(j) || 0) - 1; tree.pend.set(j, left);
@@ -984,9 +1044,13 @@
     // ---------- start
     const trees = [];
     for (let l = 0; l < cfg.concurrency; l++) {
-      const trace = nextTrace++ % TR.nT;
-      const tstar = (cfg.startMin + (cfg.startMax - cfg.startMin) * rnd()) * TR.tr_dur[trace];
-      trees.push(newTree(l, trace, tstar, 0));
+      let tree = null;
+      for (let tries = 0; !tree && tries < TR.nT; tries++) { // unspawnable traces are skipped (AIPerf _build_trajectories)
+        const trace = nextTrace++ % TR.nT;
+        const tstar = (cfg.startMin + (cfg.startMax - cfg.startMin) * rnd()) * TR.tr_dur[trace];
+        tree = newTree(l, trace, tstar, 0);
+      }
+      trees.push(tree);
     }
     if (primersLeft === 0) startProfiling(0);
     // ---------- event loop
@@ -1024,6 +1088,8 @@
       avgChunkTok: st.chunks ? st.processed / st.chunks : 0, avgSegsPerChunk: st.chunks ? st.segs / st.chunks : 0,
       stageUtil: util, maxUtil: Math.max(...util), done: st.done, warmupS: st.warmupS, primers: st.primers, primerTok: st.primerTok,
       laneWaitMean: st.done ? st.laneWait / Math.max(1, st.done) : 0, hostTok: st.hostTok, idleWarps: st.idleWarps,
+      gated: st.gated, gateWaitMean: st.gated ? st.gateWait / st.gated : 0, legacyStarts: st.legacyStarts, skippedTraces: st.skippedTraces,
+      gatedAtEnd: trees.reduce((a, tr) => { const u = new Set(); if (tr) for (const w of tr.waiters.values()) for (const g of w) u.add(g); return a + u.size; }, 0),
       warmupTimeout: !!st.warmupTimeout, eventCap: !!st.eventCap, events: evCount, duration: D,
       slotEvictions: reps.reduce((a, r) => a + (r.slots ? r.slots.evictions : 0), 0),
     };
