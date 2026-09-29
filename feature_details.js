@@ -9,7 +9,8 @@ module.exports = {
     todo: [
       'Page allocator and page table per stage in device DRAM; prefix index from block hash to page on the host.',
       'A page-list gather/scatter op that copies many pages into or out of a lane in one launch (per-page host copies would be dispatch-bound).',
-      'A per-stage lane table: lanes are assigned per stage and only while that stage works on the request (today slot_id is global across stages).',
+      'A per-stage lane table: each stage allocates a lane only while it works on the request (today slot_id is global across stages). This is required once batching is on: global lanes cap the best 4-galaxy config near 25k instead of 45k useful tok/s, unless the arena grows to about 8M tokens.',
+      'Pool copies double-buffered: copy-in of the next batch and copy-out of the previous one overlap compute. The peak lane memory is about 2x the computing lanes, briefly; sequential copies (1x) cost about 1% on the best configs.',
       'Scheduler: LRU eviction, pinning of in-flight prefixes, copy-in of the next request while the current chunk computes, copy-out after the last chunk.',
       'KV migration to decode reads from lane or pool pages instead of a fixed slot.',
     ],

@@ -126,7 +126,14 @@ Each layer is decomposed into the ops the implementation runs.
    Two findings came out of the fit:
    * **Padded chunk tails are cheaper.** Routed MoE ops use *actual* tokens (the `actual_isl` trim), so a 640-token request in a 5120 chunk is 18% cheaper than a full chunk.
    * **Today's expert kernel behaves like weight read + compute,** not the max of the two.
-3. **Validation.** Replaying all 105 matrix cells gives |error| of 3.9% median, 8.6% p90 and 13.9% max (loaded new tok/s and idle TTFT). Run `validate.js` to see it.
+3. **Torus rings (`torus`).** A galaxy is two 4×4 tori. Every measurement used line (2D mesh) collectives, so the fitted efficiencies are line efficiencies. On an axis that runs as a ring, the link terms are scaled by textbook ratios:
+   * all-gather/reduce-scatter ×(N−1)/N;
+   * all-to-all (dispatch/combine, var-layout KV write) ×0.5;
+   * the ring-joint KV pass ×0.5;
+   * the collective latency floor ×0.5.
+
+   There are three modes. `'full'` (default) gives rings only to [4,4] stages, i.e. a whole torus. `'axes'` also gives them to any 4-long axis spanning a torus row or column: [2,4] TP, [4,2] SP, [8,4] TP. `'off'` is the measured setup. `tools/torus_ab.js` compares the modes on every topology.
+4. **Validation.** Replaying all 105 matrix cells gives |error| of 3.9% median, 8.6% p90 and 13.9% max (loaded new tok/s and idle TTFT). Run `validate.js` to see it.
 
 **`opEff` knob.** It moves each op geometrically from its measured efficiency to a target (70% matmul, 80% DRAM/link, overlapped expert weight reads) and lowers the latency floors. 0 means today's kernels; 1 means roofline kernels.
 
@@ -230,6 +237,7 @@ Takeaways:
 * Pool copies are page-list gathers at 50% DRAM efficiency. Arena fragmentation is not modelled.
 * Decode is a fixed per-request rate. KV migration to decode is not modelled.
 * Meshes without a profile ([4,4], [1,4], …) are extrapolated. TP=2 stages use the [4,2] single-stage profile.
+* Ring-collective speed-ups on the torus are textbook link-load ratios, not measured; profile a [4,4] stage with ring CCLs to pin them down.
 * Batched chunks larger than 5120 are extrapolated from the roofline scaling of each op.
 
 ## Extending (notes for the next agent)

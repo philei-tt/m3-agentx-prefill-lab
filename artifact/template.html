@@ -172,6 +172,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row"><label for="galaxies">Galaxies</label><select id="galaxies"><option>4</option><option>8</option></select></div>
     <div class="row"><label for="replicas">Pipeline replicas</label><select id="replicas"><option>1</option><option>2</option><option>4</option></select></div>
     <div class="row"><label for="mesh">Stage mesh [SP,TP]</label><select id="mesh"><option value="2x4">[2,4] 8 chips</option><option value="4x4">[4,4] 16 chips</option><option value="8x4">[8,4] 32 chips</option><option value="4x2">[4,2] 8 chips (TP=2)</option></select></div>
+    <div class="row"><label for="torus">Ring collectives</label><select id="torus"><option value="full">[4,4] stages (whole torus)</option><option value="axes">every 4-long axis</option><option value="off">off (line everywhere)</option></select></div>
+    <div class="hint">A galaxy is two 4×4 tori. On a ring axis: all-gather / reduce-scatter ×(N−1)/N, all-to-all and ring-joint KV pass ×0.5, collective latency ×0.5.</div>
     <div class="row"><label for="stages">Stages per replica</label><input id="stages" type="number" min="1" max="64" step="1"></div>
     <div class="row"><label for="split">Layer split</label><select id="split"><option value="auto">auto-balanced</option><option value="even">even</option><option value="custom">custom</option></select></div>
     <div class="row" id="splitRow" hidden><label for="splitCustom">Layers per stage</label><input id="splitCustom" type="text" placeholder="1,1,1,5,5,..."></div>
@@ -197,6 +199,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
   <fieldset>
     <legend>KV cache</legend>
     <div class="row"><label for="cache">Residency</label><select id="cache"><option value="slots">static 1M slots</option><option value="pool">slot lanes + paged pool</option><option value="paging">full paging (ideal)</option><option value="inf">infinite cache</option></select></div>
+    <div class="row"><label for="laneScope">Lane table</label><select id="laneScope"><option value="stage">per stage</option><option value="global">global (today's slot_id)</option></select></div>
+    <div class="row"><label for="copyMode">Pool copies</label><select id="copyMode"><option value="double">double-buffered</option><option value="sequential">sequential</option><option value="overlap3">triple-buffered</option></select></div>
     <div class="row"><label for="lanes">Lanes per stage</label><input id="lanes" type="number" min="1" max="32" step="1"></div>
     <div class="row check"><input id="laneArena" type="checkbox"><label for="laneArena">Variable-size lanes (arena)</label></div>
     <div class="row"><label for="arenaTokens">Arena (M tokens)</label><select id="arenaTokens"><option value="2000000">2</option><option value="4000000">4</option><option value="8000000">8</option></select></div>
@@ -419,6 +423,14 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
         </ul>
       </li>
     </ul>
+    <p><b>Step 3: ring collectives on the torus ("Ring collectives" control).</b> A galaxy is two 4×4 tori: every row and column of each 4×4 half has a wrap-around link. All measurements above used line (2D mesh) collectives, so the fitted efficiencies are line efficiencies. When an axis runs as a ring, the model scales that axis's link traffic by textbook ratios:</p>
+    <ul>
+      <li><b>All-gather / reduce-scatter over N chips:</b> the busiest link carries (N−1)/2 shards instead of N/2, so ×(N−1)/N (×0.75 on a 4-ring). This covers the TP norm all-gathers, attention reduce-scatter and the reduce tails of the shared expert, MoE reduce and dense MLP, and the SP all-gathers of cached K/V and index keys.</li>
+      <li><b>All-to-all</b> (MoE dispatch/combine, variable-layout KV write): twice the bisection, ×0.5.</li>
+      <li><b>Ring-joint dense attention KV pass:</b> no wrap hop back across the line, ×0.5.</li>
+      <li><b>Collective latency floor:</b> ×0.5 on the ring axis (fewer hops).</li>
+    </ul>
+    <p>Three modes: <i>[4,4] stages</i> (default) gives rings only to a stage that is a whole 4×4 torus, which is what fabric torus mode supports today. <i>Every 4-long axis</i> also lets a [2,4] stage (two full torus rows) run its TP axis as a ring, a [4,2] stage its SP axis, and an [8,4] stage its TP axis. This is physically possible but needs sub-mesh ring support. <i>Off</i> is the measured setup.</p>
     <p><b>Check.</b> Replaying all 105 cells of the #57827 matrices with the fitted model gives <span id="methodErr">a few percent median error</span> on loaded throughput and idle TTFT (Model tab, full table). Anything far outside the measured range is extrapolation: batched chunks above 5120 tokens, meshes without a profile, stage counts other than 16.</p>
 
     <h2 id="m-kernels">"Today's kernels" vs "roofline kernels" (the op-efficiency knob)</h2>
@@ -435,7 +447,21 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Static slots</b> (today). A conversation owns one 1M slot while it is resident. A new conversation takes a free slot or evicts the least recently used idle one. A hit is the prefix shared with that conversation's previous request, rounded down to a chunk multiple unless "unaligned resume" is on. Slots are never shared across conversations.</li>
       <li><b>Slot lanes + paged pool.</b> A few <b>lanes</b> per stage are the contiguous KV buffers the attention kernels run on (fixed 1M each, or sized per request in an arena). All other memory is a <b>paged pool</b>: content-addressed pages shared by every conversation that has the same prefix, evicted by exact least-recently-used order. Before a request runs, its cached prefix is copied from the pool into its lane; afterwards the new tokens are copied back. The copies are DRAM-bound, overlapped with compute, and charged 25% for bandwidth contention.
         <ul>
-          <li><b>Lane scope.</b> A lane is held per stage only while that stage works on the request (the per-stage scope). Today's slot_id is global, so a slot is held on every stage for the whole request.</li>
+          <li><b>Lane table ("Lane table" control).</b>
+            <ul>
+              <li><b>Per stage (default):</b> each stage allocates a lane only while it works through the request's chunks. That's about 1–3 chunks' worth of requests per stage.</li>
+              <li><b>Global, like today's slot_id:</b> a lane is held on every stage for the request's whole trip through the pipeline, so you need roughly stages × requests-per-chunk lanes. On the best 4-galaxy config, global lanes cap goodput near 25k instead of 45k unless the arena grows to about 8M tokens.</li>
+              <li>Each stage keeps its own KV tensors, so a per-stage table is feasible. It is a prerequisite for combining the pool with batching.</li>
+            </ul>
+          </li>
+          <li><b>Pool copies ("Pool copies" control).</b>
+            <ul>
+              <li><b>Double-buffered (default):</b> copies overlap compute, and 25% of their time is charged for DRAM sharing. A lane stays held for its own copy-out and for the next occupant's copy-in. The peak is about 2× the computing lanes, briefly.</li>
+              <li><b>Sequential:</b> copy-out, copy-in, then prefill. The full copy time goes on the stage; lanes are held only while computing.</li>
+              <li><b>Triple-buffered:</b> next batch copying in, current computing, previous copying out, each for a whole chunk period. The peak is 3×.</li>
+              <li>Copies take about 1.4 ms per stage for a median 140k-token prefix and about 10 ms for 1M, against a 50–120 ms chunk. On the best configs the three modes differ by about 1%; with fixed 1M lanes, triple buffering costs more memory.</li>
+            </ul>
+          </li>
           <li><b>How eviction is tracked.</b> Each session's prefix tree is compressed into pieces. Every request touches whole pieces, so LRU over pieces is exactly LRU over 64-token pages.</li>
         </ul>
       </li>
@@ -529,6 +555,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <ul>
       <li><b>Host tier.</b> Host RAM size, PCIe bandwidth and the ideal page DMA are assumptions. Host RAM size matters a lot for the result; PCIe bandwidth hardly does.</li>
       <li><b>Pool copies.</b> Assumed to be page-list gather kernels at 50% DRAM efficiency. Arena fragmentation is not modelled.</li>
+      <li><b>Torus rings.</b> Every measurement used line (mesh) collectives, so the ring speed-ups are textbook link-load ratios, not measurements. [4,4] has no profile at all (geometric midpoint of [2,4] and [8,4]).</li>
       <li><b>Decode.</b> A fixed per-request speed. Decode-side capacity and KV migration to decode are not modelled.</li>
       <li><b>Extrapolation.</b> Batched chunks above 5120 tokens, meshes without a profile, and stage counts other than 16 are extrapolated. [4,2] stage costs come from a single-stage profile.</li>
       <li><b>Memory figures are approximate.</b> The 3 GB per-chip reserve and the activation-buffer estimate are approximations.</li>
@@ -617,14 +644,15 @@ function mkWorker() {
 }
 
 // ---------------------------------------------------------------- form <-> cfg
-const FIELDS = ['galaxies', 'replicas', 'mesh', 'stages', 'split', 'opEff', 'boundedDense', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'attn', 'policy',
-  'cache', 'lanes', 'laneArena', 'arenaTokens', 'unaligned', 'hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'duration', 'seed'];
+const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'boundedDense', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'attn', 'policy',
+  'cache', 'laneScope', 'copyMode', 'lanes', 'laneArena', 'arenaTokens', 'unaligned', 'hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'duration', 'seed'];
 const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'lanes', 'arenaTokens', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'reserveGB', 'decodeTps', 'duration', 'seed']);
 function setForm(cfg) {
   const c = Object.assign({}, SIM.DEFAULTS, cfg);
   for (const f of FIELDS) {
     const el = $(f); let v = c[f];
     if (f === 'mesh') v = v.join('x');
+    if (f === 'torus' && typeof v === 'boolean') v = v ? 'full' : 'off';
     if (f === 'split') { if (Array.isArray(v)) { $('splitCustom').value = v.join(','); v = 'custom'; } }
     if (el.type === 'checkbox') el.checked = !!v; else el.value = String(v);
   }
@@ -646,7 +674,7 @@ function syncUi() {
   $('opEffV').textContent = Number($('opEff').value).toFixed(1);
   $('splitRow').hidden = $('split').value !== 'custom';
   const pool = $('cache').value === 'pool', paged = pool || $('cache').value === 'paging';
-  for (const id of ['lanes', 'laneArena']) $(id).disabled = !pool;
+  for (const id of ['lanes', 'laneArena', 'laneScope', 'copyMode']) $(id).disabled = !pool;
   for (const id of ['hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy']) $(id).disabled = !paged;
   $('arenaTokens').disabled = !pool || !$('laneArena').checked;
   $('lanes').disabled = !pool || $('laneArena').checked;

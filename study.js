@@ -102,13 +102,23 @@ async function main() {
       : [[32, [2, 4], 1], [16, [4, 4], 1], [8, [8, 4], 1], [16, [2, 4], 2], [32, [4, 2], 1], [8, [4, 4], 2]];
     const budgets = good.includes('batch') ? [4096, 8192, 16384, 32768] : [1024, 2048, 4096, 5120];
     const lanesOpt = !good.includes('pool') ? [null] : good.includes('arena') ? [{ arenaTokens: 2e6 }, { arenaTokens: 4e6 }, { arenaTokens: 8e6 }] : [{ lanes: 2 }, { lanes: 4 }, { lanes: 6 }];
-    const jobs = [];
-    for (const [S, mesh, reps] of topos) for (const b of budgets) for (const lo of lanesOpt) {
+    // successive halving instead of the full topology x budget x lanes product (~20 instead of 60-72 configs):
+    // 1) every topology at the middle budget / lane option, 2) all budgets on the best 2 topologies,
+    // 3) all lane options on the best (topology, budget)
+    const one = (topo, b, lo) => {
+      const [S, mesh, reps] = topo;
       const extra = Object.assign({ stages: S, mesh, replicas: reps }, lo || {});
       if (good.includes('batch')) extra.budget = b; else extra.chunk = b;
-      jobs.push(evalKeys(sc, good, extra).then((r) => ({ extra, goodput: r.goodput, at: r.at, peak: r.peak, points: r.points, plan: r.plan })));
-    }
-    R.grid = (await Promise.all(jobs)).sort((a, b) => b.goodput - a.goodput);
+      return evalKeys(sc, good, extra).then((r) => ({ topo, b, lo, extra, goodput: r.goodput, at: r.at, peak: r.peak, points: r.points, plan: r.plan }));
+    };
+    const midB = budgets[2], midL = lanesOpt[Math.floor(lanesOpt.length / 2)];
+    const byG = (a, b) => b.goodput - a.goodput;
+    const s1 = (await Promise.all(topos.map((t) => one(t, midB, midL)))).sort(byG);
+    const s2 = (await Promise.all(s1.slice(0, 2).flatMap((x) => budgets.map((b) => one(x.topo, b, midL))))).sort(byG);
+    const s3 = await Promise.all(lanesOpt.map((lo) => one(s2[0].topo, s2[0].b, lo)));
+    const seenG = new Map();
+    for (const g of [...s1, ...s2, ...s3]) seenG.set(JSON.stringify(g.extra), g);
+    R.grid = [...seenG.values()].sort(byG).map(({ topo, b, lo, ...g }) => g);
     log(sc.key, 'grid best', Math.round(R.grid[0].goodput), JSON.stringify(R.grid[0].extra));
     // ---- best config: infinite-cache reference, seeds, sensitivity to the unverified assumptions
     const bestExtra = R.grid[0].extra;
@@ -119,7 +129,14 @@ async function main() {
       ['decode 90 tok/s', { decodeTps: 90 }], ['decode 360 tok/s', { decodeTps: 360 }],
       ['reserve 6 GB/chip', { reserveGB: 6 }], ['SLO-free peak', {}],
       ['TP=4 mesh only', sc.base.galaxies === 4 ? { mesh: [2, 4], stages: 16, replicas: 1 } : { mesh: [2, 4], stages: 32, replicas: 1 }],
+      ['rings off (line only)', { torus: 'off' }], ['rings on every 4-long axis', { torus: 'axes' }],
+      ['[4,4] torus stages', sc.base.galaxies === 4 ? { mesh: [4, 4], stages: 8, replicas: 1 } : { mesh: [4, 4], stages: 16, replicas: 1 }],
     ];
+    if (good.includes('pool')) sens.push(
+      ['global lane table', { laneScope: 'global' }],
+      ['copies sequential', { copyMode: 'sequential' }], ['copies triple-buffered', { copyMode: 'overlap3' }],
+      good.includes('arena') ? ['4 fixed 1M lanes', { laneArena: false, lanes: 4 }] : ['2M lane arena', { laneArena: true, arenaTokens: 2e6 }],
+    );
     R.sens = await Promise.all(sens.map(([name, d]) => evalKeys(sc, good, Object.assign({}, bestExtra, d)).then((r) => ({ name, goodput: r.goodput, peak: r.peak ? r.peak.usefulTps : 0, at: r.at }))));
   }));
   pool.close();

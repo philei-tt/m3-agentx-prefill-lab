@@ -53,15 +53,17 @@
     // actual_isl); the router itself still scores the whole padded chunk
     const Tr = c.Tr === undefined ? T : c.Tr, trl = Tr / sp;
     const rsBytes = (tp - 1) / tp * tl * E * BF16;
-    const a2a = (m) => (sp > 1 ? sp * m / (4 * HW.linkUni) : m / HW.dram); // linear SP line, bisection-bound
+    const tf = torusFactors(c);
+    const a2a = (m) => (sp > 1 ? sp * m / (4 * HW.linkUni) * tf.a2a : m / HW.dram); // SP line (or ring), bisection-bound
+    const tpLink = rsBytes / HW.linkBi * tf.tpAG;                                    // one TP all-gather / reduce-scatter
     switch (op) {
-      case 'norm_ag': return rsBytes / HW.linkBi;                                  // one TP all-gather (x2 per layer)
+      case 'norm_ag': return tpLink;                                                 // x2 per layer
       case 'qkv': return Math.max(2 * tl * E * 9216 / tp / HW.F_hifi, E * 9216 / tp * BF8 / HW.dram);
       case 'idx_branch': return Math.max(2 * tl * E * 640 / tp / HW.F_hifi, E * 640 * BF8 / HW.dram);
       case 'misc': return 8 * tl * E / tp * BF16 / HW.dram;                       // rope, residual, typecasts, cache write
       case 'o_proj': return Math.max(2 * tl * 8192 / tp * E / HW.F_hifi, 8192 * E / tp * BF8 / HW.dram);
-      case 'attn_rs': return rsBytes / HW.linkBi;
-      case 'shared': return Math.max(6 * tl * E * M3.Is / tp / HW.F_hifi, 3 * E * M3.Is / tp * BF16 / HW.dram) + rsBytes / HW.linkBi;
+      case 'attn_rs': return tpLink;
+      case 'shared': return Math.max(6 * tl * E * M3.Is / tp / HW.F_hifi, 3 * E * M3.Is / tp * BF16 / HW.dram) + tpLink;
       case 'router': return Math.max(2 * tl * E * M3.Ex / HW.F_hifi, E * M3.Ex * BF16 / HW.dram);
       case 'dispatch': return a2a(trl * (M3.topk / tp) * E * 1.0);
       case 'combine': return a2a(trl * (M3.topk / tp) * E * BF16);
@@ -73,11 +75,26 @@
         const cc = flops / HW.F_lofi, mm = wbytes / HW.dram, ov = c.ovl || 0;
         return (1 - ov) * (cc + mm) + ov * Math.max(cc, mm);
       }
-      case 'moe_reduce': return trl * (M3.topk / tp) * E * BF16 * 2 / HW.dram + rsBytes / HW.linkBi;
-      case 'dense_mlp': return Math.max(6 * tl * E * M3.Id / tp / HW.F_hifi, 3 * E * M3.Id / tp * BF16 / HW.dram) + rsBytes / HW.linkBi;
+      case 'moe_reduce': return trl * (M3.topk / tp) * E * BF16 * 2 / HW.dram + tpLink;
+      case 'dense_mlp': return Math.max(6 * tl * E * M3.Id / tp / HW.F_hifi, 3 * E * M3.Id / tp * BF16 / HW.dram) + tpLink;
     }
     return 0;
   }
+  // A galaxy is two 4x4 tori (every row and column of each 4x4 half is a 4-ring). Every measured run and profile
+  // was taken with line (mesh) collectives, so the calibrated efficiencies are line efficiencies. An axis that runs
+  // as a ring (c.ringSp / c.ringTp, set by makePlan from cfg.torus) gets, per the nappkin lib/ops.py convention:
+  //   all-gather / reduce-scatter over N: the busiest link carries (N-1)/2 shards instead of N/2 -> x(N-1)/N;
+  //   all-to-all: twice the bisection -> x0.5; ring-joint KV pass: no wrap hop back across the line -> x0.5;
+  //   collective latency x0.5.
+  // TP-axis collectives: norm_ag, attn_rs and the reduce tails of shared / moe_reduce / dense_mlp.
+  // SP-axis collectives: dispatch/combine (all-to-all over the SP line), ag_kv, ag_idx, kv_a2a, ring_scan.
+  const TP_CCL = new Set(['norm_ag', 'attn_rs', 'shared', 'moe_reduce', 'dense_mlp']);
+  function torusFactors(c) {
+    const s = !!c.ringSp, t = !!c.ringTp;
+    return { tpAG: t ? (c.tp - 1) / c.tp : 1, spAG: s ? (c.sp - 1) / c.sp : 1, a2a: s ? 0.5 : 1, scan: s ? 0.5 : 1,
+      latTp: t ? 0.5 : 1, latSp: s ? 0.5 : 1 };
+  }
+  const cclLat = (op, c, lat) => { const f = torusFactors(c); return lat.ccl * (TP_CCL.has(op) ? f.latTp : f.latSp); };
   function roofSeg(op, c, s) {
     const { sp, tp } = c;
     const nl = s.n / sp, kvlen = s.k + s.n;
@@ -85,10 +102,10 @@
     switch (op) {
       case 'ag_kv':
         if (sp <= 1) return 0;
-        return (sp - 1) / sp * (c.msaLocal ? Math.min(kvlen, 16384) : kvlen) * kvHeadB / HW.linkBi;
+        return (sp - 1) / sp * (c.msaLocal ? Math.min(kvlen, 16384) : kvlen) * kvHeadB / HW.linkBi * torusFactors(c).spAG;
       case 'ag_idx':
         if (sp <= 1 || c.msaLocal) return 0;
-        return (sp - 1) / sp * kvlen * M3.di * c.idxB / HW.linkBi;
+        return (sp - 1) / sp * kvlen * M3.di * c.idxB / HW.linkBi * torusFactors(c).spAG;
       case 'indexer': // block-pooled index scoring + top-k; per-token part dominates at these sizes
         return 2 * nl * M3.Hi * M3.di * (2048 + kvlen / 128) / HW.F_hifi;
       case 'sparse': {
@@ -97,11 +114,11 @@
       }
       case 'kv_a2a': // variable layout: route the new K/V/index rows to their owner SP row
         if (!c.varLayout || sp <= 1) return 0;
-        return sp * nl * (kvHeadB + M3.di * c.idxB) / (4 * HW.linkUni);
+        return sp * nl * (kvHeadB + M3.di * c.idxB) / (4 * HW.linkUni) * torusFactors(c).a2a;
       case 'ring_c': return 4 * nl * (M3.Hq / tp) * (s.k + s.n / 2) * M3.d / HW.F_hifi;
       case 'ring_scan': { // ring-joint walks the whole per-device cache shard (capacity/sp) every chunk
         const scan = c.bounded ? kvlen : Math.max(s.cap, kvlen);
-        return scan / sp * kvHeadB / HW.linkBi;
+        return scan / sp * kvHeadB / HW.linkBi * torusFactors(c).scan;
       }
     }
     return 0;
@@ -258,8 +275,8 @@
   // ------------------------------------------------------------------------------------------------------
   // Layer cost (ms) for a batch of segments.  kind: 'moe' | 'dense'; attn: 'seq' | 'fused'
   // ------------------------------------------------------------------------------------------------------
-  function opMs(op, roofS, eff, lat) {
-    return (isCcl(op) ? lat.ccl : lat.op) + roofS * 1e3 / eff[op];
+  function opMs(op, roofS, eff, lat, c) {
+    return (isCcl(op) ? cclLat(op, c, lat) : lat.op) + roofS * 1e3 / eff[op];
   }
   // attention part of a layer, per-request (seq) or one kernel over the whole chunk (fused)
   function attnMs(kind, c, segs, eff, lat, fused) {
@@ -270,7 +287,7 @@
         if (op === 'kv_a2a' && !c.varLayout) continue;
         if ((op === 'ag_kv' || op === 'ag_idx') && c.sp <= 1) continue;
         if (op === 'ag_idx' && c.msaLocal) continue;
-        const l = isCcl(op) ? lat.ccl : lat.op;
+        const l = isCcl(op) ? cclLat(op, c, lat) : lat.op;
         const wave = WAVE_OPS.has(op);
         let sum = 0;
         for (const s of segs) sum += roofSeg(op, c, s) * 1e3 / eff[op] * (wave && !fused ? waveFactor(s.n, c) / z : 1);
@@ -283,7 +300,7 @@
         const w = fused ? wf : waveFactor(s.n, c) / z;
         const rc = roofSeg('ring_c', c, s) * 1e3 / eff.ring_c * w, rs = roofSeg('ring_scan', c, s) * 1e3 / eff.ring_scan;
         t += Math.max(rc, rs);
-        if (c.varLayout && c.sp > 1) t += roofSeg('kv_a2a', c, s) * 1e3 / eff.kv_a2a;
+        if (c.varLayout && c.sp > 1) t += cclLat('kv_a2a', c, lat) + roofSeg('kv_a2a', c, s) * 1e3 / eff.kv_a2a;
       }
       t += fused ? lat.op : lat.op * segs.length;
     }
@@ -291,7 +308,7 @@
   }
   function layerMs(kind, c, segs, eff, lat, attn) {
     let t = 0;
-    for (const op of kind === 'moe' ? OPS_MOE : OPS_DENSE) t += (op === 'norm_ag' ? 2 : 1) * opMs(op, roofTok(op, c), eff, lat);
+    for (const op of kind === 'moe' ? OPS_MOE : OPS_DENSE) t += (op === 'norm_ag' ? 2 : 1) * opMs(op, roofTok(op, c), eff, lat, c);
     // a fused multi-user kernel can always fall back to the per-request schedule, so it is never slower
     const seq = attnMs(kind, c, segs, eff, lat, false);
     return t + (attn === 'fused' ? Math.min(seq, attnMs(kind, c, segs, eff, lat, true)) : seq);
@@ -303,6 +320,7 @@
   const DEFAULTS = {
     galaxies: 4, replicas: 1, mesh: [2, 4], stages: 16, split: 'auto',
     opEff: 0,              // 0 = today's measured kernels, 1 = roofline target efficiencies
+    torus: 'full',         // ring collectives: 'full' = only [4,4] stages (a whole 4x4 torus) | 'axes' | 'off' (makePlan)
     asyncHandoff: false,   // stage-to-stage D2D overlapped with compute (no blocking send), link-rate transfer
     boundedDense: false,   // dense ring-joint SDPA scans [0, kv_len) instead of the whole lane capacity
     msaLocal: false,       // MSA: SP-local indexer + top-k merge, fetch only selected K/V blocks (no prefix all-gather)
@@ -310,7 +328,15 @@
     chunk: 5120, layout: 'fixed', batch: false, budget: 16384, attn: 'seq', policy: 'fcfs',
     cache: 'slots',        // slots | pool | paging | inf
     lanes: 3, laneScope: 'stage', laneLen: M3.maxCtx, laneArena: false, arenaTokens: 4e6,
-    slotLen: M3.maxCtx, unaligned: false, copyOverlap: true, copyContention: 0.25,
+    slotLen: M3.maxCtx, unaligned: false,
+    // pool copy-in (cached prefix pool->lane) / copy-out (new KV lane->pool):
+    //   'sequential' = copy-out, copy-in, then prefill: full copy time on the stage, lanes held only while computing
+    //   'double'     = double-buffered: copies overlap compute (copyContention of their time is charged for DRAM
+    //                  sharing); a lane is held for its own copy-out after the last chunk plus the next occupant's
+    //                  copy-in before its first chunk (peak ~2x the computing lanes, briefly)
+    //   'overlap3'   = static triple buffering: next batch copying in, current computing, previous copying out, each
+    //                  for a whole chunk period (peak 3x)
+    copyMode: 'double', copyContention: 0.25,
     hostTier: false, hostGBPerGalaxy: 1024, pcieGBsPerGalaxy: 64,
     reserveGB: 3, expertImb: IMB0, maxInflight: 0,
     concurrency: 64, decodeTps: 180, duration: 1800, seed: 1, idleCap: 10, startMin: 0, startMax: 1, maxWarmup: 1e6,
@@ -369,9 +395,15 @@
       const et = Math.max(em, TARGET_EFF[OP_CLASS[op] || 'matmul']);
       eff[k][op] = Math.exp((1 - a) * Math.log(em) + a * Math.log(et));
     }
+    // ring axes (see torusFactors). 'full': only a stage that is a whole 4x4 torus runs ring collectives (fabric
+    // torus mode needs the whole torus); 'axes': any 4-long axis that spans a torus row/column keeps its wrap link
+    // ([2,4] -> TP ring, [4,2] -> SP ring, [8,4] -> TP ring); 'off': line collectives everywhere (the measured setup)
+    const tmode = cfg.torus === true ? 'full' : cfg.torus === false ? 'off' : cfg.torus;
+    const ringSp = sp === 4 && (tmode === 'axes' || (tmode === 'full' && tp === 4));
+    const ringTp = tp === 4 && (tmode === 'axes' || (tmode === 'full' && sp === 4));
     const lat = { ccl: (1 - a) * LAT_MEAS.ccl + a * LAT_TGT.ccl, op: (1 - a) * LAT_MEAS.op + a * LAT_TGT.op };
     const idxB = cfg.idxBf16 ? BF16 : BF8;
-    const ctxT = (T) => ({ sp, tp, P, T, idxB, imb: cfg.expertImb, varLayout: cfg.layout === 'var', bounded: cfg.boundedDense, msaLocal: cfg.msaLocal });
+    const ctxT = (T) => ({ sp, tp, P, T, idxB, imb: cfg.expertImb, varLayout: cfg.layout === 'var', bounded: cfg.boundedDense, msaLocal: cfg.msaLocal, ringSp, ringTp });
     const pm = cal.pipe;
     // the 1/T term was fitted on chunks of 2048 and 5120 tokens; clamp so small chunks do not extrapolate it
     const moeMult = (T) => (1 - a) * (pm.moeMult[0] + pm.moeMult[1] * 5120 / Math.max(T, 2048)) + a * 1;
@@ -450,6 +482,8 @@
     return {
       cfg, sp, tp, P, S, counts, stages, eff, lat, layer, stageOv, embedMs, blockMs, hopMs, errors,
       capTok, nSlots, poolTok, lanes, arena, hostTok, kvbL, kvbHost, gran, laneCap,
+      // time (ms) to copy `tok` tokens of KV between pool and lane on the stage holding the most layers
+      copyMs: (tok) => tok * Math.max(...stages.map((x) => x.n)) * kvbL / P * 2 / (HW.dram * 0.5) * 1e3,
       pcieBps: cfg.pcieGBsPerGalaxy * GB * (cfg.galaxies / cfg.replicas),
       maxInflight: cfg.maxInflight > 0 ? cfg.maxInflight : 2 * S + 4,
       tokensPerSec: null,
@@ -937,15 +971,18 @@
       const { segs, T } = ch;
       const cs = segs.map((s) => ({ n: s.npad, na: s.n, k: s.k, cap: s.q.laneCap || plan.laneCap }));
       chunkStageMs(plan, T, cs, scratch);
-      // pool copy-in (first segment of a request) / copy-out (last) per stage, DRAM bound
-      if (rep.pool && plan.poolTok !== Infinity && cfg.cache === 'pool') {
+      // pool copy-in (first segment of a request) / copy-out (last) per stage, DRAM bound (read + write at 50%)
+      const copies = rep.pool && cfg.cache === 'pool' && plan.poolTok !== Infinity;
+      if (copies) {
         let copyTok = 0;
-        for (const s of segs) { if (s.first) copyTok += s.q.hitTok; if (s.last) copyTok += TR.req_blocks[s.q.r] * B - s.q.hitTok; }
+        for (const s of segs) {
+          if (s.first) { copyTok += s.q.hitTok; s.q.copyInS = plan.copyMs(s.q.hitTok) / 1e3; }
+          if (s.last) { const nt = TR.req_blocks[s.q.r] * B - s.q.hitTok; copyTok += nt; s.q.copyOutS = plan.copyMs(nt) / 1e3; }
+        }
         if (copyTok > 0) {
           for (let s = 0; s < S; s++) {
-            const bytes = copyTok * plan.stages[s].n * plan.kvbL / plan.P * 2;
-            const ms = bytes / (HW.dram * 0.5) * 1e3;
-            scratch[s] += cfg.copyOverlap ? ms * cfg.copyContention : ms;
+            const ms = copyTok * plan.stages[s].n * plan.kvbL / plan.P * 2 / (HW.dram * 0.5) * 1e3;
+            scratch[s] += cfg.copyMode === 'sequential' ? ms : ms * cfg.copyContention;
           }
         }
       }
@@ -967,7 +1004,14 @@
       for (const s of segs) {
         if (s.last) {
           ev.push(end, { e: EV_DONE, q: s.q });
-          if (cfg.cache !== 'slots' && cfg.laneScope === 'stage') ev.push(end0, { e: EV_LANE, q: s.q, rep });
+          // lane release: per-stage lanes when stage 0 finishes the last chunk, global lanes at prefill completion,
+          // then held longer while copies overlap compute (see DEFAULTS.copyMode)
+          if (cfg.cache !== 'slots') {
+            let hold = 0;
+            if (copies && cfg.copyMode === 'double') hold = (s.q.copyOutS || 0) + (s.q.copyInS || 0);
+            else if (copies && cfg.copyMode === 'overlap3') hold = 2 * (scratch[0] / 1e3 + blk);
+            ev.push((cfg.laneScope === 'stage' ? end0 : end) + hold, { e: EV_LANE, q: s.q, rep });
+          }
         }
       }
       schedPump(rep, rep.free[0]);
@@ -991,10 +1035,7 @@
       const tree = q.tree, rep = tree.rep, r = q.r;
       q.tDone = now;
       if (rep.slots) { rep.slots.release(q.slot, now); pump(rep); }
-      else {
-        if (cfg.laneScope !== 'stage') releaseLane(q, rep);
-        insertKV(q, rep);
-      }
+      else if (cfg.laneScope !== 'stage') insertKV(q, rep); // global lanes: KV visible at completion, lane freed by EV_LANE
       const inTok = TR.req_blocks[r] * B;
       if (q.primer) { st.primerTok += inTok - q.hitTok; primersLeft--; if (primersLeft === 0 && !warmDone) startProfiling(now); ev.push(now, { e: EV_END, q }); return; }
       if (warmDone && now >= t0 && now <= tEnd) {
