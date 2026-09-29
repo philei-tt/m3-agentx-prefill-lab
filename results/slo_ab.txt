@@ -1,0 +1,81 @@
+
+== today 4gx + pool + host + batch 16k
+  SLO    5 s: goodput   15.4k @C=  136 | req/chunk 1.09 | chunk  6113 tok | busy  41% | hit 95.5% | p50/p90 3.1/4.9 s
+  SLO   10 s: goodput   25.0k @C=  248 | req/chunk 1.27 | chunk  7479 tok | busy  68% | hit 95.5% | p50/p90 4.5/8.5 s
+  SLO   20 s: goodput   27.6k @C=  312 | req/chunk 1.79 | chunk 10465 tok | busy  77% | hit 95.2% | p50/p90 8.9/19.0 s
+  SLO   30 s: goodput   27.2k @C=  320 | req/chunk 1.91 | chunk 11293 tok | busy  77% | hit 95.1% | p50/p90 10.7/22.7 s
+  SLO   60 s: goodput   27.2k @C=  320 | req/chunk 1.91 | chunk 11293 tok | busy  77% | hit 95.1% | p50/p90 10.7/22.7 s
+  SLO  120 s: goodput   27.2k @C=  320 | req/chunk 1.91 | chunk 11293 tok | busy  77% | hit 95.1% | p50/p90 10.7/22.7 s
+  SLO   none: goodput   27.6k @C=  312 | req/chunk 1.79 | chunk 10465 tok | busy  77% | hit 95.2% | p50/p90 8.9/19.0 s
+
+== g4_k0 best
+  SLO    5 s: goodput   35.9k @C=  376 | req/chunk 1.17 | chunk  5099 tok | busy  71% | hit 96.1% | p50/p90 2.8/4.9 s
+  SLO   10 s: goodput   45.3k @C=  472 | req/chunk 1.86 | chunk  8975 tok | busy  94% | hit 95.1% | p50/p90 6.3/9.3 s
+  SLO   20 s: goodput   45.7k @C=  480 | req/chunk 2.01 | chunk  9724 tok | busy  95% | hit 95.1% | p50/p90 6.9/11.3 s
+  SLO   30 s: goodput   45.7k @C=  480 | req/chunk 2.01 | chunk  9724 tok | busy  95% | hit 95.1% | p50/p90 6.9/11.3 s
+  SLO   60 s: goodput   45.3k @C=  512 | req/chunk 2.20 | chunk 11178 tok | busy  98% | hit 94.7% | p50/p90 7.2/34.3 s
+  SLO  120 s: goodput   45.3k @C=  512 | req/chunk 2.20 | chunk 11178 tok | busy  98% | hit 94.7% | p50/p90 7.2/34.3 s
+  SLO   none: goodput   45.7k @C=  480 | req/chunk 2.01 | chunk  9724 tok | busy  95% | hit 95.1% | p50/p90 6.9/11.3 s
+
+== g4_k0 best, infinite cache
+  SLO    5 s: goodput   45.2k @C=  456 | req/chunk 1.30 | chunk  5141 tok | busy  78% | hit 96.4% | p50/p90 3.1/5.0 s
+  SLO   10 s: goodput   62.4k @C=  688 | req/chunk 2.84 | chunk 10904 tok | busy  98% | hit 96.3% | p50/p90 7.1/9.9 s
+  SLO   20 s: goodput   64.0k @C=  768 | req/chunk 4.12 | chunk 15453 tok | busy 100% | hit 96.3% | p50/p90 8.9/15.4 s
+  SLO   30 s: goodput   64.0k @C=  768 | req/chunk 4.12 | chunk 15453 tok | busy 100% | hit 96.3% | p50/p90 8.9/15.4 s
+  SLO   60 s: goodput   64.0k @C=  768 | req/chunk 4.12 | chunk 15453 tok | busy 100% | hit 96.3% | p50/p90 8.9/15.4 s
+  SLO  120 s: goodput   64.0k @C=  768 | req/chunk 4.12 | chunk 15453 tok | busy 100% | hit 96.3% | p50/p90 8.9/15.4 s
+  SLO   none: goodput   64.4k @C=  744 | req/chunk 3.84 | chunk 14261 tok | busy 100% | hit 96.4% | p50/p90 8.8/11.3 s
+
+== g4_k1 best
+  SLO    5 s: goodput   81.6k @C=  840 | req/chunk 1.66 | chunk 10558 tok | busy  85% | hit 92.6% | p50/p90 2.0/4.6 s
+  SLO   10 s: goodput   81.4k @C=  864 | req/chunk 2.10 | chunk 14186 tok | busy  93% | hit 91.4% | p50/p90 2.9/8.9 s
+  SLO   20 s: goodput   81.4k @C=  864 | req/chunk 2.10 | chunk 14186 tok | busy  93% | hit 91.4% | p50/p90 2.9/8.9 s
+  SLO   30 s: goodput   78.9k @C=  896 | req/chunk 2.30 | chunk 16055 tok | busy  96% | hit 90.6% | p50/p90 3.3/26.4 s
+  SLO   60 s: goodput   78.9k @C=  896 | req/chunk 2.30 | chunk 16055 tok | busy  96% | hit 90.6% | p50/p90 3.3/26.4 s
+  SLO  120 s: goodput   78.9k @C=  896 | req/chunk 2.30 | chunk 16055 tok | busy  96% | hit 90.6% | p50/p90 3.3/26.4 s
+  SLO   none: goodput   81.6k @C=  848 | req/chunk 1.80 | chunk 11763 tok | busy  88% | hit 92.2% | p50/p90 2.6/5.2 s
+
+== g4_k1 best, infinite cache
+  SLO    5 s: goodput  195.4k @C= 2072 | req/chunk 3.05 | chunk 11287 tok | busy  97% | hit 96.5% | p50/p90 2.7/4.5 s
+  SLO   10 s: goodput  202.9k @C= 2224 | req/chunk 3.80 | chunk 14046 tok | busy  99% | hit 96.4% | p50/p90 2.8/9.7 s
+  SLO   20 s: goodput  206.1k @C= 2320 | req/chunk 4.22 | chunk 15450 tok | busy  99% | hit 96.4% | p50/p90 2.8/17.0 s
+  SLO   30 s: goodput  206.5k @C= 2352 | req/chunk 4.38 | chunk 16029 tok | busy  99% | hit 96.4% | p50/p90 2.9/24.1 s
+  SLO   60 s: goodput  204.7k @C= 2560 | req/chunk 4.45 | chunk 16353 tok | busy  99% | hit 96.3% | p50/p90 3.4/33.0 s
+  SLO  120 s: goodput  204.7k @C= 2560 | req/chunk 4.45 | chunk 16353 tok | busy  99% | hit 96.3% | p50/p90 3.4/33.0 s
+  SLO   none: goodput  206.5k @C= 2352 | req/chunk 4.38 | chunk 16029 tok | busy  99% | hit 96.4% | p50/p90 2.9/24.1 s
+
+== g8_k0 best
+  SLO    5 s: goodput   85.5k @C=  888 | req/chunk 1.65 | chunk  7013 tok | busy  69% | hit 96.1% | p50/p90 3.1/5.0 s
+  SLO   10 s: goodput  101.5k @C= 1120 | req/chunk 2.90 | chunk 13405 tok | busy  90% | hit 95.1% | p50/p90 5.7/9.8 s
+  SLO   20 s: goodput  101.5k @C= 1152 | req/chunk 3.12 | chunk 14706 tok | busy  92% | hit 94.9% | p50/p90 6.2/13.7 s
+  SLO   30 s: goodput  101.5k @C= 1152 | req/chunk 3.12 | chunk 14706 tok | busy  92% | hit 94.9% | p50/p90 6.2/13.7 s
+  SLO   60 s: goodput  101.5k @C= 1152 | req/chunk 3.12 | chunk 14706 tok | busy  92% | hit 94.9% | p50/p90 6.2/13.7 s
+  SLO  120 s: goodput  101.5k @C= 1152 | req/chunk 3.12 | chunk 14706 tok | busy  92% | hit 94.9% | p50/p90 6.2/13.7 s
+  SLO   none: goodput  102.2k @C= 1136 | req/chunk 3.06 | chunk 14216 tok | busy  91% | hit 95.1% | p50/p90 6.1/11.8 s
+
+== g8_k0 best, infinite cache
+  SLO    5 s: goodput  112.3k @C= 1192 | req/chunk 2.07 | chunk  7723 tok | busy  78% | hit 96.6% | p50/p90 3.4/5.0 s
+  SLO   10 s: goodput  146.3k @C= 1656 | req/chunk 4.28 | chunk 15664 tok | busy  96% | hit 96.3% | p50/p90 5.2/9.9 s
+  SLO   20 s: goodput  147.9k @C= 1736 | req/chunk 4.45 | chunk 16319 tok | busy  98% | hit 96.3% | p50/p90 5.5/16.2 s
+  SLO   30 s: goodput  147.7k @C= 1720 | req/chunk 4.43 | chunk 16369 tok | busy  97% | hit 96.3% | p50/p90 5.7/19.5 s
+  SLO   60 s: goodput  149.0k @C= 3416 | req/chunk 4.09 | chunk 16380 tok | busy  96% | hit 95.8% | p50/p90 49.9/58.2 s
+  SLO  120 s: goodput  148.7k @C= 4096 | req/chunk 4.00 | chunk 16381 tok | busy  96% | hit 95.7% | p50/p90 68.8/77.3 s
+  SLO   none: goodput  149.1k @C= 3672 | req/chunk 4.05 | chunk 16380 tok | busy  96% | hit 95.7% | p50/p90 58.2/68.8 s
+
+== g8_k1 best
+  SLO    5 s: goodput  162.8k @C= 1720 | req/chunk 2.02 | chunk 12924 tok | busy  88% | hit 92.1% | p50/p90 1.4/4.0 s
+  SLO   10 s: goodput  162.8k @C= 1720 | req/chunk 2.02 | chunk 12924 tok | busy  88% | hit 92.1% | p50/p90 1.4/4.0 s
+  SLO   20 s: goodput  159.7k @C= 1792 | req/chunk 2.29 | chunk 15357 tok | busy  94% | hit 91.3% | p50/p90 1.6/12.2 s
+  SLO   30 s: goodput  159.7k @C= 1792 | req/chunk 2.29 | chunk 15357 tok | busy  94% | hit 91.3% | p50/p90 1.6/12.2 s
+  SLO   60 s: goodput  159.7k @C= 1792 | req/chunk 2.29 | chunk 15357 tok | busy  94% | hit 91.3% | p50/p90 1.6/12.2 s
+  SLO  120 s: goodput  159.7k @C= 1792 | req/chunk 2.29 | chunk 15357 tok | busy  94% | hit 91.3% | p50/p90 1.6/12.2 s
+  SLO   none: goodput  162.8k @C= 1720 | req/chunk 2.02 | chunk 12924 tok | busy  88% | hit 92.1% | p50/p90 1.4/4.0 s
+
+== g8_k1 best, infinite cache
+  SLO    5 s: goodput  398.5k @C= 4264 | req/chunk 3.64 | chunk 13210 tok | busy  98% | hit 96.5% | p50/p90 1.4/4.3 s
+  SLO   10 s: goodput  403.1k @C= 4384 | req/chunk 3.98 | chunk 14433 tok | busy  99% | hit 96.4% | p50/p90 1.4/8.5 s
+  SLO   20 s: goodput  406.4k @C= 4512 | req/chunk 4.27 | chunk 15404 tok | busy  99% | hit 96.4% | p50/p90 1.4/16.6 s
+  SLO   30 s: goodput  407.8k @C= 4576 | req/chunk 4.43 | chunk 16021 tok | busy  99% | hit 96.4% | p50/p90 1.5/27.2 s
+  SLO   60 s: goodput  405.4k @C= 5120 | req/chunk 4.50 | chunk 16366 tok | busy  99% | hit 96.3% | p50/p90 2.2/31.7 s
+  SLO  120 s: goodput  405.4k @C= 5120 | req/chunk 4.50 | chunk 16366 tok | busy  99% | hit 96.3% | p50/p90 2.2/31.7 s
+  SLO   none: goodput  407.9k @C= 4640 | req/chunk 4.52 | chunk 16361 tok | busy  99% | hit 96.4% | p50/p90 1.5/31.4 s

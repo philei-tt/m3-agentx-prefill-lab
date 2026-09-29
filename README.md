@@ -262,7 +262,13 @@ Takeaways:
    * 8 gx: one 32-stage pipeline beats 2×16 (101.5k vs 78.4k today, 162k vs 150k roofline). [8,4] stages lose.
 8. **Faster decode raises prefill goodput** (90 → 360 tok/s: 42.6k → 46.7k at 4 gx), because it shrinks the live KV working set per unit of load.
 9. **Pool copies** are within 1–3% across sequential / double-buffered / triple-buffered, and 4 fixed 1M lanes are within 1–2% of an arena.
-10. **The cliff is steep.** Goodput can change by 10% between neighbouring concurrency points, so the sweep bisects the SLO crossing.
+10. **The SLO is not what limits batch fill; KV capacity is** (`tools/slo_ab.js`, `results/slo_ab.txt`).
+    * Requests per chunk at p90 ≤ 10 s → no SLO: 1.27 → 1.79 (today's 4-gx config + pool + host + batch) and 1.9–2.9 → 2.0–3.1 (best stacks).
+    * Goodput gains only 0–1% on the best stacks (+10% on today's config). Beyond that point more sessions stop fitting in the KV cache, so the throughput peak sits at about the same concurrency as the 10 s point.
+    * With an infinite cache, batches fill: 2.8–4.3 requests per chunk (14–16k of the 16k budget) at 10 s, 3.8–4.5 with no SLO, and 96–99% of the bottleneck stage busy.
+    * A 5 s SLO costs 20–40% with today's kernels, and 0–2% with roofline kernels.
+    * The page has an SLO slider, whose right end means no SLO. A no-SLO run bisects the throughput peak. Different SLOs sample different concurrencies, so goodput vs SLO can wobble by about ±3%.
+11. **The cliff is steep.** Goodput can change by 10% between neighbouring concurrency points, so the sweep bisects the SLO crossing.
 
 ## Assumptions to revisit
 

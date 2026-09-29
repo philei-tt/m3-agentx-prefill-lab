@@ -220,6 +220,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <legend>Traffic &amp; SLO</legend>
     <div class="row"><label for="decodeTps">Decode tok/s per request</label><input id="decodeTps" type="number" min="5" step="5"></div>
     <div class="row"><label for="slo">p90 TTFT SLO (s)</label><input id="slo" type="number" min="0.5" step="0.5"></div>
+    <div class="row"><label for="sloR">SLO slider <span class="mono" id="sloV"></span></label><input id="sloR" type="range" min="0" max="100" step="1" aria-label="p90 TTFT SLO, log scale, right end = no SLO"></div>
+    <div class="hint">Log scale from 1 s to 10 min; the right end means no SLO (goodput = peak). Results update live; a run sweeps up to about 4× the SLO it was started with, so for a much looser SLO, run again.</div>
     <div class="row"><label for="duration">Profiling window (s)</label><select id="duration"><option>900</option><option>1800</option></select></div>
     <div class="row"><label for="seed">Seed</label><input id="seed" type="number" min="1" step="1"></div>
     <div class="row"><label for="concs">Concurrency grid</label><input id="concs" type="text"></div>
@@ -660,7 +662,8 @@ onmessage = (e) => {
   M3SWEEP.sweep(j.concs, j.slo, (c, tag) => {
     let r; try { r = M3SIM.simulate(TR, CAL, Object.assign({}, j.cfg, { concurrency: c })); } catch (err) { r = { error: String(err) }; }
     const p = slim(r, c); postMessage({ id: j.id, point: p, tag }); return p;
-  });
+  }, j.slo >= 1e6 ? { extend: 0, refinePeak: 3 } : {}); // no SLO: goodput = peak, so bisect the peak instead
+
   postMessage({ id: j.id, done: true });
 };`;
 let workerUrl = null;
@@ -832,16 +835,18 @@ function render() {
   if (run) { series.push({ name: 'this config', color: C.cfg, pts: run.real }); if (run.inf.length) series.push({ name: 'same, infinite cache', color: C.inf, pts: run.inf }); }
   if (pinned) series.push({ name: 'pinned: ' + pinned.name, color: C.pin, pts: pinned.real });
   $('legend').innerHTML = series.map((s) => `<span><i style="background:${s.color}"></i>${esc(s.name)}</span>`).join('');
-  drawTriple(['chU', 'chT', 'chH'], series, slo);
+  drawTriple(['chU', 'chT', 'chH'], series, slo < NO_SLO ? slo : null);
   const R = run ? summarize(run.real, slo) : null, I = run && run.inf.length ? summarize(run.inf, slo) : null, P = pinned ? summarize(pinned.real, slo) : null;
   const a = R && R.at;
+  // a run stops sweeping about 4x past the SLO it was started with: a much looser SLO needs a new run
+  const stale = run && run.slo && slo > 4 * run.slo;
   const tiles = [
-    ['Goodput', R ? (R.atEdge ? '≥ ' : '') + fmtK(R.goodput) : '–', 'useful tok/s @ p90 ≤ ' + slo + ' s', R && R.atEdge ? 'still under the SLO at the highest concurrency simulated' : P ? `pinned ${fmtK(P.goodput)} (${R && P.goodput ? (R.goodput / P.goodput).toFixed(2) + 'x' : '–'})` : ''],
+    ['Goodput', R ? (R.atEdge ? '≥ ' : '') + fmtK(R.goodput) : '–', slo >= NO_SLO ? 'useful tok/s, no TTFT limit (= peak)' : 'useful tok/s @ p90 ≤ ' + slo + ' s', stale ? `run swept for a ${sloTxt(run.slo)} SLO: run again for this one` : R && R.atEdge ? 'still under the SLO at the highest concurrency simulated' : P ?`pinned ${fmtK(P.goodput)} (${R && P.goodput ? (R.goodput / P.goodput).toFixed(2) + 'x' : '–'})` : ''],
     ['With infinite cache', I ? (I.atEdge ? '≥ ' : '') + fmtK(I.goodput) : '–', 'same config, nothing evicted', R && I && I.goodput ? `real = ${I.atEdge ? '≤ ' : ''}${pct(R.goodput / I.goodput)} of ∞` : ''],
     ['TTFT at goodput point', a ? `${fmtS(a.ttftP50)}<small> / ${fmtS(a.ttftP90)} s</small>` : '–', 'p50 / p90', a ? `C = ${a.conc} lanes` : ''],
     ['Hit rate there', a ? pct(a.hitRate, 1) : '–', 'prefix-cache hit, token-weighted', a ? `∞-cache ${pct(a.infHitRate, 1)}` : ''],
     ['Peak useful', R && R.peak ? fmtK(R.peak.usefulTps) : '–', 'any TTFT', R && R.peak ? `C = ${R.peak.conc}, p90 ${fmtS(R.peak.ttftP90)} s` : ''],
-    ['Requests per chunk', a ? a.avgSegsPerChunk.toFixed(2) : '–', 'average, at the goodput point', a ? `chunk ${Math.round(a.avgChunkTok)} tokens, stage busy ${pct(a.maxUtil)}` : ''],
+    ['Requests per chunk', a ? a.avgSegsPerChunk.toFixed(2) : '–', 'average, at the goodput point', a ? `chunk ${Math.round(a.avgChunkTok)} tok, busy ${pct(a.maxUtil)}` + (R.peak && R.peak !== a ? ` · at peak ${R.peak.avgSegsPerChunk.toFixed(2)}` : '') : ''],
   ];
   $('tiles').innerHTML = tiles.map(([k, v, s, d]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="k">${s}</div><div class="d">${d}</div></div>`).join('');
   // breakdown
@@ -870,7 +875,7 @@ function startRun() {
   const concs = $('concs').value.split(',').map((x) => Number(x.trim())).filter((x) => x > 0).sort((a, b) => a - b);
   const slo = Number($('slo').value);
   const name = $('preset').value >= 0 ? PRESETS[Number($('preset').value)].name : 'custom';
-  run = { name, cfg, real: [], inf: [] };
+  run = { name, cfg, real: [], inf: [], slo };
   const jobs = [{ id: 'real', cfg }];
   if ($('compareInf').checked && cfg.cache !== 'inf') jobs.push({ id: 'inf', cfg: Object.assign({}, cfg, { cache: 'inf', hostTier: false }) });
   $('runBtn').disabled = true; $('runBtn').dataset.busy = '1'; $('pinBtn').disabled = true;
@@ -889,7 +894,17 @@ function startRun() {
 }
 $('runBtn').addEventListener('click', startRun);
 $('pinBtn').addEventListener('click', () => { if (run) { pinned = { name: run.name, real: run.real.slice() }; render(); } });
-$('slo').addEventListener('change', render);
+// SLO: number box + log slider (1 s .. 600 s; the right end = no SLO, stored as NO_SLO seconds)
+const NO_SLO = 1e6, SLO_MIN = 1, SLO_MAX = 600;
+const sloFromR = (r) => (r >= 100 ? NO_SLO : Math.round(SLO_MIN * Math.pow(SLO_MAX / SLO_MIN, r / 99) * 2) / 2);
+const rFromSlo = (s) => (s >= NO_SLO ? 100 : Math.round(99 * Math.log(Math.max(SLO_MIN, Math.min(SLO_MAX, s)) / SLO_MIN) / Math.log(SLO_MAX / SLO_MIN)));
+const sloTxt = (s) => (s >= NO_SLO ? 'none' : s + ' s');
+function syncSlo(from) {
+  if (from === 'r') $('slo').value = sloFromR(Number($('sloR').value)); else $('sloR').value = rFromSlo(Number($('slo').value));
+  $('sloV').textContent = sloTxt(Number($('slo').value));
+}
+$('slo').addEventListener('change', () => { syncSlo('n'); render(); });
+$('sloR').addEventListener('input', () => { syncSlo('r'); render(); });
 
 // ---------------------------------------------------------------- roadmap
 const FEAT = Object.fromEntries(STUDY.features.map((f) => [f.key, f]));
@@ -1009,12 +1024,12 @@ function renderModel() {
 presetOptions();
 const startIdx = Math.max(0, PRESETS.findIndex((p) => p.name === 'today-C'));
 $('preset').value = String(startIdx); setForm(PRESETS[startIdx].cfg); $('presetDesc').textContent = PRESETS[startIdx].desc;
-$('slo').value = STUDY.slo; $('concs').value = '16,32,64,96,128,192,256,384,512,640,768,1024,1536,2048';
+$('slo').value = STUDY.slo; syncSlo('n'); $('concs').value = '16,32,64,96,128,192,256,384,512,640,768,1024,1536,2048';
 updatePlan(); renderRoadmap(); renderModel();
 // show the study curves for the starting preset until the viewer runs one
 (function seed() {
   const S = STUDY.scenarios.g4_k0;
-  run = { name: 'study baseline, 4 gx', real: S.curves.base, inf: [] };
+  run = { name: 'study baseline, 4 gx', real: S.curves.base, inf: [], slo: STUDY.slo };
   $('resTitle').textContent = 'Results: study baseline for 4 galaxies (16x[2,4], chunk 2048, auto split, static slots; precomputed, press Run for a live sweep)';
   render();
 })();
