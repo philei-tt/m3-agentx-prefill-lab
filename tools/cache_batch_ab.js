@@ -1,6 +1,10 @@
-// today's 4-gx config + slot lanes/pool, with and without batching, and full paging: goodput and batch shape
-const { Pool, summarize } = require('/data/philei/m3-agentx-prefill-lab/lib/pool.js');
-const { CONCS, SLO } = require('/data/philei/m3-agentx-prefill-lab/study.js');
+#!/usr/bin/env node
+// Today's 4-gx config (16x[2,4], chunk 2048) with each KV mode (slots / pool / paging / host tier / inf), with and
+// without batching: goodput and the batch shape at the goodput point (requests per chunk, chunk tokens, padding).
+// Usage: JOB=<slurm job> ./on_node.sh node tools/cache_batch_ab.js
+'use strict';
+const { Pool, summarize } = require('../lib/pool.js');
+const { CONCS, SLO } = require('../study.js');
 const base = { galaxies: 4, stages: 16, mesh: [2, 4], chunk: 2048, split: 'auto' };
 const B = { batch: true, budget: 16384 };
 const variants = [
