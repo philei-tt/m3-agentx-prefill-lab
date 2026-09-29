@@ -3,6 +3,7 @@
 'use strict';
 const R = JSON.parse(require('fs').readFileSync(process.argv[2] || require('../lib/paths.js').STUDY));
 const { FEATURES } = require('../study.js');
+const SCOPE = require('../lib/scope.js');
 const k = (x) => (x >= 1e5 ? (x / 1000).toFixed(0) : (x / 1000).toFixed(1)) + 'k';
 const SC = Object.keys(R.scenarios);
 console.log('| scenario | today | greedy full stack | best grid config | best config with ∞ cache |\n|---|---|---|---|---|');
@@ -25,7 +26,9 @@ const rows = FEATURES.map((f) => {
     if (s === RANK) best = Math.max(best, G || 1, L || 1);
     return `×${G ? G.toFixed(2) : '–'} #${gi} / ×${L ? L.toFixed(2) : '–'}`;
   });
-  return { tier: best >= 1.25 ? 'P0' : best >= 1.07 ? 'P1' : 'P2', best, line: `| ${f.name} | ${cells.join(' | ')} |` };
+  const cx = (SCOPE[f.key] || ['–'])[0];
+  return { tier: best >= 1.25 ? 'P0' : best >= 1.07 ? 'P1' : 'P2', best, cells: [f.name, ...cells, cx] };
 }).sort((a, b) => b.best - a.best);
-console.log('\n| tier | feature | ' + SC.map((s) => R.scenarios[s].label).join(' | ') + ' |\n|---|---|' + SC.map(() => '---').join('|') + '|');
-for (const r of rows) console.log(`| ${r.tier} ${r.line.slice(1)}`);
+const heads = ['tier', 'feature', ...SC.map((s) => R.scenarios[s].label + (s === RANK ? ' (ranking)' : '')), 'complexity'];
+console.log('\n| ' + heads.join(' | ') + ' |\n|' + heads.map(() => '---').join('|') + '|');
+for (const r of rows) console.log(`| ${[r.tier, ...r.cells].join(' | ')} |`);

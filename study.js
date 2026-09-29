@@ -118,7 +118,7 @@ async function main() {
       ['PCIe 16 GB/s/gx', { pcieGBsPerGalaxy: 16 }], ['PCIe 256 GB/s/gx', { pcieGBsPerGalaxy: 256 }],
       ['decode 90 tok/s', { decodeTps: 90 }], ['decode 360 tok/s', { decodeTps: 360 }],
       ['reserve 6 GB/chip', { reserveGB: 6 }], ['SLO-free peak', {}],
-      ['TP=4 mesh only', sc.base.galaxies === 4 ? { mesh: [2, 4], stages: 16 } : { mesh: [2, 4], stages: 32 }],
+      ['TP=4 mesh only', sc.base.galaxies === 4 ? { mesh: [2, 4], stages: 16, replicas: 1 } : { mesh: [2, 4], stages: 32, replicas: 1 }],
     ];
     R.sens = await Promise.all(sens.map(([name, d]) => evalKeys(sc, good, Object.assign({}, bestExtra, d)).then((r) => ({ name, goodput: r.goodput, peak: r.peak ? r.peak.usefulTps : 0, at: r.at }))));
   }));
