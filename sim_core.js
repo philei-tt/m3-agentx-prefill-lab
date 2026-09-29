@@ -116,8 +116,9 @@
         if (!c.varLayout || sp <= 1) return 0;
         return sp * nl * (kvHeadB + M3.di * c.idxB) / (4 * HW.linkUni) * torusFactors(c).a2a;
       case 'ring_c': return 4 * nl * (M3.Hq / tp) * (s.k + s.n / 2) * M3.d / HW.F_hifi;
-      case 'ring_scan': { // ring-joint walks the whole per-device cache shard (capacity/sp) every chunk
-        const scan = c.bounded ? kvlen : Math.max(s.cap, kvlen);
+      case 'ring_scan': { // ring-joint gathers the valid prefix [0, kv_len) (op-bounded since tt-metal #47539);
+        // bounded === false models the pre-#47539 op that gathered the whole per-device cache shard (capacity/sp)
+        const scan = c.bounded === false ? Math.max(s.cap, kvlen) : kvlen;
         return scan / sp * kvHeadB / HW.linkBi * torusFactors(c).scan;
       }
     }
@@ -143,7 +144,7 @@
 
   function zoneEff(zones, mesh, idxB) {
     const [sp, tp] = mesh;
-    const c = { sp, tp, P: sp * tp, T: ZONE_T, idxB, imb: IMB0, varLayout: false, bounded: false, msaLocal: false };
+    const c = { sp, tp, P: sp * tp, T: ZONE_T, idxB, imb: IMB0, varLayout: false, bounded: true, msaLocal: false };
     const seg = { n: ZONE_T, k: ZONE_K, cap: ZONE_CAP };
     const eff = { moe: {}, dense: {} };
     const zm = (name) => (zones[name] ? zones[name].mean : null);
@@ -199,7 +200,7 @@
     for (const m in data.zones) effs[m] = zoneEff(data.zones[m], m.split('x').map(Number), idxB);
     // [4,4] has no profile: geometric midpoint of [2,4] and [8,4] (log-chip-count midpoint)
     if (effs['2x4'] && effs['8x4']) effs['4x4'] = interpEff(effs['2x4'], effs['8x4'], 0.5);
-    const cal = { effs, pipe: { moeMult: [1, 0], stageOv: [2, 0], ringC: null, ringScan: 0.015, embed: 1.6, block: [12, 2.6], hop: [12, 0] }, fit: {} };
+    const cal = { effs, pipe: { moeMult: [1, 0], stageOv: [2, 0], ringC: null, ringScan: 0.015, denseFix: 0, embed: 1.6, block: [12, 2.6], hop: [12, 0] }, fit: {} };
     fitPipeline(cal, data);
     return cal;
   }
@@ -208,7 +209,7 @@
   function fitPipeline(cal, data) {
     const P = data.pipeline; if (!P || !P.B) return;
     const mesh = [2, 4];
-    const base = (T) => ({ sp: 2, tp: 4, P: 8, T, idxB: BF16, imb: IMB0, varLayout: false, bounded: false, msaLocal: false });
+    const base = (T) => ({ sp: 2, tp: 4, P: 8, T, idxB: BF16, imb: IMB0, varLayout: false, bounded: true, msaLocal: false });
     const eff = cal.effs['2x4'];
     const ctx = (T, na) => Object.assign(base(T), { Tr: na });
     // samples: every (cell, rank, chunk position) median of the loaded blocks; actual tokens and kv are exact
@@ -238,20 +239,33 @@
     if (beta[2] < 0) { const b2 = lstsq(X.map((x) => [x[0], x[1]]), Y); beta = [b2[0], b2[1], 0]; }
     cal.pipe.moeMult = [beta[0], beta[1]]; cal.pipe.stageOv = [beta[2], 0];
     cal.fit.moe_rmse = rmse(X, Y, beta);
-    // 2) dense ring: single-dense-layer stages (B/C ranks 1,2) -> grid search eff_ring_c, eff_ring_scan
+    // 2) dense ring: single-dense-layer stages (B/C ranks 1,2) -> grid search eff_ring_c, eff_ring_scan and a fixed
+    //    per-call cost of the dense attention (d ms). In these runs the lane capacity is cached + 51200, which moves
+    //    with kv_len, so a capacity term and a kv term are nearly collinear across cells; within a cell (fixed
+    //    capacity, growing kv) and across chunk sizes (the slope scales with T) the data is kv-bound: a joint
+    //    regression gives ~210 ms per 1M kv tokens vs ~19 ms per 1M of capacity at chunk 5120 (2.4 at 2048),
+    //    and the op gathers only [0, kv_len) since #47539. The missing ~4.5 ms per-call intercept is fitted here.
+    //    model = rest + max(ringC_roof / eff_c, scan_roof / eff_s) + d
     const dense = samples.filter((p) => p.nd === 1 && p.n === 1 && p.s > 0);
     const ov = (T) => cal.pipe.stageOv[0] + cal.pipe.stageOv[1] * T / 1000;
+    const off = Object.assign({}, eff.dense, { ring_c: 1e9, ring_scan: 1e9 });
+    const pre = dense.map((p) => {
+      const c = ctx(p.T, p.na), s = { n: p.T, na: p.na, k: p.k, cap: p.cap };
+      return {
+        R: layerMs('dense', c, [s], off, LAT_MEAS, 'seq') + ov(p.T),
+        A: roofSeg('ring_c', c, s) * 1e3 * waveFactor(s.n, c) / waveFactor(ZONE_T, c),
+        B: roofSeg('ring_scan', c, s) * 1e3, ly: Math.log(p.y),
+      };
+    });
     let best = null;
-    for (let lc = Math.log(0.05); lc <= Math.log(1.0); lc += 0.02) for (let ls = Math.log(0.001); ls <= Math.log(0.2); ls += 0.02) {
-      const e = Object.assign({}, eff.dense, { ring_c: Math.exp(lc), ring_scan: Math.exp(ls) });
+    for (let d = 0; d <= 10; d += 0.25) for (let lc = Math.log(0.05); lc <= Math.log(1.0); lc += 0.02) for (let ls = Math.log(0.001); ls <= Math.log(0.5); ls += 0.1) {
+      const ic = Math.exp(-lc), is = Math.exp(-ls);
       let err = 0;
-      for (const p of dense) {
-        const m = layerMs('dense', ctx(p.T, p.na), [{ n: p.T, na: p.na, k: p.k, cap: p.cap }], e, LAT_MEAS, 'seq') + ov(p.T);
-        err += (Math.log(m) - Math.log(p.y)) ** 2;
-      }
-      if (!best || err < best.err) best = { err, rc: Math.exp(lc), rs: Math.exp(ls) };
+      for (const q of pre) { const m = q.R + Math.max(q.A * ic, q.B * is) + d; err += (Math.log(m) - q.ly) ** 2; }
+      if (!best || err < best.err) best = { err, rc: Math.exp(lc), rs: Math.exp(ls), d };
     }
-    cal.pipe.ringC = best.rc; cal.pipe.ringScan = best.rs; cal.fit.dense_rmse_log = Math.sqrt(best.err / Math.max(1, dense.length));
+    cal.pipe.ringC = best.rc; cal.pipe.ringScan = best.rs; cal.pipe.denseFix = best.d;
+    cal.fit.dense_rmse_log = Math.sqrt(best.err / Math.max(1, dense.length));
     // 3) embedding = rank0 - rank1 (both one dense layer) in B/C
     const r0 = samples.filter((p) => p.s === 0 && p.n === 1), r1 = new Map(dense.filter((p) => p.s === 1).map((p) => [`${p.run}|${p.k}|${p.na}`, p.y]));
     const emb = r0.map((p) => p.y - (r1.get(`${p.run}|${p.k}|${p.na}`) ?? p.y)).sort((a, b) => a - b);
@@ -302,7 +316,7 @@
         t += Math.max(rc, rs);
         if (c.varLayout && c.sp > 1) t += cclLat('kv_a2a', c, lat) + roofSeg('kv_a2a', c, s) * 1e3 / eff.kv_a2a;
       }
-      t += fused ? lat.op : lat.op * segs.length;
+      t += (fused ? 1 : segs.length) * (lat.op + (lat.denseFix || 0)); // per ring-joint call
     }
     return t;
   }
@@ -322,7 +336,7 @@
     opEff: 0,              // 0 = today's measured kernels, 1 = roofline target efficiencies
     torus: 'full',         // ring collectives: 'full' = only [4,4] stages (a whole 4x4 torus) | 'axes' | 'off' (makePlan)
     asyncHandoff: false,   // stage-to-stage D2D overlapped with compute (no blocking send), link-rate transfer
-    boundedDense: false,   // dense ring-joint SDPA scans [0, kv_len) instead of the whole lane capacity
+    boundedDense: true,    // dense ring-joint gathers [0, kv_len) (op-bounded since #47539); false = whole lane capacity
     msaLocal: false,       // MSA: SP-local indexer + top-k merge, fetch only selected K/V blocks (no prefix all-gather)
     idxBf16: true, idxDerep: false, // index_k cache dtype / de-replicated over TP (today: bf16 x TP replicas)
     chunk: 5120, layout: 'fixed', batch: false, budget: 16384, attn: 'seq', policy: 'fcfs',
@@ -401,7 +415,9 @@
     const tmode = cfg.torus === true ? 'full' : cfg.torus === false ? 'off' : cfg.torus;
     const ringSp = sp === 4 && (tmode === 'axes' || (tmode === 'full' && tp === 4));
     const ringTp = tp === 4 && (tmode === 'axes' || (tmode === 'full' && sp === 4));
-    const lat = { ccl: (1 - a) * LAT_MEAS.ccl + a * LAT_TGT.ccl, op: (1 - a) * LAT_MEAS.op + a * LAT_TGT.op };
+    // denseFix: fitted fixed cost of one dense ring-joint call (~4.5 ms today); roofline kernels shrink it to <= 1 ms
+    const fix0 = cal.pipe.denseFix || 0;
+    const lat = { ccl: (1 - a) * LAT_MEAS.ccl + a * LAT_TGT.ccl, op: (1 - a) * LAT_MEAS.op + a * LAT_TGT.op, denseFix: (1 - a) * fix0 + a * Math.min(fix0, 1) };
     const idxB = cfg.idxBf16 ? BF16 : BF8;
     const ctxT = (T) => ({ sp, tp, P, T, idxB, imb: cfg.expertImb, varLayout: cfg.layout === 'var', bounded: cfg.boundedDense, msaLocal: cfg.msaLocal, ringSp, ringTp });
     const pm = cal.pipe;

@@ -9,16 +9,16 @@ module.exports = {
     todo: [
       'Page allocator and page table per stage in device DRAM; prefix index from block hash to page on the host.',
       'A page-list gather/scatter op that copies many pages into or out of a lane in one launch (per-page host copies would be dispatch-bound).',
-      'A per-stage lane table: each stage allocates a lane only while it works on the request (today slot_id is global across stages). This is required once batching is on: global lanes cap the best 4-galaxy config near 25k instead of 45k useful tok/s, unless the arena grows to about 8M tokens.',
+      'A per-stage lane table: each stage allocates a lane only while it works on the request (today slot_id is global across stages). This is required once batching is on: a global lane table drops the best 4-galaxy config from 45k to about 14k useful tok/s (8 galaxies: 102k to 28k).',
       'Pool copies double-buffered: copy-in of the next batch and copy-out of the previous one overlap compute. The peak lane memory is about 2x the computing lanes, briefly; sequential copies (1x) cost about 1% on the best configs.',
       'Scheduler: LRU eviction, pinning of in-flight prefixes, copy-in of the next request while the current chunk computes, copy-out after the last chunk.',
       'KV migration to decode reads from lane or pool pages instead of a fixed slot.',
     ],
-    notes: 'Prerequisite for the host-DRAM tier. With fixed 1M lanes the dense layers still scan 1M tokens per chunk, so bounded dense gather (or variable-size lanes) is still needed. The lane count limits how many requests can share a batched chunk.',
+    notes: 'Prerequisite for the host-DRAM tier. The lane count limits how many requests can share a batched chunk.',
   },
   host: {
     what: 'A second KV tier in the host servers\' RAM behind the device pool. Pages the device evicts are written to host RAM instead of dropped. When a request hits a host-resident prefix, those pages are copied back over PCIe into its lane while the request waits in the queue.',
-    why: 'M3 KV is about 127 KB per token today (73 KB with the index-cache fixes). 4 galaxies hold about 21M tokens on device, but the live working set of AgentX near the throughput limit is several times larger, so the device pool alone still evicts conversations that come back minutes later. 1 TB of host RAM per galaxy adds about 32M tokens (56M with the index fixes). A host hit costs a PCIe copy: a 150k-token prefix is about 19 GB, about 75 ms over 4 × 64 GB/s, small next to TTFT and done while the request is queued. In the simulation host RAM size matters a lot (0.5 → 2 TB per galaxy: 36.9k → 54.9k goodput at 4 galaxies with today\'s kernels) and PCIe bandwidth much less (dropping it from 64 to 16 GB/s per galaxy costs at most 11%).',
+    why: 'M3 KV is about 127 KB per token today (73 KB with the index-cache fixes). 4 galaxies hold about 21M tokens on device, but the live working set of AgentX near the throughput limit is several times larger, so the device pool alone still evicts conversations that come back minutes later. 1 TB of host RAM per galaxy adds about 32M tokens (56M with the index fixes). A host hit costs a PCIe copy: a 150k-token prefix is about 19 GB, about 75 ms over 4 × 64 GB/s, small next to TTFT and done while the request is queued. In the simulation host RAM size matters a lot (0.5 → 2 TB per galaxy: 36.8k → 54.5k goodput at 4 galaxies with today\'s kernels) and PCIe bandwidth much less (dropping it from 64 to 16 GB/s per galaxy costs at most 13%).',
     todo: [
       'Host page store in pinned memory with its own LRU.',
       'Asynchronous device→host write-back on eviction and host→device fetch before admission, using PCIe DMA from the host runtime.',
@@ -26,16 +26,6 @@ module.exports = {
       'Measure the real galaxy host RAM size and achievable PCIe DMA rate; both are assumptions here (1 TB, 64 GB/s per galaxy).',
     ],
     notes: 'Requires the paged pool. AgentX caps host DRAM (3 TB per system, proportional to the accelerator allocation), so a compliant submission may get less than the default 4 TB at 4 galaxies.',
-  },
-  bounded: {
-    what: 'The three dense layers use ring-joint SDPA. Its ring walks the whole KV slot capacity on every chunk (<span class="mono">cache_global = kv_cache.max_seq_len</span> in the dense attention prefill path), not just the tokens that are actually cached. The MSA layers already gather only the valid prefix. This feature bounds the dense ring to [0, kv_len).',
-    why: 'With production 1M slots each chunk scans 1M tokens in every dense layer. Fitted from runs B/C, that costs about 100 ms per dense layer per chunk, regardless of chunk size or of how much is cached. The single-dense-layer stages then become the bottleneck: a run-C-like pipeline caps at about 18k processed tok/s. Bounded, the cost follows the real context (median about 140k), and those stages fall back to about a third of the MoE stage time.',
-    todo: [
-      'Pass kv_len (per chunk, as a device scalar so traces stay valid) into the dense ring-joint SDPA.',
-      'Restrict the ring\'s K/V chunk loop and the gathered size to valid blocks, as the MSA path does with its gathered size.',
-      'PCC at several cache depths; re-check the compile buckets.',
-    ],
-    notes: 'Redundant once lanes are request-sized (variable-size lanes) or paging exists. That is why its leave-one-out value is ×1.00 in the full stack. It also matters little if the scan kernel runs at link rate ("roofline kernels"). Low complexity and P0 while lanes are 1M: the best effort-to-gain ratio in the list.',
   },
   idxdedup: {
     what: 'The index-key cache used by the MSA indexer (one 128-wide key per token per layer, bf16) is stored on all 4 TP columns. That is 1024 of the 2112 bytes per token per layer: 48% of all KV memory. Store it once per SP row and gather it inside the indexer. The dense layers also allocate a zero-filled index cache, which can be dropped.',
@@ -58,8 +48,8 @@ module.exports = {
     notes: 'Mostly an accuracy sign-off, not implementation work.',
   },
   async: {
-    what: 'Today each stage receives a chunk, computes it, then sends the activation to the next stage (about 63 MB for a 5120-token chunk), and the send blocks the stage. Measured: about 18 ms per chunk at 5120 (7.5 ms at 2048) of blocking send, plus 14-16 ms of hop latency. With async handoff the send overlaps with computing the next chunk.',
-    why: 'The blocking send adds 10-35% to the pipeline period. Its share grows with more stages (fewer layers per stage) and with faster kernels: ×1.15-1.18 at 4 galaxies with today\'s kernels, ×1.45-1.48 at 8 galaxies with roofline kernels. It also cuts TTFT, since 32 hops × 15 ms is about 0.5 s.',
+    what: 'Today each stage receives a chunk, computes it, then sends the activation to the next stage (about 63 MB for a 5120-token chunk), and the send blocks the stage. Fitted from runs A/B/C: about 23 ms per chunk at 5120 (8 ms at 2048) of blocking send, plus 14-19 ms of hop latency. With async handoff the send overlaps with computing the next chunk.',
+    why: 'The blocking send adds 10-35% to the pipeline period. Its share grows with more stages (fewer layers per stage) and with faster kernels: ×1.12-1.20 at 4 galaxies with today\'s kernels, ×1.45-1.62 at 8 galaxies with roofline kernels. It also cuts TTFT, since 32 hops × 15 ms is about 0.5 s.',
     todo: [
       'Double-buffered D2D send/receive: post the send and start the next chunk immediately; the receiver pre-posts buffers.',
       'Make sure the transfer uses enough links (the activation is spread over the stage\'s chips).',
@@ -69,7 +59,7 @@ module.exports = {
   },
   batch: {
     what: 'Put several requests\' new tokens into one chunk, up to a token budget (8-16k works best). Projections, norms and the whole MoE run on the concatenated tokens; attention runs per request (sequential).',
-    why: 'Most AgentX requests are small (median 1600 new tokens), so most chunks are small. An MoE layer has a large per-chunk cost that does not depend on tokens: expert weights (16 experts × 32 MB per chip per layer at [2,4]) and about 10 collectives per layer with ~40 µs latency each. More tokens per chunk amortise it. At chunk 2048 each expert sees only about 64 tokens (T×4/128), far below the 260-460 tokens per expert where the matmuls become compute-bound. Measured: ×1.13-1.69 (×1.69 when added right after the pool at 4 galaxies with today\'s kernels; ×1.17-1.32 when removed from the full stack), at slightly higher TTFT. With sequential attention it does not matter which requests share a chunk.',
+    why: 'Most AgentX requests are small (median 1600 new tokens), so most chunks are small. An MoE layer has a large per-chunk cost that does not depend on tokens: expert weights (16 experts × 32 MB per chip per layer at [2,4]) and about 10 collectives per layer with ~40 µs latency each. More tokens per chunk amortise it. At chunk 2048 each expert sees only about 64 tokens (T×4/128), far below the 260-460 tokens per expert where the matmuls become compute-bound. Measured: ×1.14-1.29 when added, ×1.17-1.33 when removed from the full stack, at slightly higher TTFT. With sequential attention it does not matter which requests share a chunk.',
     todo: [
       'Chunk metadata per segment: lane/slot, start position, length.',
       'An attention loop over segments; each segment\'s KV is read and written in its own lane.',
@@ -98,12 +88,12 @@ module.exports = {
   },
   arena: {
     what: 'Instead of fixed 1M lanes, give each request a lane of its actual length from one contiguous arena per stage (2-8M tokens).',
-    why: 'Frees the memory that fixed lanes reserve (4 × 1M tokens per stage) for the pool. Makes the dense scan request-sized, a substitute for bounded dense gather. Lets many small requests be in flight at once for batching. Measured ×0.99-1.03 once the other features are on (×1.55 at 4 galaxies and ×2.7 at 8 galaxies with today\'s kernels when it stands in for a missing bounded dense gather; the two are substitutes, and whichever is added first gets the credit), because they already cover these effects.',
+    why: 'Frees the memory that fixed lanes reserve (4 × 1M tokens per stage) for the pool, and lets many small requests be in flight at once for batching.',
     todo: [
       'Kernels take a base offset + length instead of a slot index.',
       'An allocator with fragmentation handling (compaction, or size classes).',
     ],
-    notes: 'Low priority if bounded dense gather is done and lanes are few.',
+    notes: 'Its value depends on how many lanes batching needs; see the "4 fixed 1M lanes" sensitivity row.',
   },
   msa: {
     what: 'Today every MSA layer all-gathers the whole cached K/V and index keys over SP for each request (ag_kv / ag_index_k). Instead, each SP rank scores its own index keys, a small top-k merge picks the 16 blocks per query, and only those blocks are fetched.',

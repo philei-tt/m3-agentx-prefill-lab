@@ -20,7 +20,7 @@ console.log('== pipeline fit', JSON.stringify(cal.pipe), JSON.stringify(cal.fit)
 console.log('== zone layer totals (T=5120, K=51200): model (opEff=0, no pipeline mult) vs measured');
 for (const m in data.zones) {
   const [sp, tp] = m.split('x').map(Number);
-  const c = { sp, tp, P: sp * tp, T: 5120, idxB: 2, imb: 1.2, varLayout: false, bounded: false, msaLocal: false };
+  const c = { sp, tp, P: sp * tp, T: 5120, idxB: 2, imb: 1.2, varLayout: false, bounded: true, msaLocal: false };
   const seg = [{ n: 5120, k: 51200, cap: 56320 }];
   const lat = { ccl: 0.04, op: 0.01 };
   const tm = SIM.layerMs('moe', c, seg, cal.effs[m].moe, lat, 'seq');

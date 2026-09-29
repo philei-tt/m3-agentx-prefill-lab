@@ -13,7 +13,6 @@ const SLO = 10; // p90 TTFT seconds for goodput
 const CONCS = [8, 16, 24, 32, 48, 64, 96, 128, 160, 192, 256, 320, 384, 448, 512, 576, 640, 768, 896, 1024, 1152, 1280, 1536, 1792, 2048, 2560, 3072, 4096];
 
 const FEATURES = [
-  { key: 'bounded', name: 'Bounded dense gather ([0,kv_len) instead of lane capacity)', cfg: { boundedDense: true } },
   { key: 'unaligned', name: 'Unaligned (block-granular) resume', cfg: { unaligned: true } },
   { key: 'pool', name: 'Slot lanes + paged KV pool (4 x 1M lanes per stage, copy-in/out)', cfg: { cache: 'pool', lanes: 4, laneArena: false, laneScope: 'stage' } },
   { key: 'arena', name: 'Variable-size lanes (contiguous arena, 4M tokens)', cfg: { laneArena: true, arenaTokens: 4e6 }, requires: ['pool'] },
@@ -129,6 +128,7 @@ async function main() {
       ['decode 90 tok/s', { decodeTps: 90 }], ['decode 360 tok/s', { decodeTps: 360 }],
       ['reserve 6 GB/chip', { reserveGB: 6 }], ['SLO-free peak', {}],
       ['TP=4 mesh only', sc.base.galaxies === 4 ? { mesh: [2, 4], stages: 16, replicas: 1 } : { mesh: [2, 4], stages: 32, replicas: 1 }],
+      ['dense gathers whole lane (pre-#47539 op)', { boundedDense: false }],
       ['rings off (line only)', { torus: 'off' }], ['rings on every 4-long axis', { torus: 'axes' }],
       ['[4,4] torus stages', sc.base.galaxies === 4 ? { mesh: [4, 4], stages: 8, replicas: 1 } : { mesh: [4, 4], stages: 16, replicas: 1 }],
     ];

@@ -182,7 +182,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <legend>Kernels</legend>
     <div class="row"><label for="opEff">Op efficiency <span class="mono" id="opEffV"></span></label><input id="opEff" type="range" min="0" max="1" step="0.1"></div>
     <div class="hint">0 = today's measured kernels, 1 = roofline targets (70% matmul, 80% DRAM/link, overlapped expert weight reads).</div>
-    <div class="row check"><input id="boundedDense" type="checkbox"><label for="boundedDense">Bounded dense gather ([0,kv_len))</label></div>
+    <div class="row check"><input id="boundedDense" type="checkbox"><label for="boundedDense">Dense gather bounded to kv_len (today; off = pre-#47539 whole-lane gather)</label></div>
     <div class="row check"><input id="asyncHandoff" type="checkbox"><label for="asyncHandoff">Async stage handoff</label></div>
     <div class="row check"><input id="msaLocal" type="checkbox"><label for="msaLocal">MSA SP-local indexer</label></div>
   </fieldset>
@@ -274,7 +274,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
         <p>Each scenario has two numbers per feature, measured from opposite ends:</p>
         <ul>
           <li><b>G = gain when added (step #).</b> Start from today's configuration, try every feature and keep the best; repeat from the new configuration until all features are in. "×1.65 #2" = this feature was the 2nd one added and multiplied goodput by 1.65 at that point. The order is a suggested build order; a gain depends on the features added before it.</li>
-          <li><b>LOO = loss if removed (leave-one-out).</b> Start with every feature on and turn only this one off. "×1.96" = goodput drops 1.96x without it. ×1.00 = it adds nothing once everything else is on. That is usually because another feature does the same job: bounded dense gather and variable-size lanes both remove the whole-slot scan, and variable chunk already includes unaligned resume.</li>
+          <li><b>LOO = loss if removed (leave-one-out).</b> Start with every feature on and turn only this one off. "×1.96" = goodput drops 1.96x without it. ×1.00 = it adds nothing once everything else is on. That is usually because another feature does the same job: variable chunk already includes unaligned resume, for example.</li>
         </ul>
         <p>Columns: "4gx today" = 4 galaxies with today's kernels, "4gx roofline" = 4 galaxies with kernels at roofline targets, and the same for 8 galaxies (Method tab).</p>
         <p><b>Order and tier</b> come from the "8gx today" column (8 galaxies, today's kernels): the larger of its G and LOO, highest first. P0 ≥ 1.25x, P1 ≥ 1.07x, else P2. The other columns show how the value changes with fewer galaxies or faster kernels. Complexity is a rough low / med / high judgement of the implementation work (Method tab).</p>
@@ -306,7 +306,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
   <div class="results">
     <div class="panel prose">
       <h2>How the cost model is calibrated</h2>
-      <p>Every layer is split into the ops the implementation runs. Each op has a roofline time from its FLOPs, DRAM bytes and ethernet bytes on the stage mesh (Blackhole: 608 TF LoFi / 304 TF HiFi2, 512 GB/s GDDR6, 100 GB/s bidirectional CCL per axis). Its measured efficiency is <span class="mono">roofline / (profiled time − latency floor)</span> from the zone profiles (chunk 5120, 51k cached; [2,4], [8,4], [4,2]; [4,4] interpolated). A pipeline fit on 7,840 per-rank, per-chunk-position medians of the 16-stage runs A/B/C adds the 2D-fabric MoE factor, the dense ring-joint compute and capacity-scan efficiencies, embedding, and the blocking stage handoff. The op-efficiency knob moves every op geometrically from its measured efficiency to the target.</p>
+      <p>Every layer is split into the ops the implementation runs. Each op has a roofline time from its FLOPs, DRAM bytes and ethernet bytes on the stage mesh (Blackhole: 608 TF LoFi / 304 TF HiFi2, 512 GB/s GDDR6, 100 GB/s bidirectional CCL per axis). Its measured efficiency is <span class="mono">roofline / (profiled time − latency floor)</span> from the zone profiles (chunk 5120, 51k cached; [2,4], [8,4], [4,2]; [4,4] interpolated). A pipeline fit on 7,840 per-rank, per-chunk-position medians of the 16-stage runs A/B/C adds the 2D-fabric MoE factor, the dense ring-joint compute and kv_len-gather efficiencies and fixed cost, embedding, and the blocking stage handoff. The op-efficiency knob moves every op geometrically from its measured efficiency to the target.</p>
       <p id="valSummary"></p>
     </div>
     <div class="cols2">
@@ -347,7 +347,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li><b>Static slots.</b> The KV cache is a set of fixed 1M-token slots, one per conversation. Resuming a conversation reuses its own slot's prefix and nothing else.</li>
           <li><b>Fixed chunk, one request per chunk.</b> Each chunk (5120 or 2048 tokens) carries one request, and the tail is padded. The chunk size is fixed because the KV cache is laid out block-cyclically over the SP axis with a period of chunk/SP.</li>
           <li><b>Chunk-aligned resume.</b> A resumed request must start at a chunk multiple; cached tokens past it are recomputed.</li>
-          <li><b>Whole-lane dense scan.</b> The dense layers' ring-joint attention walks the whole slot capacity on every chunk.</li>
+          <li><b>Dense attention bounded to the context.</b> The dense layers' ring-joint attention gathers and scans only the valid prefix [0, kv_len) (op-bounded since tt-metal #47539, via <span class="mono">kv_actual_isl</span>/<span class="mono">logical_n</span>). Its gather buffer is still sized to the whole slot, which costs memory, not time.</li>
         </ul>
       </li>
       <li><b>Measured performance</b> is tracked in tenstorrent/tt-metal issue #57827. The runs used here (Sep 27 2026, 4 galaxies, 16×[2,4], bf4 experts, bf16 index cache):
@@ -357,7 +357,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li><b>C:</b> chunk 2048, same split as B.</li>
         </ul>
         Each run measures a (new tokens × cached tokens) matrix, loaded and idle. The preset <span class="mono">today-C</span> is run C.</li>
-      <li><b>Features under consideration</b> (defined in "Features" below): batching several requests per chunk; slot lanes plus a paged KV pool; variable chunk size with an all-to-all KV write; plus a few more the study adds (host-DRAM tier, index-cache layout, async stage handoff, bounded dense gather, and others).</li>
+      <li><b>Features under consideration</b> (defined in "Features" below): batching several requests per chunk; slot lanes plus a paged KV pool; variable chunk size with an all-to-all KV write; plus a few more the study adds (host-DRAM tier, index-cache layout, async stage handoff, and others).</li>
     </ul>
 
     <h2 id="m-metric">The metric: goodput</h2>
@@ -408,7 +408,12 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <p><b>Step 2: pipeline-level fit.</b> The profiles come from a single-stage harness with small cache capacity, so they miss a few things the real 16-stage pipeline shows. A small number of extra parameters is fitted to 7,840 per-stage, per-chunk-position timings of runs A/B/C:</p>
     <ul>
       <li><b>MoE multiplier ≈ 1.06 at chunk 5120, 1.10 at 2048:</b> MoE layers run 6-10% slower in the pipeline than in the single-stage profile. The pipeline uses the 2D fabric, where one dispatch fast path is disabled.</li>
-      <li><b>Dense attention = compute part + capacity-scan part</b>, whichever is larger. Compute runs at 30% efficiency. The scan walks the whole slot capacity every chunk at 1.4% efficiency, about 100 ms per 1M-token slot per dense layer per chunk. The profiles cannot separate the two because their capacity was only 56k.</li>
+      <li><b>Dense attention = max(compute, KV gather) + a fixed cost per call.</b> Compute (∝ chunk × context) runs at 33% efficiency. The ring gather of the valid prefix [0, kv_len) runs at 1.35% of link rate, about 100 ms per 1M context tokens per dense layer per chunk. The fixed cost is about 2.75 ms per call. The gather dominates at chunk 2048, compute at 5120.
+        <ul>
+          <li><b>Why the cost follows kv_len and not the slot capacity.</b> The op has bounded the gather to kv_len since tt-metal #47539. The data agrees. A joint regression of single-dense-layer stage times on context and capacity gives about 210 ms per 1M context tokens versus 19 ms per 1M of capacity at chunk 5120, and 100 versus 2 at chunk 2048. A capacity gather would not depend on chunk size.</li>
+          <li><b>Earlier versions of this page</b> fitted a whole-capacity scan instead. In these runs the capacity is cached + 51,200, so the two look alike across cells. That scan made today's 1M slots look far slower than they are. The "dense gathers whole lane" sensitivity row keeps that behaviour for comparison.</li>
+        </ul>
+      </li>
       <li><b>Handoff between stages.</b>
         <ul>
           <li><b>Blocking send</b> (about 18 ms per chunk at 5120, 7.5 ms at 2048): the stage stays busy after computing. Fitted as the measured loaded chunk period minus the slowest modelled stage.</li>
@@ -497,7 +502,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Slot lanes + paged pool:</b> replaces static slots (see KV cache): 4 fixed 1M lanes per stage.</li>
       <li><b>Variable-size lanes (arena):</b> lanes allocated at the request's actual length from a contiguous arena (2-8M tokens) instead of 1M each.</li>
       <li><b>Host-DRAM KV tier:</b> see KV cache. It requires the paged pool or full paging.</li>
-      <li><b>Bounded dense gather:</b> the dense layers' ring-joint attention scans only the valid prefix <span class="mono">[0, kv_len)</span> instead of the whole lane capacity. The MSA layers already do this. Request-sized lanes (arena) remove the same cost, so the two are substitutes.</li>
+      <li><b>Not a feature: bounded dense gather.</b> Earlier versions listed bounding the dense ring-joint gather to [0, kv_len) as a P0 feature. The op already does this (tt-metal #47539), so it is part of today's baseline, and the old whole-lane behaviour is only a sensitivity row.</li>
       <li><b>index_k stored once:</b> the index-key cache is kept on one TP column instead of all four, and gathered when needed. This cuts KV size from 2112 to 1344 B per token per layer.</li>
       <li><b>index_k bf8:</b> the index-key cache in bf8 instead of bf16. It is the runner's default dtype, but the measured runs used bf16, and it needs an accuracy check.</li>
       <li><b>Variable chunk / flexible SP layout:</b> see Pipeline. It also makes resume block-granular.</li>
@@ -521,7 +526,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Concurrency sweep.</b> Each configuration is simulated at C = 8 to 4096 (28 points), stopping early once it is past the cache cliff, and summarised as goodput.</li>
       <li><b>Greedy roadmap ("gain when added").</b> From the baseline, try every remaining feature, keep the one with the largest goodput, repeat. The order is a suggested build order; each gain is measured in the context of the features before it.</li>
       <li><b>Leave-one-out ("loss if removed").</b> Start from all features on, remove one at a time. It shows what each feature is still worth at the end.</li>
-      <li><b>Priority order and tier.</b> Both come from the reference scenario, 8 galaxies with today's kernels: take the larger of the feature's greedy gain and its leave-one-out loss there, and sort highest first. P0 ≥ 1.25×, P1 ≥ 1.07×, else P2. One scenario is used on purpose. A maximum over scenarios lets a feature rank high on one column, and substitutes such as bounded dense gather and variable-size lanes both get credit that only one of them earns.</li>
+      <li><b>Priority order and tier.</b> Both come from the reference scenario, 8 galaxies with today's kernels: take the larger of the feature's greedy gain and its leave-one-out loss there, and sort highest first. P0 ≥ 1.25×, P1 ≥ 1.07×, else P2. One scenario is used on purpose. A maximum over scenarios lets a feature rank high on one column, and substitutes can both get credit that only one of them earns.</li>
       <li><b>Grid.</b> On the features that helped, search topology (stage count × mesh × replicas), batching budget or chunk size, and lanes or arena size. The top result per scenario becomes the <span class="mono">best-*</span> preset.</li>
       <li><b>Sensitivity.</b> The best configuration re-run with:
         <ul>
@@ -965,7 +970,8 @@ function renderModel() {
     ['MoE layer multiplier (2D fabric)', `${P.moeMult[0].toFixed(3)} + ${P.moeMult[1].toFixed(3)}·5120/T`],
     ['Stage overhead per chunk', `${P.stageOv[0].toFixed(2)} ms`],
     ['Dense ring-joint compute eff', pct(P.ringC, 1)],
-    ['Dense capacity-scan eff', pct(P.ringScan, 2) + ` (≈${(0.5 * 1e6 * 272 / 1e11 / P.ringScan * 1000).toFixed(0)} ms per 1M-token lane per chunk)`],
+    ['Dense kv_len-gather eff', pct(P.ringScan, 2) + ` (≈${(0.5 * 1e6 * 272 / 1e11 / P.ringScan * 1000).toFixed(0)} ms per 1M context tokens per chunk)`],
+    ['Dense fixed cost per ring-joint call', `${(P.denseFix || 0).toFixed(2)} ms`],
     ['Embedding', `${P.embed.toFixed(2)} ms`],
     ['Blocking send', `${Math.max(0, P.block[0] + P.block[1] * 5.12).toFixed(1)} ms @5120, ${Math.max(0, P.block[0] + P.block[1] * 2.048).toFixed(1)} ms @2048`],
     ['Hop latency', `${Math.max(0.5, P.hop[0] + P.hop[1] * 5.12).toFixed(1)} ms @5120, ${Math.max(0.5, P.hop[0] + P.hop[1] * 2.048).toFixed(1)} ms @2048`],
