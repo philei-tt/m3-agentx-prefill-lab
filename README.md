@@ -273,6 +273,12 @@ Takeaways:
        * Ragged (fused) attention on the fixed layout: +0.3–1.8%, and +7.0% at 8 gx today.
        * Prefetch: +1.7–3.3%.
        * Without `kvDedup`: 14–29% lower.
+       * **Where ragged attention and prefetch act** (`tools/attn_diag.js`, `results/attn_diag.txt`):
+         * **Sparse (MSA) layers:** each request gathers its own K/V + index prefix, which takes longer than its indexer + sparse attention (2.3 vs 1.3 ms per request at 140k with today's kernels, 0.4 vs 0.04 with roofline). A fused call cannot share those gathers, so ragged attention saves only 0–3% of an MSA layer (latency floors, core fill).
+         * **Dense layers:** ragged attention saves 11–31% at 4–10 requests per chunk. That is almost entirely the fitted fixed cost of about 2.75 ms per ring-joint call, paid once per chunk instead of once per request. It is not verified that this cost is per call: time a dense layer with 1 vs several segments.
+         * The gain grows with requests per chunk, not with smaller chunks (chunk 128 vs 1024 changes it by ≤1.3 points).
+         * **Prefetch** cuts an MSA layer by 3–5% and a dense layer by 0–3%. That is 3% with today's kernels, where the dense ring gather exceeds its compute, and 0% with roofline kernels, where it doesn't.
+         * **Bottleneck at the peak:** with today's kernels at 8 gx the three single-dense-layer stages are at 100% (MoE stages 94%). Prefetch still gives +3% there only because it hides part of the dense gather. In the other scenarios the MoE stages are the bottleneck (dense stages 41–75%).
        * With today's kernels the peak is 11–13% above goodput at 10 s (bigger budgets, 10–13 requests per chunk). With roofline kernels goodput is already the peak.
 7. **Topology** (best of the grid per topology; seeds move results by ±3%):
    * [4,2] is best or tied everywhere; it needs KV heads sharded 2 per chip.
