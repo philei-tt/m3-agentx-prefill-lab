@@ -1089,6 +1089,7 @@
         const useful = (TR.req_blocks[r] - TR.req_lcp_best[r]) * B;
         st.done++; st.laneWait += q.waitS || 0; st.useful += Math.min(useful, inTok - q.hitTok); st.newTok += inTok - q.hitTok; st.hitTok += q.hitTok; st.inTok += inTok;
         st.infHitTok += TR.req_lcp_best[r] * B; st.reprefill += Math.max(0, (inTok - q.hitTok) - useful);
+        if (cfg.logRequests) (st.reqLog || (st.reqLog = [])).push(r); // opt-in: request ids completed in the window
         st.ttft.push(now - q.tReady);
       }
       ev.push(now + TR.req_out[r] / cfg.decodeTps, { e: EV_END, q });
@@ -1180,6 +1181,7 @@
       gatedAtEnd: trees.reduce((a, tr) => { const u = new Set(); if (tr) for (const w of tr.waiters.values()) for (const g of w) u.add(g); return a + u.size; }, 0),
       warmupTimeout: !!st.warmupTimeout, eventCap: !!st.eventCap, events: evCount, duration: D,
       slotEvictions: reps.reduce((a, r) => a + (r.slots ? r.slots.evictions : 0), 0),
+      reqLog: st.reqLog,
     };
   }
   function heapPushNum(h, x) { let i = h.length; h.push(x); while (i > 0) { const j = (i - 1) >> 1; if (h[j] <= x) break; h[i] = h[j]; i = j; } h[i] = x; }
