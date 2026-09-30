@@ -7,7 +7,8 @@
 //           nodedup  = one attention call and prefix gather per C-unit (a cold prefill split into many units
 //                      re-gathers its prefix for every unit)
 //           prefetch = KV-prefix gathers overlap the layer's non-collective compute
-// Usage: JOB=<slurm job> ./on_node.sh node tools/layout_ab.js [--workers 38] [--quick] [--out results/layout_ab.json]
+//   --inf : the same with an infinite KV cache (no evictions, no lanes/arena limit, no SSD tier): compute-bound view
+// Usage: JOB=<slurm job> ./on_node.sh node tools/layout_ab.js [--workers 38] [--quick] [--inf] [--out results/layout_ab.json]
 'use strict';
 const fs = require('fs');
 const { Pool, summarize } = require('../lib/pool.js');
@@ -29,7 +30,8 @@ async function main() {
     const keys = R.bestKeys.filter((k) => k !== 'var' && k !== 'fused' && k !== 'batch');
     const g = R.grid[0].extra;
     const topo = { stages: g.stages, mesh: g.mesh, replicas: g.replicas };
-    const lanes = g.arenaTokens ? { laneArena: true, arenaTokens: g.arenaTokens } : { lanes: g.lanes };
+    const lanes = args.includes('--inf') ? { cache: 'inf', hostTier: false, laneArena: false }
+      : g.arenaTokens ? { laneArena: true, arenaTokens: g.arenaTokens } : { lanes: g.lanes };
     const jobs = [];
     for (const [mode, md] of Object.entries(MODES)) {
       for (const C of CHUNKS) {

@@ -253,6 +253,19 @@ Takeaways:
      * At 8 gx the bottleneck is the three single-dense-layer stages (93–95% utilisation vs 86% for MoE stages). Their full ring-joint attention is compute-bound, so prefetch barely helps them.
      * The next lever there is dense attention itself: ring-joint compute runs at 33% efficiency, or the dense layers could get more chips.
    * Variable layout + fused attention is the model's version of **ragged (varlen) attention**: packed segments padded only to 32·SP, one attention launch per chunk, and each segment attends only to its own context. It assumes today's per-op efficiencies, not a faster kernel.
+   * **The same questions with an infinite cache** (compute-bound view; `tools/layout_ab.js --inf` → `results/layout_ab_inf.{json,txt}`, `tools/budget_ext_inf.js`, `tools/fused_fixed_inf.js`). The findings above use the real cache (pool + 1 TB/gx SSD tier), where the cache limits concurrency.
+     * **Best fixed setup:** chunk 128 everywhere, and chunk size now matters more:
+       * chunk 1024 is 1–6% behind and chunk 2048 is 7–13% behind;
+       * budget 16k with today's kernels (8k is −7–8%; ≥32k collapses on TTFT);
+       * budget 64k with roofline kernels (still rising: 32k → 48k → 64k = 216.5 → 223.5 → 227.0k at 4 gx, 426.9 → 439.5 → 444.7k at 8 gx).
+       * Goodput: 60.9k / 227.0k / 135.1k / 444.7k (4 gx today / 4 gx roofline / 8 gx today / 8 gx roofline).
+     * **Variable chunk size adds nothing.** Var layout + per-request attention is 0.3–2.6% *below* fixed chunk 128.
+     * **Ragged (fused) attention is what helps, and it works on the fixed chunk-128 layout too** (fixed + fused ≥ var + fused everywhere):
+       * +8.8% at 8 gx today (135.1 → 147.0k), where the single-dense-layer stages are the bottleneck and a fused call pays the fitted 2.75 ms per-call dense-attention cost once per chunk instead of once per request;
+       * +1.8% at 4 gx today, +0.7–1.7% with roofline kernels.
+       * This relies on that per-call cost being launch/setup-like, which is not verified.
+     * **Prefetching the KV-prefix gathers: +2–6%** on top of fixed + fused (4 gx today 62.0 → 65.6k, 8 gx today 147.0 → 150.9k, roofline +1.9–2.5%), vs 0.2–1.3% with the real cache.
+     * **One prefix gather per request per chunk (`kvDedup`) matters even more.** Without it, the best setup is chunk 2048 and is 13–24% lower.
 7. **Topology** (best of the grid per topology; seeds move results by ±3%):
    * [4,2] is best or tied everywhere; it needs KV heads sharded 2 per chip.
    * **[4,4] torus stages:** with ring collectives they tie with [4,2] at 4 gx today (44.5k vs 45.3k) and at 8 gx with roofline kernels (162.8k vs 162.0k), but lose at 8 gx today (87.1k vs 101.5k).
