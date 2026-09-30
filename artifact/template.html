@@ -191,7 +191,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row"><label for="chunk">Chunk size</label><select id="chunk"><option>128</option><option>256</option><option>512</option><option>1024</option><option>2048</option><option>4096</option><option>5120</option><option>8192</option></select></div>
     <div class="hint" id="chunkHint" hidden>Not used: with batching on a variable layout, the token budget below is the chunk size.</div>
     <div class="row check"><input id="batch" type="checkbox"><label for="batch">Batch several requests per chunk</label></div>
-    <div class="row"><label for="budget">Token budget</label><select id="budget"><option>4096</option><option>8192</option><option>16384</option><option>32768</option></select></div>
+    <div class="row"><label for="budget">Token budget</label><select id="budget"><option>4096</option><option>5120</option><option>8192</option><option>16384</option><option>32768</option></select></div>
     <div class="row check"><input id="batchDynShape" type="checkbox"><label for="batchDynShape">Size each chunk to its tokens (a trace per size)</label></div>
     <div class="hint">Off: one static budget-sized shape; a partly filled batch pays for the whole budget.</div>
     <div class="row"><label for="attn">Attention</label><select id="attn"><option value="seq">sequential per request</option><option value="fused">fused multi-user</option></select></div>
@@ -231,6 +231,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
   <div class="btns">
     <button class="primary" id="runBtn" type="button">Run sweep</button>
     <button id="pinBtn" type="button" disabled>Pin as comparison</button>
+    <button id="shareBtn" type="button" title="Copy a URL that opens this configuration and runs it">Copy link</button>
   </div>
 </aside>
 
@@ -585,7 +586,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <h2 id="m-read">Reading the Explore tab</h2>
     <ul>
       <li><b>Loading.</b> On load, the charts show the precomputed baseline (<span class="mono">today-C</span>). <b>Run sweep</b> simulates your configuration at every concurrency in the grid, in your browser, in about 5-30 s. It also runs the same configuration with an infinite cache, unless you untick that option.</li>
-      <li><b>Tiles.</b> Goodput; goodput with an infinite cache; TTFT p50/p90 and hit rate at the goodput point; the peak useful throughput regardless of TTFT; requests per chunk at the goodput point and at the peak.</li>
+      <li><b>Tiles.</b> Goodput; goodput with an infinite cache; TTFT p50/p90 and hit rate at the goodput point; the peak useful throughput regardless of TTFT; wasted compute (the share of processed tokens that is re-prefill or padding, the complement of the useful share in "Where processed tokens go"); requests per chunk at the goodput point and at the peak.</li>
       <li><b>Charts</b> share a log concurrency axis:
         <ul>
           <li>useful tok/s;</li>
@@ -594,6 +595,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li>requests per chunk (batch fill). It stays near 1 on a lightly loaded pipeline and climbs only as the bottleneck stage nears saturation. At the same concurrency, a smaller cache shows fuller batches because re-prefill makes each request longer.</li>
         </ul>
         "Pin as comparison" keeps a run as a third line.</li>
+      <li><b>Copy link.</b> Copies a URL holding every setting that differs from the defaults (plus SLO, concurrency grid and the infinite-cache option); the address bar also tracks it. Opening the link loads that configuration and runs the sweep.</li>
       <li><b>Where processed tokens go.</b> At the goodput point, splits the pipeline's processed tokens into useful, re-prefill and padding.</li>
       <li><b>Plan.</b> Updates without simulating. It shows chips, KV capacity, slots or pool and lane sizes, KV bytes per token, and the modelled time of one chunk (at 140k cached) on each stage. Orange bars are stages holding a dense layer; the outlined bar is the bottleneck. The ceiling line is that chunk's tokens divided by the bottleneck time plus the send.</li>
     </ul>
@@ -746,13 +748,63 @@ function fitStages(changed) {
 function presetOptions() {
   const sel = $('preset');
   sel.innerHTML = PRESETS.map((p, i) => `<option value="${i}">${esc(p.name)}</option>`).join('') + '<option value="-1">custom</option>';
-  sel.addEventListener('change', () => { const i = Number(sel.value); if (i >= 0) { setForm(PRESETS[i].cfg); $('presetDesc').textContent = PRESETS[i].desc; updatePlan(); } });
+  sel.addEventListener('change', () => { const i = Number(sel.value); if (i >= 0) { setForm(PRESETS[i].cfg); $('presetDesc').textContent = PRESETS[i].desc; updatePlan(); syncUrl(); } });
 }
 document.querySelector('aside.rail').addEventListener('input', (e) => {
   if (e.target.id === 'preset') return;
   if (FIELDS.includes(e.target.id) || e.target.id === 'splitCustom') { $('preset').value = '-1'; $('presetDesc').textContent = 'Custom configuration.'; }
   if (['galaxies', 'replicas', 'mesh', 'stages'].includes(e.target.id)) fitStages(e.target.id);
-  syncUi(); updatePlan();
+  syncUi(); updatePlan(); syncUrl();
+});
+
+// ---------------------------------------------------------------- shareable link
+// ?field=value for every setting that differs from SIM.DEFAULTS (plus slo / concs / inf=0), so the URL alone
+// reproduces getCfg(); the hash stays the tab. The matching preset, if any, is re-selected on load.
+const DEFAULT_CONCS = '16,32,64,96,128,192,256,384,512,640,768,1024,1536,2048';
+function fieldStr(f, v) {
+  if (f === 'mesh') return v.join('x');
+  if (f === 'torus' && typeof v === 'boolean') return v ? 'full' : 'off';
+  if (Array.isArray(v)) return v.join(',');
+  if (typeof v === 'boolean') return v ? '1' : '0';
+  return String(v);
+}
+const formKey = (cfg) => { const c = Object.assign({}, SIM.DEFAULTS, cfg); return FIELDS.map((f) => fieldStr(f, c[f])).join('|'); };
+function shareUrl(hash) {
+  const cfg = getCfg(), kv = [];
+  for (const f of FIELDS) { const v = fieldStr(f, cfg[f]); if (v !== fieldStr(f, SIM.DEFAULTS[f])) kv.push([f, v]); }
+  if (Number($('slo').value) !== STUDY.slo) kv.push(['slo', $('slo').value]);
+  const concs = $('concs').value.replace(/\s/g, ''); if (concs !== DEFAULT_CONCS) kv.push(['concs', concs]);
+  if (!$('compareInf').checked) kv.push(['inf', '0']);
+  const qs = kv.map(([k, v]) => k + '=' + encodeURIComponent(v).replace(/%2C/g, ',')).join('&');
+  return location.href.split(/[?#]/)[0] + (qs ? '?' + qs : '') + hash;
+}
+function syncUrl() { try { history.replaceState(null, '', shareUrl(location.hash)); } catch (e) { /* sandboxed frame */ } }
+// apply a shared link; returns null without parameters, else the list of parameters it had to ignore
+function applyUrl() {
+  const q = new URLSearchParams(location.search);
+  if (![...FIELDS, 'slo', 'concs', 'inf'].some((k) => q.has(k))) return null;
+  const cfg = {}, bad = [];
+  for (const f of FIELDS) {
+    if (!q.has(f)) continue;
+    const s = q.get(f), el = $(f);
+    const custom = f === 'split' && /^[\d,]+$/.test(s);
+    if (el.tagName === 'SELECT' && !custom && ![...el.options].some((o) => o.value === s)) { bad.push(`${f}=${s}`); continue; }
+    if (NUMS.has(f) && !Number.isFinite(Number(s))) { bad.push(`${f}=${s}`); continue; }
+    cfg[f] = el.type === 'checkbox' ? s === '1' : f === 'mesh' ? s.split('x').map(Number) : custom ? s.split(',').map(Number) : NUMS.has(f) ? Number(s) : s;
+  }
+  setForm(cfg);
+  const key = formKey(getCfg()), pi = PRESETS.findIndex((p) => formKey(p.cfg) === key);
+  $('preset').value = String(pi);
+  $('presetDesc').textContent = (pi >= 0 ? PRESETS[pi].desc : 'Custom configuration') + ' (from a shared link)' + (bad.length ? `; ignored ${bad.join(', ')}.` : '.');
+  if (q.has('slo')) { const v = Number(q.get('slo')); if (v > 0) $('slo').value = v; else bad.push('slo=' + q.get('slo')); }
+  if (q.has('concs')) { const v = q.get('concs'); if (/^\d+(,\d+)*$/.test(v)) $('concs').value = v; else bad.push('concs=' + v); }
+  $('compareInf').checked = q.get('inf') !== '0';
+  return bad;
+}
+$('shareBtn').addEventListener('click', async () => {
+  const url = shareUrl('#explore'); syncUrl();
+  try { await navigator.clipboard.writeText(url); } catch (e) { window.prompt('Copy this link:', url); return; }
+  $('shareBtn').textContent = 'Link copied'; setTimeout(() => { $('shareBtn').textContent = 'Copy link'; }, 1500);
 });
 
 // ---------------------------------------------------------------- plan preview
@@ -792,7 +844,8 @@ function updatePlan() {
 function lineChart(el, series, opt) {
   const W = 360, H = 190, m = { l: 44, r: 10, t: 8, b: 26 };
   el.querySelectorAll('svg,.tip').forEach((n) => n.remove());
-  series = series.map((s) => Object.assign({}, s, { points: s.points.filter((p) => isFinite(p.y) && (!opt.yLog || p.y > 0)) }));
+  // sort by x: study curves list the cliff-bisection points after the grid
+  series = series.map((s) => Object.assign({}, s, { points: s.points.filter((p) => isFinite(p.y) && (!opt.yLog || p.y > 0)).sort((a, b) => a.x - b.x) }));
   const pts = series.flatMap((s) => s.points);
   if (!pts.length) { el.insertAdjacentHTML('beforeend', `<svg viewBox="0 0 ${W} ${H}"><text x="${W / 2}" y="${H / 2}" text-anchor="middle">run a sweep</text></svg>`); return; }
   const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
@@ -846,6 +899,12 @@ const summarize = SWEEP.summarize;
 
 // ---------------------------------------------------------------- run
 let run = null, pinned = null, workers = [];
+// useful comes straight from the simulator (same number as the Goodput tile); re-prefill = prefilled new tokens - useful
+function tokSplit(p) {
+  const proc = p.processedTps, nw = p.newTps != null ? p.newTps : proc * (1 - p.padFrac), pad = Math.max(0, proc - nw);
+  const use = Math.min(nw, p.usefulTps), rep = Math.max(0, nw - use);
+  return { proc, use, rep, pad };
+}
 function colors() { return { cfg: cssv('--s1'), inf: cssv('--s2'), pin: cssv('--s3') }; }
 function render() {
   const slo = Number($('slo').value);
@@ -859,21 +918,21 @@ function render() {
   const a = R && R.at;
   // a run stops sweeping about 4x past the SLO it was started with: a much looser SLO needs a new run
   const stale = run && run.slo && slo > 4 * run.slo;
+  // processed-token split at the goodput point (else the peak), shared by the Wasted tile and the breakdown bar
+  const bp = a || (R && R.peak), sp = bp && tokSplit(bp);
   const tiles = [
     ['Goodput', R ? (R.atEdge ? '≥ ' : '') + fmtK(R.goodput) : '–', slo >= NO_SLO ? 'useful tok/s, no TTFT limit (= peak)' : 'useful tok/s @ p90 ≤ ' + slo + ' s', stale ? `run swept for a ${sloTxt(run.slo)} SLO: run again for this one` : R && R.atEdge ? 'still under the SLO at the highest concurrency simulated' : P ?`pinned ${fmtK(P.goodput)} (${R && P.goodput ? (R.goodput / P.goodput).toFixed(2) + 'x' : '–'})` : ''],
     ['With infinite cache', I ? (I.atEdge ? '≥ ' : '') + fmtK(I.goodput) : '–', 'same config, nothing evicted', R && I && I.goodput ? `real = ${I.atEdge ? '≤ ' : ''}${pct(R.goodput / I.goodput)} of ∞` : ''],
     ['TTFT at goodput point', a ? `${fmtS(a.ttftP50)}<small> / ${fmtS(a.ttftP90)} s</small>` : '–', 'p50 / p90', a ? `C = ${a.conc} lanes` : ''],
     ['Hit rate there', a ? pct(a.hitRate, 1) : '–', 'prefix-cache hit, token-weighted', a ? `∞-cache ${pct(a.infHitRate, 1)}` : ''],
     ['Peak useful', R && R.peak ? fmtK(R.peak.usefulTps) : '–', 'any TTFT', R && R.peak ? `C = ${R.peak.conc}, p90 ${fmtS(R.peak.ttftP90)} s` : ''],
+    ['Wasted compute', sp && sp.proc ? pct((sp.rep + sp.pad) / sp.proc, 1) : '–', bp ? `of processed tokens, at C = ${bp.conc}` + (a ? '' : ' (peak)') : 'of processed tokens', sp && sp.proc ? `re-prefill ${pct(sp.rep / sp.proc, 1)} · padding ${pct(sp.pad / sp.proc, 1)}` : ''],
     ['Requests per chunk', a ? a.avgSegsPerChunk.toFixed(2) : '–', 'average, at the goodput point', a ? `chunk ${Math.round(a.avgChunkTok)} tok, busy ${pct(a.maxUtil)}` + (R.peak && R.peak !== a ? ` · at peak ${R.peak.avgSegsPerChunk.toFixed(2)}` : '') : ''],
   ];
   $('tiles').innerHTML = tiles.map(([k, v, s, d]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="k">${s}</div><div class="d">${d}</div></div>`).join('');
   // breakdown
-  const bp = a || (R && R.peak);
   if (bp) {
-    // useful comes straight from the simulator (same number as the Goodput tile); re-prefill = prefilled new tokens - useful
-    const proc = bp.processedTps, nw = bp.newTps != null ? bp.newTps : proc * (1 - bp.padFrac), pad = Math.max(0, proc - nw);
-    const use = Math.min(nw, bp.usefulTps), rep = Math.max(0, nw - use);
+    const { proc, use, rep, pad } = sp;
     const parts = [['useful', use, cssv('--s1')], ['re-prefill (evicted / misaligned)', rep, cssv('--s2')], ['padding', pad, cssv('--ink-3')]];
     $('bdBar').innerHTML = parts.map(([n, v, c]) => `<span style="width:${100 * v / proc}%;background:${c}" title="${n}: ${fmtK(v)} tok/s"></span>`).join('');
     $('bdLegend').innerHTML = parts.map(([n, v, c]) => `<span><i style="background:${c};height:8px;width:8px"></i>${n} <b class="mono">${fmtK(v)}</b> (${pct(v / proc)})</span>`).join('');
@@ -922,8 +981,8 @@ function syncSlo(from) {
   if (from === 'r') $('slo').value = sloFromR(Number($('sloR').value)); else $('sloR').value = rFromSlo(Number($('slo').value));
   $('sloV').textContent = sloTxt(Number($('slo').value));
 }
-$('slo').addEventListener('change', () => { syncSlo('n'); render(); });
-$('sloR').addEventListener('input', () => { syncSlo('r'); render(); });
+$('slo').addEventListener('change', () => { syncSlo('n'); render(); syncUrl(); });
+$('sloR').addEventListener('input', () => { syncSlo('r'); render(); syncUrl(); });
 
 // ---------------------------------------------------------------- roadmap
 const FEAT = Object.fromEntries(STUDY.features.map((f) => [f.key, f]));
@@ -1043,15 +1102,17 @@ function renderModel() {
 presetOptions();
 const startIdx = Math.max(0, PRESETS.findIndex((p) => p.name === 'today-C'));
 $('preset').value = String(startIdx); setForm(PRESETS[startIdx].cfg); $('presetDesc').textContent = PRESETS[startIdx].desc;
-$('slo').value = STUDY.slo; syncSlo('n'); $('concs').value = '16,32,64,96,128,192,256,384,512,640,768,1024,1536,2048';
-updatePlan(); renderRoadmap(); renderModel();
-// show the study curves for the starting preset until the viewer runs one
-(function seed() {
+$('slo').value = STUDY.slo; $('concs').value = DEFAULT_CONCS;
+const shared = applyUrl();
+syncSlo('n'); updatePlan(); renderRoadmap(); renderModel();
+// a shared link runs its configuration; otherwise show the study curves for the starting preset until the viewer runs one
+if (shared) { $('resTitle').textContent = 'Results: shared configuration'; syncUrl(); }
+else (function seed() {
   const S = STUDY.scenarios.g4_k0;
   run = { name: 'study baseline, 4 gx', real: S.curves.base, inf: [], slo: STUDY.slo };
   $('resTitle').textContent = 'Results: study baseline for 4 galaxies (16x[2,4], chunk 2048, auto split, static slots; precomputed, press Run for a live sweep)';
   render();
 })();
-setTimeout(() => { decodeTraffic(); $('statusTxt').textContent = 'Ready. Press Run sweep.'; }, 30);
+setTimeout(() => { decodeTraffic(); $('statusTxt').textContent = 'Ready. Press Run sweep.'; if (shared && !$('runBtn').disabled) startRun(); }, 30);
 })();
 </script>

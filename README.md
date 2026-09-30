@@ -27,6 +27,7 @@ ssh -L 8765:localhost:8765 <remote-host>     # then, on the remote host: node se
 
 The page is self-contained: the simulator runs in your browser (Web Workers), so the server only serves one file.
 Fonts come from Google Fonts when reachable, with system fallbacks otherwise.
+**Copy link** (Explore tab) gives a URL such as `http://localhost:8765/?galaxies=8&batch=1&budget=5120#explore` holding every setting that differs from the defaults; opening it loads that configuration and runs the sweep.
 `node server.js --rebuild` forces a rebuild; at startup the server also rebuilds when any input is newer than `dist/index.html`.
 
 ## Metric
