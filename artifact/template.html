@@ -380,8 +380,14 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <ul>
       <li><b>Concurrency / lanes (C).</b> The number of simultaneous simulated agent users. Each lane replays one session: the main agent plus the sub-agents it spawns, so one lane can have several requests in flight.</li>
       <li><b>TTFT.</b> Time from when a request becomes ready (its predecessor finished and its recorded think time elapsed) to when its prefill finishes on the last pipeline stage. It includes queueing and any host-tier fetch.</li>
-      <li><b>Hit rate.</b> Cached tokens / input tokens, token-weighted. The ∞-cache hit rate is the ceiling (98.3% on the whole corpus).</li>
-      <li><b>Re-prefill.</b> New tokens that were not needed with an infinite cache: evicted prefixes, alignment loss, and history from before the replay's start point that was never materialised.</li>
+      <li><b>Hit rate.</b> Cached tokens / input tokens, token-weighted: what this server's cache achieved. The traffic only bounds it. The ∞-cache hit rate is the ceiling: 98.3% on the whole corpus, about 96.5% on the requests a 30-minute window completes, because the window sees fewer of the huge late-session contexts.</li>
+      <li><b>Re-prefill.</b> New tokens that were not needed with an infinite cache: evicted prefixes, alignment loss, and history from before the replay's start point that was never materialised. The benchmark does not mark anything as re-prefill; it only sends requests, each carrying the whole conversation so far. This is the simulator's accounting of where the compute went.
+        <ul>
+          <li>It is a share of <i>prefilled</i> tokens, not of input tokens.</li>
+          <li>Since about 96% of the input is cached anyway, every point of hit rate lost adds about 27% more prefill work. An evicted 140k-token conversation costs a 140k cold prefill instead of its ~1.6k new tokens.</li>
+          <li>Example: 96.3% → 89.6% hit means prefilling 10.4% of the input instead of 3.7%, so 6.7/10.4 ≈ 64% of the prefill is re-prefill.</li>
+        </ul>
+      </li>
       <li><b>Padding.</b> Tokens computed only to fill a fixed-size chunk.</li>
       <li><b>∞ cache.</b> The same configuration with an unbounded KV cache. It separates cache losses from compute limits.</li>
       <li><b>Stage, mesh, SP/TP, split, replicas.</b> See "Context". The <b>split</b> is how many layers each stage holds; "auto" balances the stages for a representative mix of cached lengths. <b>Replicas</b> divides the galaxies into independent pipelines, each with its own cache; sessions stick to one replica.</li>
