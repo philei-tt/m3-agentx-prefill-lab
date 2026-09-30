@@ -15,15 +15,22 @@ const { Pool, summarize } = require('../lib/pool.js');
 const { withFeatures, CONCS, SLO } = require('../study.js');
 const { STUDY } = require('../lib/paths.js');
 
-const CHUNKS = [128, 256, 512, 1024, 2048, 5120], BUDGETS = [4096, 8192, 16384, 32768];
+const CHUNKS = [128, 256, 512, 1024, 2048, 5120];
+let BUDGETS = [4096, 8192, 16384, 32768];
 const MODES = { base: {}, nodedup: { kvDedup: false }, prefetch: { prefetchKV: true } };
+// --slo none : peak useful tok/s at any TTFT (sweep never stops early, bisects the peak) instead of goodput
+// --budgets 4096,...,65536 ; --extra-concs 5120,6144,8192 (high-concurrency peaks with an infinite cache)
 
 async function main() {
   const args = process.argv.slice(2);
   const get = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
   const study = JSON.parse(fs.readFileSync(STUDY));
   const pool = new Pool(Number(get('--workers', 38)));
-  const concs = args.includes('--quick') ? CONCS.filter((_, i) => i % 3 === 0) : CONCS;
+  const noSlo = get('--slo', '10') === 'none';
+  const slo = noSlo ? 1e6 : Number(get('--slo', SLO));
+  if (get('--budgets', null)) BUDGETS = get('--budgets').split(',').map(Number);
+  const extra = get('--extra-concs', null) ? get('--extra-concs').split(',').map(Number) : [];
+  const concs = (args.includes('--quick') ? CONCS.filter((_, i) => i % 3 === 0) : CONCS).concat(extra);
   const t0 = Date.now();
   const out = {};
   await Promise.all(Object.entries(study.scenarios).map(async ([key, R]) => {
@@ -37,6 +44,8 @@ async function main() {
       for (const C of CHUNKS) {
         if (mode !== 'nodedup' && C >= 1024) jobs.push({ mode, md, layout: 'fixed', attn: 'seq', chunk: C, batch: false });
         for (const B of BUDGETS) if (B > C) jobs.push({ mode, md, layout: 'fixed', attn: 'seq', chunk: C, batch: true, budget: B });
+        // ragged (fused) attention on the fixed layout, for the small chunks
+        if (mode !== 'nodedup' && C <= 256) for (const B of BUDGETS) jobs.push({ mode, md, layout: 'fixed', attn: 'fused', chunk: C, batch: true, budget: B });
       }
       if (mode !== 'nodedup') for (const attn of ['seq', 'fused']) for (const B of BUDGETS) jobs.push({ mode, md, layout: 'var', attn, chunk: 5120, batch: true, budget: B });
     }
@@ -44,7 +53,8 @@ async function main() {
       const { mode, md, ...d } = j;
       const cfg = Object.assign(withFeatures(R.base, keys), topo, lanes, d, md);
       const label = `${mode} ${d.layout} ${d.attn} C=${d.chunk} B=${d.budget || 0}`;
-      return pool.evalCfg(key + label, cfg, concs, SLO).then((r) => Object.assign({ mode, layout: d.layout, attn: d.attn, chunk: d.chunk, budget: d.budget || 0 }, summarize(r.points, SLO)));
+      return pool.evalCfg(key + label, cfg, concs, slo, noSlo ? 1e9 : 4, noSlo ? { extend: 0, refinePeak: 3 } : {})
+        .then((r) => Object.assign({ mode, layout: d.layout, attn: d.attn, chunk: d.chunk, budget: d.budget || 0 }, summarize(r.points, slo)));
     }));
   }));
   pool.close();
@@ -58,12 +68,16 @@ async function main() {
     console.log(`\n== ${key} (${S.label}), ${S.grid[0].extra.stages}x[${S.grid[0].extra.mesh}]`);
     for (const mode of Object.keys(MODES)) {
       const f = (p) => rows.filter((r) => r.mode === mode && p(r))[0];
-      const bf = f((r) => r.layout === 'fixed' && r.budget), vs = f((r) => r.layout === 'var' && r.attn === 'seq'), vf = f((r) => r.layout === 'var' && r.attn === 'fused');
-      console.log(`  ${mode.padEnd(8)} best fixed+batch ${kk(bf)} (C=${bf && bf.chunk} B=${bf && bf.budget / 1024}k)` + (vs ? ` | var seq ${kk(vs)} (B=${vs.budget / 1024}k) | var fused ${kk(vf)} (B=${vf.budget / 1024}k)` : ''));
+      const bf = f((r) => r.layout === 'fixed' && r.budget && r.attn === 'seq'), ff = f((r) => r.layout === 'fixed' && r.attn === 'fused');
+      const vs = f((r) => r.layout === 'var' && r.attn === 'seq'), vf = f((r) => r.layout === 'var' && r.attn === 'fused');
+      const rq = (x) => (x && x.at ? `, ${x.at.avgSegsPerChunk.toFixed(1)} req/chunk` : '');
+      console.log(`  ${mode.padEnd(8)} best fixed+batch ${kk(bf)} (C=${bf && bf.chunk} B=${bf && bf.budget / 1024}k${rq(bf)})`
+        + (ff ? ` | fixed+fused ${kk(ff)} (C=${ff.chunk} B=${ff.budget / 1024}k)` : '')
+        + (vs ? ` | var seq ${kk(vs)} (B=${vs.budget / 1024}k) | var fused ${kk(vf)} (B=${vf.budget / 1024}k${rq(vf)})` : ''));
       console.log('    fixed:  ' + ['noB', ...BUDGETS.map((b) => 'B' + b / 1024 + 'k')].map((h) => h.padStart(6)).join(''));
       for (const C of CHUNKS) {
         console.log(`    C=${String(C).padStart(4)}` + [0, ...BUDGETS].map((B) => {
-          const r = rows.find((x) => x.mode === mode && x.layout === 'fixed' && x.chunk === C && x.budget === B);
+          const r = rows.find((x) => x.mode === mode && x.layout === 'fixed' && x.attn === 'seq' && x.chunk === C && x.budget === B);
           return kk(r).padStart(6);
         }).join(''));
       }

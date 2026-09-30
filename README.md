@@ -266,6 +266,14 @@ Takeaways:
        * This relies on that per-call cost being launch/setup-like, which is not verified.
      * **Prefetching the KV-prefix gathers: +2–6%** on top of fixed + fused (4 gx today 62.0 → 65.6k, 8 gx today 147.0 → 150.9k, roofline +1.9–2.5%), vs 0.2–1.3% with the real cache.
      * **One prefix gather per request per chunk (`kvDedup`) matters even more.** Without it, the best setup is chunk 2048 and is 13–24% lower.
+     * **Peak throughput (any TTFT), infinite cache** (`tools/layout_ab.js --inf --slo none --budgets …,65536`, `results/layout_ab_inf_peak.{json,txt}`). Same conclusions:
+       * Best fixed setup: chunk 128 with budget 64k (the largest tried, still rising 1.5–3.5% from 32k). Goodput: 67.8k / 228.8k / 152.2k / 444.8k.
+       * Relative to that: chunk 1024 is 3–6% lower, chunk 2048 is 9–13% lower.
+       * Variable chunk alone: −0.4 to −0.9%.
+       * Ragged (fused) attention on the fixed layout: +0.3–1.8%, and +7.0% at 8 gx today.
+       * Prefetch: +1.7–3.3%.
+       * Without `kvDedup`: 14–29% lower.
+       * With today's kernels the peak is 11–13% above goodput at 10 s (bigger budgets, 10–13 requests per chunk). With roofline kernels goodput is already the peak.
 7. **Topology** (best of the grid per topology; seeds move results by ±3%):
    * [4,2] is best or tied everywhere; it needs KV heads sharded 2 per chip.
    * **[4,4] torus stages:** with ring collectives they tie with [4,2] at 4 gx today (44.5k vs 45.3k) and at 8 gx with roofline kernels (162.8k vs 162.0k), but lose at 8 gx today (87.1k vs 101.5k).
