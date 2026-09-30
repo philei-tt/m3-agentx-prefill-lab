@@ -81,7 +81,7 @@ button:disabled { opacity: 0.55; cursor: progress; }
 .tile .v { font-family: var(--f-display); font-size: 28px; font-weight: 600; line-height: 1.1; font-variant-numeric: tabular-nums; }
 .tile .v small { font-size: 14px; color: var(--ink-2); font-weight: 500; }
 .tile .d { font-size: 12px; color: var(--ink-3); font-family: var(--f-mono); }
-.charts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 @media (max-width: 1100px) { .charts { grid-template-columns: 1fr; } }
 .chart { position: relative; min-width: 0; }
 .chart h4 { margin: 0 0 4px; font-size: 13px; font-weight: 600; }
@@ -248,6 +248,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <div class="chart" id="chU"><h4>Useful tok/s vs concurrency</h4></div>
       <div class="chart" id="chT"><h4>p90 TTFT (s, log) vs concurrency</h4></div>
       <div class="chart" id="chH"><h4>Prefix-cache hit rate vs concurrency</h4></div>
+      <div class="chart" id="chR"><h4>Requests per chunk vs concurrency</h4></div>
     </div>
     <p class="hint" style="margin-top:6px">Concurrency is AIPerf's lane count: live agent trees, each replaying a session with its recorded (uncapped) idle gaps, sub-agent fan-out and joins. Hover a chart for values.</p>
   </div>
@@ -302,7 +303,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="panel">
       <h3>Baseline vs best, this scenario</h3>
       <div class="legend" id="cmpLegend"></div>
-      <div class="charts"><div class="chart" id="cmpU"><h4>Useful tok/s</h4></div><div class="chart" id="cmpT"><h4>p90 TTFT (s, log)</h4></div><div class="chart" id="cmpH"><h4>Hit rate</h4></div></div>
+      <div class="charts"><div class="chart" id="cmpU"><h4>Useful tok/s</h4></div><div class="chart" id="cmpT"><h4>p90 TTFT (s, log)</h4></div><div class="chart" id="cmpH"><h4>Hit rate</h4></div><div class="chart" id="cmpR"><h4>Requests per chunk</h4></div></div>
     </div>
   </div>
 </section>
@@ -575,12 +576,13 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <h2 id="m-read">Reading the Explore tab</h2>
     <ul>
       <li><b>Loading.</b> On load, the charts show the precomputed baseline (<span class="mono">today-C</span>). <b>Run sweep</b> simulates your configuration at every concurrency in the grid, in your browser, in about 5-30 s. It also runs the same configuration with an infinite cache, unless you untick that option.</li>
-      <li><b>Tiles.</b> Goodput; goodput with an infinite cache; TTFT p50/p90 and hit rate at the goodput point; and the peak useful throughput regardless of TTFT.</li>
+      <li><b>Tiles.</b> Goodput; goodput with an infinite cache; TTFT p50/p90 and hit rate at the goodput point; the peak useful throughput regardless of TTFT; requests per chunk at the goodput point and at the peak.</li>
       <li><b>Charts</b> share a log concurrency axis:
         <ul>
           <li>useful tok/s;</li>
           <li>p90 TTFT on a log scale, with the SLO line;</li>
-          <li>hit rate.</li>
+          <li>hit rate;</li>
+          <li>requests per chunk (batch fill). It stays near 1 on a lightly loaded pipeline and climbs only as the bottleneck stage nears saturation. At the same concurrency, a smaller cache shows fuller batches because re-prefill makes each request longer.</li>
         </ul>
         "Pin as comparison" keeps a run as a third line.</li>
       <li><b>Where processed tokens go.</b> At the goodput point, splits the pipeline's processed tokens into useful, re-prefill and padding.</li>
@@ -826,6 +828,8 @@ function drawTriple(ids, series, slo) {
   lineChart($(ids[0]), series.map((s) => ({ name: s.name, color: s.color, points: s.pts.map((p) => ({ x: p.conc, y: p.usefulTps })) })), { yFmt: fmtK });
   lineChart($(ids[1]), series.map((s) => ({ name: s.name, color: s.color, points: s.pts.map((p) => ({ x: p.conc, y: p.ttftP90 })) })), { yFmt: fmtS, yLog: true, ref: slo });
   lineChart($(ids[2]), series.map((s) => ({ name: s.name, color: s.color, points: s.pts.map((p) => ({ x: p.conc, y: p.hitRate })) })), { yFmt: (v) => pct(v), yMin: 0, yMax: 1 });
+  // requests per chunk: batch fill, grows only as the bottleneck stage nears saturation
+  if (ids[3]) lineChart($(ids[3]), series.map((s) => ({ name: s.name, color: s.color, points: s.pts.filter((p) => p.avgSegsPerChunk != null).map((p) => ({ x: p.conc, y: p.avgSegsPerChunk })) })), { yFmt: (v) => v.toFixed(1), yMin: 0 });
 }
 
 // ---------------------------------------------------------------- goodput: lib/sweep.js (same code as the study)
@@ -841,7 +845,7 @@ function render() {
   if (run) { series.push({ name: 'this config', color: C.cfg, pts: run.real }); if (run.inf.length) series.push({ name: 'same, infinite cache', color: C.inf, pts: run.inf }); }
   if (pinned) series.push({ name: 'pinned: ' + pinned.name, color: C.pin, pts: pinned.real });
   $('legend').innerHTML = series.map((s) => `<span><i style="background:${s.color}"></i>${esc(s.name)}</span>`).join('');
-  drawTriple(['chU', 'chT', 'chH'], series, slo < NO_SLO ? slo : null);
+  drawTriple(['chU', 'chT', 'chH', 'chR'], series, slo < NO_SLO ? slo : null);
   const R = run ? summarize(run.real, slo) : null, I = run && run.inf.length ? summarize(run.inf, slo) : null, P = pinned ? summarize(pinned.real, slo) : null;
   const a = R && R.at;
   // a run stops sweeping about 4x past the SLO it was started with: a much looser SLO needs a new run
@@ -982,7 +986,7 @@ function renderRoadmap() {
   const C = colors();
   const ser = [{ name: 'baseline (today)', color: C.pin, pts: S.curves.base }, { name: 'best configuration', color: C.cfg, pts: S.curves.best }];
   $('cmpLegend').innerHTML = ser.map((s) => `<span><i style="background:${s.color}"></i>${s.name}</span>`).join('');
-  drawTriple(['cmpU', 'cmpT', 'cmpH'], ser, STUDY.slo);
+  drawTriple(['cmpU', 'cmpT', 'cmpH', 'cmpR'], ser, STUDY.slo);
   // headline
   const g0 = STUDY.scenarios.g4_k0, g1 = STUDY.scenarios.g4_k1, h0 = STUDY.scenarios.g8_k0, h1 = STUDY.scenarios.g8_k1;
   const top = STUDY.features.map((f) => [f, tierOf(f.key)]).filter(([, t]) => t.tier === 'P0').map(([f]) => f.key);
