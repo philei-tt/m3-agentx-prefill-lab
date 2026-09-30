@@ -937,7 +937,7 @@
       }
       q.started = true; q.tStart = now;
       q.pos = q.hitTok; q.rem = TR.req_blocks[r] * B - q.hitTok; q.first = true;
-      st.laneWait += now - (q.fetchedAt || q.tReady);
+      q.waitS = now - (q.fetchedAt || q.tReady); // queue wait before admission; counted with the completion
       return true;
     }
     function queueOrder(rep) {
@@ -1087,7 +1087,7 @@
       if (q.primer) { st.primerTok += inTok - q.hitTok; primersLeft--; if (primersLeft === 0 && !warmDone) startProfiling(now); ev.push(now, { e: EV_END, q }); return; }
       if (warmDone && now >= t0 && now <= tEnd) {
         const useful = (TR.req_blocks[r] - TR.req_lcp_best[r]) * B;
-        st.done++; st.useful += Math.min(useful, inTok - q.hitTok); st.newTok += inTok - q.hitTok; st.hitTok += q.hitTok; st.inTok += inTok;
+        st.done++; st.laneWait += q.waitS || 0; st.useful += Math.min(useful, inTok - q.hitTok); st.newTok += inTok - q.hitTok; st.hitTok += q.hitTok; st.inTok += inTok;
         st.infHitTok += TR.req_lcp_best[r] * B; st.reprefill += Math.max(0, (inTok - q.hitTok) - useful);
         st.ttft.push(now - q.tReady);
       }

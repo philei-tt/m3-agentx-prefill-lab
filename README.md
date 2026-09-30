@@ -266,6 +266,13 @@ Takeaways:
     * Requests per chunk at p90 ≤ 10 s → no SLO: 1.27 → 1.79 (today's 4-gx config + pool + host + batch) and 1.9–2.9 → 2.0–3.1 (best stacks).
     * Goodput gains only 0–1% on the best stacks (+10% on today's config). Beyond that point more sessions stop fitting in the KV cache, so the throughput peak sits at about the same concurrency as the 10 s point.
     * With an infinite cache, batches fill: 2.8–4.3 requests per chunk (14–16k of the 16k budget) at 10 s, 3.8–4.5 with no SLO, and 96–99% of the bottleneck stage busy.
+    * **Why the real cache fills batches less** (`tools/fill_diag.js`, `results/fill_diag.txt`: same stack, same concurrency, KV residency varied):
+      * Pool lanes vs full paging and PCIe bandwidth make no difference. **Host RAM size is the whole gap**: at 8 TB/galaxy instead of 1 TB, every metric matches the infinite cache.
+      * Past about 480 streams at 4 gx (1136 at 8 gx), the live AgentX working set no longer fits device + 1 TB/gx host, and evicted prefixes come back as re-prefill.
+        * At the infinite cache's peak concurrency, re-prefill is ~60% of prefilled tokens (vs 3–5%), hit rate drops from 96% to 90%, and useful throughput halves.
+        * So the SLO point sits at lower concurrency. Fewer requests are in prefill at once, and batches hold fewer.
+      * At equal concurrency the real cache's batches are, if anything, fuller (4 gx at 480: 2.01 vs 1.44 requests), because re-prefill makes each request longer.
+      * AgentX caps host DRAM per system, so 8 TB/galaxy may not be allowed. A cheaper capacity tier (SSD) or smaller KV (index_k fixes, bf8) is the way to that ceiling.
     * A 5 s SLO costs 20–40% with today's kernels, and 0–2% with roofline kernels.
     * The page has an SLO slider, whose right end means no SLO. A no-SLO run bisects the throughput peak. Different SLOs sample different concurrencies, so goodput vs SLO can wobble by about ±3%.
 11. **The cliff is steep.** Goodput can change by 10% between neighbouring concurrency points, so the sweep bisects the SLO crossing.
