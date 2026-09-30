@@ -1,0 +1,76 @@
+
+== g4_k0 paging + host 1 TB/gx: goodput 46.6k at C=480 (req/chunk 1.98)
+  C=   16 useful    0.7k | p90    1.4 s | req/chunk 1.00 | chunk  3142 | busy   1% | hit 98.0% | re-prefill 3%
+  C=   32 useful    2.8k | p90    2.0 s | req/chunk 1.01 | chunk  3692 | busy   5% | hit 97.5% | re-prefill 1%
+  C=   64 useful    5.5k | p90    2.5 s | req/chunk 1.01 | chunk  3848 | busy  10% | hit 97.1% | re-prefill 1%
+  C=   96 useful   10.4k | p90    2.9 s | req/chunk 1.02 | chunk  3885 | busy  19% | hit 96.4% | re-prefill 2%
+  C=  128 useful   15.2k | p90    3.1 s | req/chunk 1.03 | chunk  4138 | busy  28% | hit 96.2% | re-prefill 1%
+  C=  192 useful   19.2k | p90    3.2 s | req/chunk 1.05 | chunk  4183 | busy  35% | hit 96.5% | re-prefill 1%
+  C=  256 useful   26.9k | p90    3.6 s | req/chunk 1.08 | chunk  4368 | busy  48% | hit 96.6% | re-prefill 1%
+  C=  384 useful   36.9k | p90    5.0 s | req/chunk 1.20 | chunk  5186 | busy  72% | hit 96.1% | re-prefill 13%
+  C=  440 useful   42.3k | p90    7.4 s | req/chunk 1.44 | chunk  6449 | busy  85% | hit 95.6% | re-prefill 19%
+  C=  472 useful   45.4k | p90    9.6 s | req/chunk 1.83 | chunk  8437 | busy  92% | hit 95.3% | re-prefill 23%
+  C=  480 useful   46.6k | p90    9.7 s | req/chunk 1.98 | chunk  9035 | busy  94% | hit 95.3% | re-prefill 23%  <- goodput point
+  C=  488 useful   46.6k | p90   10.1 s | req/chunk 2.15 | chunk  9793 | busy  95% | hit 95.3% | re-prefill 24%
+  C=  512 useful   46.9k | p90   16.7 s | req/chunk 2.48 | chunk 11673 | busy  97% | hit 95.0% | re-prefill 27%
+  C=  640 useful   34.9k | p90   64.0 s | req/chunk 2.72 | chunk 16382 | busy 100% | hit 92.5% | re-prefill 49%
+  C=  768 useful   26.4k | p90  157.6 s | req/chunk 2.28 | chunk 16384 | busy 100% | hit 90.1% | re-prefill 61%
+
+== g4_k0 paging + host 8 TB/gx: goodput 61.6k at C=672 (req/chunk 2.66)
+  C=   16 useful    0.7k | p90    1.4 s | req/chunk 1.00 | chunk  3142 | busy   1% | hit 98.0% | re-prefill 3%
+  C=   32 useful    2.8k | p90    2.0 s | req/chunk 1.01 | chunk  3692 | busy   5% | hit 97.5% | re-prefill 1%
+  C=   64 useful    5.5k | p90    2.5 s | req/chunk 1.01 | chunk  3848 | busy  10% | hit 97.1% | re-prefill 1%
+  C=   96 useful   10.4k | p90    2.9 s | req/chunk 1.02 | chunk  3885 | busy  19% | hit 96.4% | re-prefill 2%
+  C=  128 useful   15.2k | p90    3.1 s | req/chunk 1.03 | chunk  4138 | busy  28% | hit 96.2% | re-prefill 1%
+  C=  192 useful   19.2k | p90    3.2 s | req/chunk 1.05 | chunk  4183 | busy  35% | hit 96.5% | re-prefill 1%
+  C=  256 useful   26.9k | p90    3.6 s | req/chunk 1.08 | chunk  4363 | busy  48% | hit 96.6% | re-prefill 1%
+  C=  384 useful   37.2k | p90    4.2 s | req/chunk 1.15 | chunk  4563 | busy  66% | hit 96.6% | re-prefill 2%
+  C=  512 useful   51.2k | p90    7.2 s | req/chunk 1.58 | chunk  6264 | busy  86% | hit 96.4% | re-prefill 2%
+  C=  640 useful   58.5k | p90    9.3 s | req/chunk 2.28 | chunk  8788 | busy  94% | hit 96.5% | re-prefill 3%
+  C=  672 useful   61.4k | p90    9.6 s | req/chunk 2.66 | chunk 10123 | busy  97% | hit 96.4% | re-prefill 2%  <- goodput point
+  C=  680 useful   61.7k | p90   10.3 s | req/chunk 2.80 | chunk 10738 | busy  98% | hit 96.4% | re-prefill 3%
+  C=  688 useful   62.1k | p90   10.1 s | req/chunk 2.90 | chunk 11164 | busy  98% | hit 96.3% | re-prefill 3%
+  C=  704 useful   63.1k | p90   10.7 s | req/chunk 3.23 | chunk 12327 | busy  99% | hit 96.3% | re-prefill 4%
+  C=  768 useful   63.9k | p90   17.1 s | req/chunk 4.14 | chunk 15530 | busy 100% | hit 96.3% | re-prefill 5%
+  C= 1024 useful   61.0k | p90   50.3 s | req/chunk 4.19 | chunk 16300 | busy  98% | hit 96.0% | re-prefill 8%
+  C= 1536 useful   60.0k | p90   73.2 s | req/chunk 4.03 | chunk 16337 | busy  97% | hit 95.8% | re-prefill 9%
+
+== g8_k0 paging + host 1 TB/gx: goodput 101.2k at C=1104 (req/chunk 2.91)
+  C=   16 useful    0.7k | p90    1.4 s | req/chunk 1.01 | chunk  3157 | busy   1% | hit 98.0% | re-prefill 3%
+  C=   32 useful    2.7k | p90    2.0 s | req/chunk 1.00 | chunk  3670 | busy   2% | hit 97.5% | re-prefill 1%
+  C=   64 useful    5.6k | p90    2.4 s | req/chunk 1.01 | chunk  3881 | busy   4% | hit 97.1% | re-prefill 1%
+  C=   96 useful   10.4k | p90    2.6 s | req/chunk 1.02 | chunk  3890 | busy   8% | hit 96.4% | re-prefill 2%
+  C=  128 useful   15.3k | p90    2.8 s | req/chunk 1.03 | chunk  4137 | busy  11% | hit 96.2% | re-prefill 1%
+  C=  192 useful   19.3k | p90    2.9 s | req/chunk 1.04 | chunk  4156 | busy  14% | hit 96.5% | re-prefill 1%
+  C=  256 useful   27.0k | p90    3.0 s | req/chunk 1.07 | chunk  4312 | busy  21% | hit 96.7% | re-prefill 1%
+  C=  384 useful   37.5k | p90    3.1 s | req/chunk 1.11 | chunk  4385 | busy  28% | hit 96.6% | re-prefill 2%
+  C=  512 useful   52.6k | p90    3.3 s | req/chunk 1.19 | chunk  4800 | busy  39% | hit 96.5% | re-prefill 1%
+  C=  640 useful   62.5k | p90    3.4 s | req/chunk 1.26 | chunk  5119 | busy  46% | hit 96.5% | re-prefill 3%
+  C=  768 useful   75.1k | p90    4.1 s | req/chunk 1.42 | chunk  5893 | busy  59% | hit 96.3% | re-prefill 9%
+  C= 1024 useful   97.6k | p90    6.8 s | req/chunk 2.20 | chunk  9731 | busy  82% | hit 95.6% | re-prefill 21%
+  C= 1080 useful   99.5k | p90    8.5 s | req/chunk 2.62 | chunk 11919 | busy  87% | hit 95.4% | re-prefill 26%
+  C= 1104 useful  101.0k | p90    9.2 s | req/chunk 2.91 | chunk 13254 | busy  89% | hit 95.2% | re-prefill 28%  <- goodput point
+  C= 1136 useful  101.8k | p90   12.2 s | req/chunk 3.21 | chunk 14744 | busy  91% | hit 95.1% | re-prefill 30%
+  C= 1256 useful   93.8k | p90   38.6 s | req/chunk 3.23 | chunk 16383 | busy  92% | hit 94.1% | re-prefill 39%
+  C= 1536 useful   60.2k | p90   80.9 s | req/chunk 2.49 | chunk 16384 | busy  80% | hit 91.3% | re-prefill 56%
+  C= 2048 useful   24.3k | p90  376.2 s | req/chunk 1.53 | chunk 16384 | busy  84% | hit 77.1% | re-prefill 83%
+
+== g8_k0 paging + host 8 TB/gx: goodput 146.0k at C=1648 (req/chunk 4.23)
+  C=   16 useful    0.7k | p90    1.4 s | req/chunk 1.01 | chunk  3157 | busy   1% | hit 98.0% | re-prefill 3%
+  C=   32 useful    2.7k | p90    2.0 s | req/chunk 1.00 | chunk  3670 | busy   2% | hit 97.5% | re-prefill 1%
+  C=   64 useful    5.6k | p90    2.4 s | req/chunk 1.01 | chunk  3881 | busy   4% | hit 97.1% | re-prefill 1%
+  C=   96 useful   10.4k | p90    2.6 s | req/chunk 1.02 | chunk  3890 | busy   8% | hit 96.4% | re-prefill 2%
+  C=  128 useful   15.3k | p90    2.8 s | req/chunk 1.03 | chunk  4137 | busy  11% | hit 96.2% | re-prefill 1%
+  C=  192 useful   19.3k | p90    2.9 s | req/chunk 1.04 | chunk  4156 | busy  14% | hit 96.5% | re-prefill 1%
+  C=  256 useful   27.0k | p90    3.0 s | req/chunk 1.07 | chunk  4312 | busy  21% | hit 96.7% | re-prefill 1%
+  C=  384 useful   37.5k | p90    3.1 s | req/chunk 1.11 | chunk  4385 | busy  28% | hit 96.6% | re-prefill 2%
+  C=  512 useful   52.6k | p90    3.3 s | req/chunk 1.19 | chunk  4800 | busy  39% | hit 96.5% | re-prefill 1%
+  C=  640 useful   62.6k | p90    3.4 s | req/chunk 1.25 | chunk  5029 | busy  45% | hit 96.6% | re-prefill 1%
+  C=  768 useful   75.6k | p90    3.6 s | req/chunk 1.36 | chunk  5315 | busy  55% | hit 96.6% | re-prefill 2%
+  C= 1024 useful   99.8k | p90    4.3 s | req/chunk 1.72 | chunk  6610 | busy  70% | hit 96.5% | re-prefill 2%
+  C= 1536 useful  139.5k | p90    6.7 s | req/chunk 3.56 | chunk 12848 | busy  93% | hit 96.5% | re-prefill 3%
+  C= 1648 useful  145.8k | p90    9.5 s | req/chunk 4.23 | chunk 15459 | busy  96% | hit 96.3% | re-prefill 5%  <- goodput point
+  C= 1680 useful  147.0k | p90   13.1 s | req/chunk 4.44 | chunk 16241 | busy  97% | hit 96.3% | re-prefill 5%
+  C= 1712 useful  147.4k | p90   17.6 s | req/chunk 4.44 | chunk 16379 | busy  97% | hit 96.3% | re-prefill 6%
+  C= 1776 useful  146.4k | p90   29.2 s | req/chunk 4.46 | chunk 16379 | busy  98% | hit 96.3% | re-prefill 6%
+  C= 2048 useful  111.2k | p90   47.0 s | req/chunk 4.10 | chunk 16377 | busy  72% | hit 95.9% | re-prefill 8%
