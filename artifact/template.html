@@ -209,9 +209,10 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row check"><input id="laneArena" type="checkbox"><label for="laneArena">Variable-size lanes (arena)</label></div>
     <div class="row"><label for="arenaTokens">Arena (M tokens)</label><select id="arenaTokens"><option value="2000000">2</option><option value="4000000">4</option><option value="8000000">8</option></select></div>
     <div class="row check"><input id="unaligned" type="checkbox"><label for="unaligned">Unaligned resume</label></div>
-    <div class="row check"><input id="hostTier" type="checkbox"><label for="hostTier">Host-DRAM KV tier</label></div>
-    <div class="row"><label for="hostGBPerGalaxy">Host GB / galaxy</label><input id="hostGBPerGalaxy" type="number" min="0" step="128"></div>
-    <div class="row"><label for="pcieGBsPerGalaxy">PCIe GB/s / galaxy</label><input id="pcieGBsPerGalaxy" type="number" min="1" step="8"></div>
+    <div class="row check"><input id="hostTier" type="checkbox"><label for="hostTier">SSD KV tier</label></div>
+    <div class="row"><label for="hostGBPerGalaxy">SSD capacity GB / galaxy</label><input id="hostGBPerGalaxy" type="number" min="0" step="1024"></div>
+    <div class="row"><label for="pcieGBsPerGalaxy">SSD bandwidth GB/s / galaxy</label><input id="pcieGBsPerGalaxy" type="number" min="1" step="4"></div>
+    <div class="hint">SSD bandwidth = the lower of the drives' and PCIe's, shared by fetches and write-backs.</div>
     <div class="row check"><input id="idxDerep" type="checkbox"><label for="idxDerep">index_k stored once (not ×TP)</label></div>
     <div class="row check"><input id="idxBf16" type="checkbox"><label for="idxBf16">index_k bf16 (off = bf8)</label></div>
     <div class="row"><label for="reserveGB">Reserve GB / chip</label><input id="reserveGB" type="number" min="0" step="0.5"></div>
@@ -364,7 +365,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li><b>C:</b> chunk 2048, same split as B.</li>
         </ul>
         Each run measures a (new tokens × cached tokens) matrix, loaded and idle. The preset <span class="mono">today-C</span> is run C.</li>
-      <li><b>Features under consideration</b> (defined in "Features" below): batching several requests per chunk; slot lanes plus a paged KV pool; variable chunk size with an all-to-all KV write; plus a few more the study adds (host-DRAM tier, index-cache layout, async stage handoff, and others).</li>
+      <li><b>Features under consideration</b> (defined in "Features" below): batching several requests per chunk; slot lanes plus a paged KV pool; variable chunk size with an all-to-all KV write; plus a few more the study adds (SSD KV tier, index-cache layout, async stage handoff, and others).</li>
     </ul>
 
     <h2 id="m-metric">The metric: goodput</h2>
@@ -374,7 +375,13 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Only prefill work counts.</b> Useful tokens exclude cached tokens and decode. For a fixed traffic mix, useful tok/s is proportional to requests served per second.</li>
       <li><b>At an SLO, not at peak.</b> In a closed-loop replay, throughput first rises with concurrency and then collapses. More live sessions stop fitting in the KV cache, evictions turn into re-prefill, TTFT grows to hundreds of seconds, and idle KV then gets evicted even faster (the "cache cliff"). The SLO picks an operating point a real deployment could run at.</li>
       <li><b>The SLO is loose on purpose</b> (p90 ≤ 10 s; today's single-request TTFT is about 1-2 s) because throughput is the priority. p90 is used rather than the median because p90 sees the queueing blow-up earlier. The collapse is sharp, so the best SLO-free throughput is almost identical to goodput (see the sensitivity table), and the ranking does not depend on the exact SLO. You can change the SLO on the Explore tab.</li>
-      <li><b>Finding the cliff.</b> The throughput-vs-concurrency curve is steep near the cliff: two neighbouring grid points can differ by 10% or more. After the grid sweep, the simulator therefore bisects (in log concurrency) between the best point that meets the SLO and the next one that fails it, 4 more runs, which locates the cliff to about 1% in concurrency. If the failing point still has higher throughput, goodput is also interpolated to the SLO crossing. The page and the Roadmap study use the same rule.</li>
+      <li><b>Finding the cliff.</b> The throughput-vs-concurrency curve is steep near the cliff: two neighbouring grid points can differ by 10% or more. After the grid sweep, the simulator therefore bisects (in log concurrency) between the best point that meets the SLO and the next one that fails it, 4 more runs, which locates the cliff to about 1% in concurrency. If the failing point still has higher throughput, goodput is also interpolated to the SLO crossing.
+        <ul>
+          <li><b>When throughput peaks before the SLO is reached</b>, typical for loose SLOs and cache-limited configurations, it also bisects around the peak (up to 4 more runs).</li>
+          <li>Without that, re-running with a looser SLO would move the bisection past the peak. The peak would then be sampled only on the coarse grid, and goodput could come out a few percent <i>lower</i> for a looser SLO; the true value can only rise.</li>
+          <li>Moving the SLO slider without re-running re-reads the same points, so goodput never falls there.</li>
+        </ul>
+        The page and the Roadmap study use the same rule.</li>
     </ul>
 
     <h2 id="m-glossary">Glossary</h2>
@@ -483,14 +490,16 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li><b>How eviction is tracked.</b> Each session's prefix tree is compressed into pieces. Every request touches whole pieces, so LRU over pieces is exactly LRU over 64-token pages.</li>
         </ul>
       </li>
-      <li><b>Host-DRAM KV tier = offloading KV to the host servers' RAM.</b>
+      <li><b>SSD KV tier = offloading KV to NVMe drives on the galaxy hosts.</b>
         <ul>
-          <li><b>Mechanism.</b> When the device pool evicts a page, it is written to host RAM instead of being dropped. A later hit on it is copied back over PCIe into the request's lane while the request waits in the queue. Host RAM evicts least-recently-used too. Write-backs and fetches share the PCIe link.</li>
-          <li><b>Defaults:</b> 1 TB of host RAM and 64 GB/s of PCIe per galaxy. Both are assumptions, not measured galaxy-host specs.</li>
-          <li><b>AgentX cap.</b> The methodology caps host DRAM at 3 TB per system, except for a few standard rack systems, and a configuration may use only the share of host DRAM proportional to its accelerator allocation. A compliant submission may therefore have less than the default (4 TB at 4 galaxies). The sensitivity table shows 0.5 and 2 TB per galaxy.</li>
+          <li><b>Mechanism.</b> When the device pool evicts a page, it is written to SSD instead of being dropped. A later hit on it is read back into the request's lane while the request waits in the queue. The SSD tier evicts least-recently-used too. Write-backs and fetches share one bandwidth per galaxy: the lower of the drives' and PCIe's. Index keys are stored once on SSD, not per TP column.</li>
+          <li><b>Defaults:</b> 1 TB and 64 GB/s per galaxy. These are placeholders carried over from the earlier host-DRAM tier, not SSD specs; set the real drive capacity and bandwidth.</li>
+          <li><b>What matters.</b> Capacity matters much more than bandwidth. At 8 TB per galaxy the results match an infinite cache; dropping bandwidth from 64 to 16 GB/s costs at most 13%.</li>
+          <li><b>Not modelled:</b> SSD write endurance, read/write asymmetry, and per-IO latency. The tier is an ideal page DMA at one bandwidth.</li>
+          <li><b>AgentX.</b> The methodology caps host <i>DRAM</i> per system; check how it treats SSD-backed KV before relying on large tiers.</li>
         </ul>
       </li>
-      <li><b>Full paging (ideal).</b> Kernels read paged KV directly: no lanes, no copies. It can have the host-DRAM tier behind it, like the pool; compare paging and pool with the same host setting.</li>
+      <li><b>Full paging (ideal).</b> Kernels read paged KV directly: no lanes, no copies. It can have the SSD tier behind it, like the pool; compare paging and pool with the same SSD setting.</li>
       <li><b>Infinite cache.</b> Nothing is ever evicted.</li>
     </ul>
 
@@ -515,7 +524,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Chunk sized to its tokens</b> (on by default). A batched chunk is costed at the tokens it holds, a multiple of the chunk size (fixed layout) or of 32·SP (variable layout). This assumes a compiled trace for every size up to the budget.
         <ul>
           <li>Off, every batched chunk has one static budget-sized shape. A partly filled batch pays for the whole budget in every token-proportional op and in the stage-to-stage send. Routed MoE ops still trim to the real tokens, as they do for a padded chunk tail today.</li>
-          <li>With few requests per batch this hurts large budgets: on today's 4-galaxy config with pool and host tier, a static 16k shape drops 25.0k → 14.9k, below no batching (21.5k).</li>
+          <li>With few requests per batch this hurts large budgets: on today's 4-galaxy config with pool and SSD tier, a static 16k shape drops 25.0k → 14.9k, below no batching (21.5k).</li>
           <li>A static shape near the typical fill (4–8k) loses at most 3%, and on the best stacks, which fill batches better, static 16k costs 0–6%.</li>
         </ul>
       </li>
@@ -533,7 +542,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <ul>
       <li><b>Slot lanes + paged pool:</b> replaces static slots (see KV cache): 4 fixed 1M lanes per stage.</li>
       <li><b>Variable-size lanes (arena):</b> lanes allocated at the request's actual length from a contiguous arena (2-8M tokens) instead of 1M each.</li>
-      <li><b>Host-DRAM KV tier:</b> see KV cache. It requires the paged pool or full paging.</li>
+      <li><b>SSD KV tier:</b> see KV cache. It requires the paged pool or full paging.</li>
       <li><b>Not a feature: bounded dense gather.</b> Earlier versions listed bounding the dense ring-joint gather to [0, kv_len) as a P0 feature. The op already does this (tt-metal #47539), so it is part of today's baseline, and the old whole-lane behaviour is only a sensitivity row.</li>
       <li><b>index_k stored once:</b> the index-key cache is kept on one TP column instead of all four, and gathered when needed. This cuts KV size from 2112 to 1344 B per token per layer.</li>
       <li><b>index_k bf8:</b> the index-key cache in bf8 instead of bf16. It is the runner's default dtype, but the measured runs used bf16, and it needs an accuracy check.</li>
@@ -563,8 +572,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Sensitivity.</b> The best configuration re-run with:
         <ul>
           <li>other seeds (about ±5% noise);</li>
-          <li>0.5 or 2 TB host RAM per galaxy;</li>
-          <li>16 or 256 GB/s PCIe per galaxy;</li>
+          <li>0.5 or 2 TB of SSD tier per galaxy;</li>
+          <li>16 or 256 GB/s of SSD bandwidth per galaxy;</li>
           <li>decode at 90 or 360 tok/s;</li>
           <li>a 6 GB reserve per chip;</li>
           <li>a TP=4-only mesh.</li>
@@ -591,7 +600,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
 
     <h2 id="m-limits">Assumptions and limits</h2>
     <ul>
-      <li><b>Host tier.</b> Host RAM size, PCIe bandwidth and the ideal page DMA are assumptions. Host RAM size matters a lot for the result; PCIe bandwidth hardly does.</li>
+      <li><b>SSD tier.</b> Capacity, bandwidth and the ideal page DMA are assumptions; endurance, read/write asymmetry and IO latency are not modelled. Capacity matters a lot for the result; bandwidth hardly does.</li>
       <li><b>Pool copies.</b> Assumed to be page-list gather kernels at 50% DRAM efficiency. Arena fragmentation is not modelled.</li>
       <li><b>Torus rings.</b> Every measurement used line (mesh) collectives, so the ring speed-ups are textbook link-load ratios, not measurements. [4,4] has no profile at all (geometric midpoint of [2,4] and [8,4]).</li>
       <li><b>Decode.</b> A fixed per-request speed. Decode-side capacity and KV migration to decode are not modelled.</li>
@@ -769,7 +778,7 @@ function updatePlan() {
   kvS.push(['KV capacity / replica', `${(plan.capTok / 1e6).toFixed(1)} M tokens`]);
   if (cfg.cache === 'slots') kvS.push(['Static 1M slots', `${plan.nSlots}`]);
   if (cfg.cache === 'pool') { kvS.push(['Paged pool', `${(plan.poolTok / 1e6).toFixed(1)} M tokens`]); kvS.push([cfg.laneArena ? 'Lane arena' : 'Lanes', cfg.laneArena ? `${(plan.arena / 1e6).toFixed(0)} M tokens` : `${plan.lanes} x 1M`]); }
-  if (plan.hostTok > 0) kvS.push(['Host tier', `${(plan.hostTok / 1e6).toFixed(0)} M tokens`]);
+  if (plan.hostTok > 0) kvS.push(['SSD tier', `${(plan.hostTok / 1e6).toFixed(0)} M tokens`]);
   kvS.push(['KV bytes / token', `${(plan.kvbL * 60 / 1000).toFixed(1)} KB`]);
   kvS.push(['Ceiling @140k cached', `${fmtK(ceiling)} processed tok/s`]);
   $('planKv').innerHTML = kvS.map(([k, v]) => `<div><span>${k}</span><br><b class="mono">${v}</b></div>`).join('');
@@ -993,7 +1002,7 @@ function renderRoadmap() {
   $('roadHead').innerHTML = `<h2>What moves goodput on AgentX</h2>
   <p>Goodput = useful tok/s with p90 TTFT ≤ ${STUDY.slo} s. Baseline → best configuration found: <b>4 galaxies</b> ${fmtK(g0.greedy[0].goodput)} → <b>${fmtK(g0.grid[0].goodput)}</b> with today's kernels, ${fmtK(g1.grid[0].goodput)} with roofline kernels; <b>8 galaxies</b> ${fmtK(h0.greedy[0].goodput)} → <b>${fmtK(h0.grid[0].goodput)}</b> today, ${fmtK(h1.grid[0].goodput)} with roofline kernels.</p>
   <p>P0 features: ${top.map((k) => `<span class="pill p0">${esc(k)}</span>`).join(' ')}. The ordering, gains and complexity are below; hover the orange ticks for the infinite-cache ceiling of each step.</p>
-  <p>On AgentX traffic, KV-cache capacity limits throughput more than compute: even the best configurations reach only about 40-70% of their own infinite-cache goodput. The features that add effective KV capacity therefore come first: the paged pool, the host-DRAM tier and the index-cache layout. "Today's kernels" / "roofline kernels", greedy vs leave-one-out, tiers and scope are defined in the <a href="#method">Method</a> tab.</p>`;
+  <p>On AgentX traffic, KV-cache capacity limits throughput more than compute: even the best configurations reach only about 40-70% of their own infinite-cache goodput. The features that add effective KV capacity therefore come first: the paged pool, the SSD KV tier and the index-cache layout. "Today's kernels" / "roofline kernels", greedy vs leave-one-out, tiers and scope are defined in the <a href="#method">Method</a> tab.</p>`;
 }
 
 // ---------------------------------------------------------------- model tab

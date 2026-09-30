@@ -29,6 +29,8 @@ const SCOPE = require('./lib/scope.js');
 // ---- trim the study for the page
 const slim = (a) => (a ? { conc: a.conc, usefulTps: a.usefulTps, processedTps: a.processedTps, ttftP50: a.ttftP50, ttftP90: a.ttftP90, hitRate: a.hitRate, infHitRate: a.infHitRate, reprefillFrac: a.reprefillFrac, padFrac: a.padFrac, maxUtil: a.maxUtil, avgChunkTok: a.avgChunkTok, avgSegsPerChunk: a.avgSegsPerChunk } : null);
 const DETAILS = require('./feature_details.js');
+// studies run before the host-DRAM tier was renamed to the SSD tier store the old sensitivity names
+const SENS_RENAME = { 'host 0.5 TB/gx': 'SSD 0.5 TB/gx', 'host 2 TB/gx': 'SSD 2 TB/gx', 'PCIe 16 GB/s/gx': 'SSD 16 GB/s/gx', 'PCIe 256 GB/s/gx': 'SSD 256 GB/s/gx' };
 const S = { slo: study.slo, features: FEATURES.map((f) => ({ key: f.key, name: f.name, requires: f.requires || [], scope: SCOPE[f.key], detail: DETAILS[f.key] })), scenarios: {} };
 const presets = PRESETS.list.map((p) => ({ name: p.name, desc: p.desc, cfg: p.cfg }));
 for (const [key, R] of Object.entries(study.scenarios)) {
@@ -38,7 +40,7 @@ for (const [key, R] of Object.entries(study.scenarios)) {
     full: R.full ? { goodput: R.full.goodput, at: slim(R.full.at) } : null,
     loo: R.loo.map((l) => ({ remove: l.remove, goodput: l.goodput })),
     grid: R.grid.slice(0, 12).map((g) => ({ extra: g.extra, goodput: g.goodput, at: slim(g.at), counts: g.plan.counts, capTok: g.plan.capTok, poolTok: g.plan.poolTok })),
-    sens: (R.sens || []).map((s) => ({ name: s.name, goodput: s.goodput, peak: s.peak, at: slim(s.at) })),
+    sens: (R.sens || []).map((s) => ({ name: SENS_RENAME[s.name] || s.name, goodput: s.goodput, peak: s.peak, at: slim(s.at) })),
     curves: {
       base: R.greedy[0].points.map(slim),
       best: R.grid[0].points.map(slim),

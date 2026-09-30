@@ -16,7 +16,7 @@ const FEATURES = [
   { key: 'unaligned', name: 'Unaligned (block-granular) resume', cfg: { unaligned: true } },
   { key: 'pool', name: 'Slot lanes + paged KV pool (4 x 1M lanes per stage, copy-in/out)', cfg: { cache: 'pool', lanes: 4, laneArena: false, laneScope: 'stage' } },
   { key: 'arena', name: 'Variable-size lanes (contiguous arena, 4M tokens)', cfg: { laneArena: true, arenaTokens: 4e6 }, requires: ['pool'] },
-  { key: 'host', name: 'Host-DRAM KV tier (1 TB/galaxy, 64 GB/s PCIe)', cfg: { hostTier: true }, requires: ['pool'] },
+  { key: 'host', name: 'SSD KV tier (1 TB/galaxy, 64 GB/s)', cfg: { hostTier: true }, requires: ['pool'] },
   { key: 'idxdedup', name: 'index_k cache not replicated over TP (store once)', cfg: { idxDerep: true } },
   { key: 'idxbf8', name: 'index_k cache bf8 instead of bf16', cfg: { idxBf16: false } },
   { key: 'var', name: 'Variable chunk / flexible SP layout (a2a KV write)', cfg: { layout: 'var' } },
@@ -123,8 +123,8 @@ async function main() {
     const bestExtra = R.grid[0].extra;
     const sens = [
       ['inf cache', { cache: 'inf', hostTier: false }], ['seed 2', { seed: 2 }], ['seed 3', { seed: 3 }],
-      ['host 0.5 TB/gx', { hostGBPerGalaxy: 512 }], ['host 2 TB/gx', { hostGBPerGalaxy: 2048 }],
-      ['PCIe 16 GB/s/gx', { pcieGBsPerGalaxy: 16 }], ['PCIe 256 GB/s/gx', { pcieGBsPerGalaxy: 256 }],
+      ['SSD 0.5 TB/gx', { hostGBPerGalaxy: 512 }], ['SSD 2 TB/gx', { hostGBPerGalaxy: 2048 }],
+      ['SSD 16 GB/s/gx', { pcieGBsPerGalaxy: 16 }], ['SSD 256 GB/s/gx', { pcieGBsPerGalaxy: 256 }],
       ['decode 90 tok/s', { decodeTps: 90 }], ['decode 360 tok/s', { decodeTps: 360 }],
       ['reserve 6 GB/chip', { reserveGB: 6 }], ['SLO-free peak', {}],
       ['TP=4 mesh only', sc.base.galaxies === 4 ? { mesh: [2, 4], stages: 16, replicas: 1 } : { mesh: [2, 4], stages: 32, replicas: 1 }],

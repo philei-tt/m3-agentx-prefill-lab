@@ -47,7 +47,7 @@ tokens into useful, re-prefill and padding.
 
 | file | what |
 |---|---|
-| `sim_core.js` | **The whole model** (no dependencies): per-op roofline + calibration, stage plan and memory, KV residency (static slots / paged pool with lanes / host tier / paging / ∞), and the closed-loop replay. The artifact inlines it and node requires it. |
+| `sim_core.js` | **The whole model** (no dependencies): per-op roofline + calibration, stage plan and memory, KV residency (static slots / paged pool with lanes / SSD tier / paging / ∞), and the closed-loop replay. The artifact inlines it and node requires it. |
 | `prep_traffic.py` | Corpus → `traffic.bin` + `traffic.json`: agent-chain split, DAG, end-to-start delays, spawn/join, replay barriers, prefix-tree pieces. Takes 23 s on 4 cores. |
 | `collect_calib.py` | Measured data → `calib_data.json` (committed): zone profiles, per-rank per-chunk-position medians of runs A/B/C, matrix tables. |
 | `validate.js` | Calibration report: fitted efficiencies, per-rank stage times, and all 105 matrix cells, model vs measured. |
@@ -159,9 +159,9 @@ Every buffer that must hold a whole request (slots, fixed lanes, the lane arena)
   * The hit is looked up when the request becomes ready (which refreshes it in the LRU, but does not pin it), and re-checked when the request starts. Pages evicted meanwhile are recomputed; pages demoted to host meanwhile are fetched over PCIe before the first chunk.
   * The new KV enters the pool when the lane is freed: with per-stage lanes, when stage 0 finishes the request's last chunk (later stages follow in FIFO order); with global lanes, at prefill completion.
   * Copy-in/out is DRAM-bound per stage and overlapped with a 25% contention charge.
-  * With `hostTier`, device evictions are demoted to host DRAM. Host hits are fetched over PCIe before admission, and write-backs share the link. Host copies store index_k once (no TP replicas; re-broadcast on fetch).
+  * With `hostTier` (the **SSD KV tier**; the keys keep their old host-DRAM names), device evictions are demoted to SSD. SSD hits are read back before admission, and write-backs share the same bandwidth (`pcieGBsPerGalaxy` = the lower of the drives' and PCIe's). SSD copies store index_k once (no TP replicas; re-broadcast on fetch).
   * Known approximation: KV fetched from host at READY is staged on device without being counted against capacity until the request starts.
-* **`paging`**: an ideal paged kernel (no lanes, no copies). The pages a request is writing are reserved in the pool from start to completion. The host tier also works behind paging.
+* **`paging`**: an ideal paged kernel (no lanes, no copies). The pages a request is writing are reserved in the pool from start to completion. The SSD tier also works behind paging.
 * **`inf`**: infinite cache.
 
 ## Findings (study of Sep 29 2026 b: kv-bounded dense gather, torus rings; decode 180 tok/s, AIPerf-exact replay, `results/study.json`)
@@ -202,7 +202,7 @@ It is not a time estimate and has not been checked with the code owners.
 | tier | feature | 4gx today | 4gx roofline | 8gx today (ranking) | 8gx roofline | complexity |
 |---|---|---|---|---|---|---|
 | P0 | slot lanes + paged KV pool | ×4.27 #1 / ×7.97 | ×4.34 #1 / ×5.39 | ×3.69 #1 / ×5.81 | ×3.97 #1 / ×5.08 | high |
-| P0 | host-DRAM KV tier (1 TB/gx) | ×1.65 #2 / ×1.88 | ×2.20 #2 / ×1.67 | ×1.54 #2 / ×1.59 | ×1.62 #2 / ×1.58 | high |
+| P0 | SSD KV tier (1 TB/gx) | ×1.65 #2 / ×1.88 | ×2.20 #2 / ×1.67 | ×1.54 #2 / ×1.59 | ×1.62 #2 / ×1.58 | high |
 | P0 | async stage handoff | ×1.12 #5 / ×1.20 | ×1.20 #3 / ×1.40 | ×1.28 #3 / ×1.37 | ×1.45 #3 / ×1.62 | med |
 | P1 | multi-request batching | ×1.14 #4 / ×1.27 | ×1.29 #4 / ×1.33 | ×1.17 #4 / ×1.24 | ×1.14 #5 / ×1.17 | high |
 | P1 | index_k stored once (not ×TP) | ×1.08 #7 / ×1.06 | ×1.16 #5 / ×1.09 | ×1.13 #5 / ×1.07 | ×1.08 #4 / ×1.09 | med |
@@ -216,12 +216,12 @@ It is not a time estimate and has not been checked with the code owners.
 
 Takeaways:
 1. **On AgentX, KV capacity sets the throughput, not compute.** The best stacks reach only 40–73% of their own ∞-cache goodput.
-   * The pool (vs static 1M slots) and the host tier are the top features in every scenario.
-   * Host DRAM size matters much more than PCIe bandwidth: 0.5 → 2 TB/galaxy moves 4-gx goodput 36.8k → 54.5k (today's kernels) and 68.3k → 104k (roofline kernels). Dropping PCIe from 64 to 16 GB/s costs at most 13%.
+   * The pool (vs static 1M slots) and the SSD tier are the top features in every scenario.
+   * SSD capacity matters much more than its bandwidth: 0.5 → 2 TB/galaxy moves 4-gx goodput 36.8k → 54.5k (today's kernels) and 68.3k → 104k (roofline kernels). Dropping the bandwidth from 64 to 16 GB/s costs at most 13%.
    * The lane table must be per stage: a global lane table (today's slot_id) drops the best configs 3–4× with today's kernels (4 gx 45.3k → 13.8k).
 2. **Async stage handoff: ×1.12–1.62,** growing with pipeline depth and kernel speed. The measured blocking send is 6–23 ms per chunk per stage.
 3. **Batching: ×1.14–1.33.** Batches hold few requests at the goodput point.
-   * On today's 4-gx config + pool + host tier they average 1.27 requests; the average chunk is 7.5k of the 16k budget.
+   * On today's 4-gx config + pool + SSD tier they average 1.27 requests; the average chunk is 7.5k of the 16k budget.
    * Most of the gain comes from one request taking several chunk-units at once (big cold prefills in fewer, larger chunks), not from mixing users.
    * **Chunk sizing (`batchDynShape`, on by default).** The budget is a cap: a chunk is costed at the tokens it holds (a multiple of the chunk size), i.e. a trace compiled for every size. Off = one static budget-sized shape; routed MoE ops still trim to the real tokens (`tools/batch_shape_ab.js`):
      * Today's 4-gx config + pool + host, budget 4k / 8k / 16k / 32k: sized 25.0k / 25.4k / 25.0k / 22.6k vs static 24.8k / 24.6k / 14.9k / 8.3k. No batching is 21.5k.
@@ -229,8 +229,8 @@ Takeaways:
      * Best stacks: static 16k costs 0–6% (4 gx today 45.2k → 42.3k; 8 gx 1%), and static 32k costs 1–21%.
        * These batches are fuller (2–3 requests), and cold prefills fill the budget.
      * A static shape near the typical fill (8k), or a few buckets (4k/8k/16k), gets within 3–4% of per-size traces.
-   * With pool but no host tier, batching adds only 5% (13.1k → 13.8k): the goodput point is set by cache misses (39% of prefilled tokens are re-prefill), not compute.
-   * Paging vs pool: +13% without the host tier (14.8k vs 13.1k; paging frees the 4M lane tokens), identical with it (21.6k vs 21.5k). Pool/paging + host tier already reach the ∞-cache goodput of this compute config (21.6k), so further gains must come from compute and TTFT. Sequential per-request attention is as good as fused, so the proposed plan (batch the MoE, attention per request) is the right one, and fused attention is not worth building. Best budget: 16k.
+   * With pool but no SSD tier, batching adds only 5% (13.1k → 13.8k): the goodput point is set by cache misses (39% of prefilled tokens are re-prefill), not compute.
+   * Paging vs pool: +13% without the SSD tier (14.8k vs 13.1k; paging frees the 4M lane tokens), identical with it (21.6k vs 21.5k). Pool/paging + SSD tier already reach the ∞-cache goodput of this compute config (21.6k), so further gains must come from compute and TTFT. Sequential per-request attention is as good as fused, so the proposed plan (batch the MoE, attention per request) is the right one, and fused attention is not worth building. Best budget: 16k.
 4. **Bounded dense gather is already done** (tt-metal #47539). Without it (the old whole-lane gather), the best 4-gx config with 4 fixed 1M lanes would drop 45.3k → 31.1k. Configs with arena lanes are unaffected.
    * The M3 comments that say the dense layers gather the whole cache shard (`prefill.py`, `tt_prefill_runtime.reconfigure_capacity`, README `PREFILL_MAX_SEQ_LEN`) are stale. Only the gather buffer is capacity-sized, which costs memory, not time.
 5. **index_k stored once: ×1.06–1.16;** bf8 index_k adds another ×1.05–1.11.
@@ -267,19 +267,21 @@ Takeaways:
     * Goodput gains only 0–1% on the best stacks (+10% on today's config). Beyond that point more sessions stop fitting in the KV cache, so the throughput peak sits at about the same concurrency as the 10 s point.
     * With an infinite cache, batches fill: 2.8–4.3 requests per chunk (14–16k of the 16k budget) at 10 s, 3.8–4.5 with no SLO, and 96–99% of the bottleneck stage busy.
     * **Why the real cache fills batches less** (`tools/fill_diag.js`, `results/fill_diag.txt`: same stack, same concurrency, KV residency varied):
-      * Pool lanes vs full paging and PCIe bandwidth make no difference. **Host RAM size is the whole gap**: at 8 TB/galaxy instead of 1 TB, every metric matches the infinite cache.
+      * Pool lanes vs full paging and tier bandwidth make no difference. **Tier capacity is the whole gap**: at 8 TB/galaxy instead of 1 TB, every metric matches the infinite cache.
       * Past about 480 streams at 4 gx (1136 at 8 gx), the live AgentX working set no longer fits device + 1 TB/gx host, and evicted prefixes come back as re-prefill.
         * At the infinite cache's peak concurrency, re-prefill is ~60% of prefilled tokens (vs 3–5%), hit rate drops from 96% to 90%, and useful throughput halves.
         * So the SLO point sits at lower concurrency. Fewer requests are in prefill at once, and batches hold fewer.
       * At equal concurrency the real cache's batches are, if anything, fuller (4 gx at 480: 2.01 vs 1.44 requests), because re-prefill makes each request longer.
-      * AgentX caps host DRAM per system, so 8 TB/galaxy may not be allowed. A cheaper capacity tier (SSD) or smaller KV (index_k fixes, bf8) is the way to that ceiling.
+      * That is why the second tier is on SSD: 8 TB/galaxy of host DRAM would exceed the AgentX host-DRAM cap, while NVMe capacity is cheap. Smaller KV (index_k fixes, bf8) also helps.
     * A 5 s SLO costs 20–40% with today's kernels, and 0–2% with roofline kernels.
-    * The page has an SLO slider, whose right end means no SLO. A no-SLO run bisects the throughput peak. Different SLOs sample different concurrencies, so goodput vs SLO can wobble by about ±3%.
+    * The page has an SLO slider, whose right end means no SLO. A no-SLO run bisects the throughput peak.
+      * Any sweep whose throughput peaks before the SLO crossing also bisects the peak (`lib/sweep.js` step 4). Before that fix, a re-run with a looser SLO could report up to 3% *lower* goodput (4 gx roofline: 81.4k at 10 s, 78.9k at 30 s), because its bisection moved past the peak. Now it is within 0.2% across 5 s … no SLO.
+      * `results/study.json` predates the fix. Its goodputs would move by at most a few percent, and only for configurations whose peak comes before the SLO.
 11. **The cliff is steep.** Goodput can change by 10% between neighbouring concurrency points, so the sweep bisects the SLO crossing.
 
 ## Assumptions to revisit
 
-* Host tier: 1 TB DRAM and 64 GB/s PCIe per galaxy, modelled as an ideal page DMA. Both are unverified; see the sensitivity table in the artifact.
+* SSD tier: 1 TB and 64 GB/s per galaxy are placeholders (carried over from the earlier host-DRAM tier), modelled as an ideal page DMA with one symmetric bandwidth; endurance, read/write asymmetry and IO latency are not modelled. Set the real drive numbers; see the sensitivity table in the artifact.
 * Pool copies are page-list gathers at 50% DRAM efficiency. Arena fragmentation is not modelled.
 * Decode is a fixed per-request rate. KV migration to decode is not modelled.
 * Meshes without a profile ([4,4], [1,4], …) are extrapolated. TP=2 stages use the [4,2] single-stage profile.
