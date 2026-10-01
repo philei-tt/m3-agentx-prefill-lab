@@ -199,9 +199,10 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="hint">Off: with a fixed layout, each chunk-unit of a request makes its own call and re-gathers the cached prefix.</div>
     <div class="row check"><input id="prefetchKV" type="checkbox"><label for="prefetchKV">Prefetch KV-prefix gathers (overlap with compute)</label></div>
     <div class="row"><label for="policy">Scheduling</label><select id="policy"><option value="fcfs">FCFS, run to completion</option><option value="srpt">shortest first (30 s aging)</option><option value="rr">round robin</option></select></div>
-    <div class="row"><label for="rrLanes">RR lanes</label><select id="rrLanes"><option value="keep">kept</option><option value="release">released (re-copy)</option></select></div>
+    <div class="row"><label for="rrLanes">RR lanes / stage (0 = auto)</label><input id="rrLanes" type="number" min="0" max="64" step="1"></div>
+    <div class="row"><label for="rrCopyIn">RR copy-in</label><select id="rrCopyIn"><option value="miss">only on a lane miss</option><option value="always">every turn</option></select></div>
     <div class="row"><label for="rrMaxActive">RR max in progress</label><input id="rrMaxActive" type="number" min="0" step="1"></div>
-    <div class="hint">Round robin (tt-d-gen): one chunk per turn (batched: as many chunk units as it can fill), then to the back. A lane is a per-stage KV slot. Kept lanes cap requests in progress at the lane count; released lanes re-copy the whole context in every turn. Max in progress: released lanes and paging, 0 = pool-bounded.</div>
+    <div class="hint">Round robin (tt-d-gen): one chunk per turn (batched: as many chunk units as it can fill), then to the back. On the pool, a lane (per-stage KV slot) is taken per turn and the new KV is always copied out; auto lanes = stages without batching, chunk units per batch with batching. Max in progress: pool and paging, 0 = pool-bounded.</div>
   </fieldset>
   <fieldset>
     <legend>KV cache</legend>
@@ -697,9 +698,9 @@ function mkWorker() {
 }
 
 // ---------------------------------------------------------------- form <-> cfg
-const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'batchDynShape', 'attn', 'kvDedup', 'prefetchKV', 'policy', 'rrLanes', 'rrMaxActive',
+const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'batchDynShape', 'attn', 'kvDedup', 'prefetchKV', 'policy', 'rrLanes', 'rrCopyIn', 'rrMaxActive',
   'cache', 'laneScope', 'copyMode', 'lanes', 'laneArena', 'arenaTokens', 'unaligned', 'hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'duration', 'seed'];
-const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'lanes', 'arenaTokens', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'reserveGB', 'decodeTps', 'duration', 'seed', 'rrMaxActive']);
+const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'lanes', 'arenaTokens', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'reserveGB', 'decodeTps', 'duration', 'seed', 'rrLanes', 'rrMaxActive']);
 function setForm(cfg) {
   const c = Object.assign({}, SIM.DEFAULTS, cfg);
   for (const f of FIELDS) {
@@ -733,9 +734,11 @@ function syncUi() {
   $('lanes').disabled = !pool || $('laneArena').checked;
   $('budget').disabled = !$('batch').checked; $('attn').disabled = !$('batch').checked; $('batchDynShape').disabled = !$('batch').checked;
   $('unaligned').disabled = $('layout').value === 'var';
-  const rr = $('policy').value === 'rr';
-  $('rrLanes').disabled = !rr || !pool;
-  $('rrMaxActive').disabled = !rr || !((pool && $('rrLanes').value === 'release') || $('cache').value === 'paging');
+  // round robin on fixed pool lanes sets the lane count itself (rrLanes, 0 = auto)
+  const rr = $('policy').value === 'rr', rrLanes = rr && pool && !$('laneArena').checked;
+  $('rrLanes').disabled = !rrLanes; $('rrCopyIn').disabled = !rrLanes;
+  if (rrLanes) $('lanes').disabled = true;
+  $('rrMaxActive').disabled = !rr || !paged;
   // with batching on a variable layout the token budget is the chunk size; the chunk field is unused
   const chunkUnused = $('batch').checked && $('layout').value === 'var';
   $('chunk').disabled = chunkUnused; $('chunkHint').hidden = !chunkUnused;

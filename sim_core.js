@@ -386,13 +386,19 @@
     //   as many of the batch's remaining C-units as it can fill (one attention call), and goes to the back if it has
     //   tokens left (it is never split into two runs within one batch).
     srptMaxWait: 30,
-    // rrLanes (policy 'rr', cache 'pool'; a lane is a per-stage KV slot the attention kernels run on, filled from and
-    //   drained to the paged pool): 'keep' = a started request keeps its lane while it waits for its next turn,
-    //   so at most `lanes` requests are in progress; 'release' = its lane is freed after every segment, the partial
-    //   KV is copied out to the pool (pinned) and its whole context is copied back in for each batch it appears in.
-    //   With 'release' and with paging, round robin admits a request only while the pool can hold every in-progress
+    // Round robin on the pool (policy 'rr', cache 'pool'). A lane is a per-stage KV slot the attention kernels run on
+    //   (fixed laneLen, or request-sized in the arena). Every turn copies the segment's new KV out to the pool, where
+    //   the partial KV stays pinned until the request finishes, so a lane never holds the only copy and can be handed
+    //   to another request at any turn.
+    //   rrLanes: lanes per stage; 0 = auto: the number of stages without batching (one request per stage in flight),
+    //     the chunk units per batch with batching (the most requests a batch can hold); it replaces `lanes` under rr.
+    //   rrCopyIn: 'miss' = a request whose lane still holds its context (not handed to another request since its
+    //     last turn) reuses it without a copy-in; on a miss it takes a free lane, else the least recently used one,
+    //     and copies its whole context so far in; 'always' = copy the whole context in on every turn.
+    //     Arena lanes always copy in.
+    //   With the pool, and with paging, round robin admits a request only while the pool can hold every in-progress
     //   request in full, and rrMaxActive caps their number (0 = no cap beyond the pool).
-    rrLanes: 'keep', rrMaxActive: 0,
+    rrLanes: 0, rrCopyIn: 'miss', rrMaxActive: 0,
   };
 
   function kvBytesPerTokenLayer(cfg, tp) { // whole stage, physical
@@ -467,6 +473,9 @@
     // largest chunk: the budget when batching on a variable layout, whole chunks otherwise
     const Tchunk = cfg.batch ? (cfg.layout === 'var' ? cfg.budget : Math.max(cfg.budget, cfg.chunk)) : cfg.chunk;
     const Tmax = Tchunk;
+    // round robin on fixed pool lanes: rrLanes, or auto = stages (no batching) / chunk units per batch (batching)
+    const rrLaneN = cfg.policy === 'rr' && cfg.cache === 'pool' && !cfg.laneArena
+      ? (cfg.rrLanes > 0 ? cfg.rrLanes : cfg.batch ? Math.max(1, Math.floor(Tchunk / cfg.chunk)) : S) : 0;
     // handoff: measured = blocking send + hop latency (fitted, per chunk); async = link-rate transfer, overlapped
     const actXfer = (T) => T * M3.E * BF16 / (P * HW.linkUni * 0.5) * 1e3; // ms, each chip ships its shard
     const blockMs = (T) => (cfg.asyncHandoff ? 0 : Math.max(0, pm.block[0] + pm.block[1] * T / 1000));
@@ -519,7 +528,7 @@
     if (cfg.cache === 'slots') { nSlots = Math.floor(capTok / cfg.slotLen); lanes = nSlots; }
     else if (cfg.cache === 'pool') {
       if (cfg.laneArena) { arena = Math.min(capTok, cfg.arenaTokens); poolTok = capTok - arena; }
-      else { lanes = cfg.lanes; poolTok = capTok - cfg.lanes * cfg.laneLen; }
+      else { lanes = rrLaneN || cfg.lanes; poolTok = capTok - lanes * cfg.laneLen; }
       if (poolTok < 0) errors.push('lanes do not fit in memory');
     } else if (cfg.cache === 'paging') poolTok = capTok;
     else poolTok = Infinity;
@@ -753,10 +762,10 @@
     const S = plan.S, B = 64;
     const ev = new EvHeap();
     const rr = cfg.policy === 'rr';
-    const rrRelease = rr && cfg.rrLanes === 'release' && cfg.cache === 'pool'; // lane per segment, partial KV in the pool
-    // in-progress requests whose KV lives in the pool (round robin with released lanes, or paging): their cached
-    // prefix is pinned and their new KV reserved, and admission is bounded by the pool (and rrMaxActive)
-    const pinHits = rrRelease || (rr && cfg.cache === 'paging');
+    const rrPool = rr && cfg.cache === 'pool'; // a lane per turn, the partial KV copied out to the pool every turn
+    // in-progress requests whose KV lives in the pool (round robin on the pool, or paging): their cached prefix is
+    // pinned and their new KV reserved, and admission is bounded by the pool (and rrMaxActive)
+    const pinHits = rrPool || (rr && cfg.cache === 'paging');
     let now = 0, t0 = null, tEnd = Infinity, primersLeft = 0, warmDone = false;
     let inflightReqs = 0; // queued + prefill + decode (system idle check)
     // replicas
@@ -765,6 +774,8 @@
       reps.push({
         id: r, free: new Float64Array(S), busy: new Float64Array(S), queue: [], active: [], exits: [], pumpAt: -1,
         trees: 0, lanesUsed: 0, arenaUsed: 0, progTok: 0, nProg: 0,
+        // round robin on fixed lanes: which request's context each lane holds, segments using it, last use
+        laneTab: rrPool && !cfg.laneArena ? Array.from({ length: plan.lanes }, () => ({ owner: null, busy: 0, t: -1 })) : null,
         pool: cfg.cache === 'slots' ? null : new PoolCache(TR, plan.poolTok / B, plan.hostTok / B),
         slots: cfg.cache === 'slots' ? new SlotCache(plan.nSlots) : null, pcieFree: 0,
       });
@@ -776,7 +787,7 @@
     // stats
     const st = { done: 0, useful: 0, newTok: 0, processed: 0, hitTok: 0, inTok: 0, infHitTok: 0, hostTok: 0, reprefill: 0, alignLoss: 0,
       ttft: [], chunks: 0, segs: 0, laneWait: 0, reqs: 0, primers: 0, warmupS: 0, idleWarps: 0, primerTok: 0,
-      gated: 0, gateWait: 0, legacyStarts: 0, skippedTraces: 0 };
+      gated: 0, gateWait: 0, legacyStarts: 0, skippedTraces: 0, rrSegs: 0, rrReuse: 0, rrCopyIn: 0 };
     let nextTrace = 0; const nsKey = { v: 0 };
     const scratch = new Float64Array(S);
 
@@ -858,7 +869,7 @@
       const q = mkReq(tree, r, true); tree.live++; ev.push(0, { e: EV_READY, q });
     }
     function mkReq(tree, r, isPrimer) {
-      return { r, tree, primer: isPrimer, tReady: 0, tStart: -1, tDone: 0, hit: 0, host: 0, rem: 0, pos: 0, lane: -1, slot: -1, started: false, fetchedAt: 0 };
+      return { r, tree, primer: isPrimer, tReady: 0, tStart: -1, tDone: 0, hit: 0, host: 0, rem: 0, pos: 0, lane: -1, slot: -1, started: false, fetchedAt: 0, laneIdx: -1 };
     }
     function dispatch(tree, r, t) {
       const q = mkReq(tree, r, false); tree.live++; ev.push(t, { e: EV_READY, q });
@@ -950,7 +961,7 @@
           if (cfg.rrMaxActive > 0 && rep.nProg >= cfg.rrMaxActive) return false;
           rep.progTok += need; rep.nProg++; q.prog = need;
         }
-        if (rrRelease) { /* lanes are taken per segment (laneGet) */ } else {
+        if (rrPool) { /* lanes are taken per turn (laneGet) */ } else {
           if (plan.lanes !== Infinity && rep.lanesUsed >= plan.lanes) return false;
           if (cfg.laneArena && cfg.cache === 'pool') { if (rep.arenaUsed + need > plan.arena) return false; rep.arenaUsed += need; q.arena = need; }
           if (plan.lanes !== Infinity) rep.lanesUsed++;
@@ -1027,11 +1038,10 @@
         const again = [];
         while (rep.active.length && room()) {
           const q = rep.active[0];
-          const a = rrRelease ? laneGet(q, rep) : 0;
-          if (a < 0) break; // no lane free: a lane release re-pumps
+          if (rrPool && !laneGet(q, rep)) break; // no lane free: a lane release re-pumps
           rep.active.shift();
           take(q, budget - T);
-          if (rrRelease) segs[segs.length - 1].arena = a;
+          if (rrPool) Object.assign(segs[segs.length - 1], q.seg);
           if (q.rem > 0) again.push(q);
           if (!cfg.batch) break;
         }
@@ -1058,13 +1068,31 @@
       rep.active = rep.active.filter((q) => q.rem > 0);
       return segs.length ? { segs, T } : null;
     }
-    // rrLanes 'release': a lane (or arena space for the whole request) for one segment; -1 if none is free
+    // round robin on the pool: a lane for one turn -> q.seg {lane, arena, miss}; false if none is free. The request's
+    // own lane is reused while it still holds its context (also while its previous segment is still copying out);
+    // otherwise a free lane, preferring one that holds nothing, else the least recently used. miss = copy the
+    // whole context in.
     function laneGet(q, rep) {
-      if (plan.lanes !== Infinity && rep.lanesUsed >= plan.lanes) return -1;
-      let a = 0;
-      if (cfg.laneArena) { a = TR.req_blocks[q.r] * B; if (rep.arenaUsed + a > plan.arena) return -1; rep.arenaUsed += a; }
-      if (plan.lanes !== Infinity) rep.lanesUsed++;
-      return a;
+      if (cfg.laneArena) {
+        const a = TR.req_blocks[q.r] * B; if (rep.arenaUsed + a > plan.arena) return false;
+        rep.arenaUsed += a; q.seg = { lane: -1, arena: a, miss: true }; return true;
+      }
+      const L = rep.laneTab;
+      let pick = q.laneIdx >= 0 && L[q.laneIdx].owner === q ? q.laneIdx : -1;
+      const miss = pick < 0 || cfg.rrCopyIn === 'always';
+      if (pick < 0) {
+        for (let i = 0; i < L.length; i++) {
+          if (L[i].busy) continue;
+          if (!L[i].owner) { pick = i; break; }
+          if (pick < 0 || L[i].t < L[pick].t) pick = i;
+        }
+        if (pick < 0) return false;
+        if (L[pick].owner) L[pick].owner.laneIdx = -1;
+        L[pick].owner = q; q.laneIdx = pick;
+      }
+      L[pick].busy++;
+      q.seg = { lane: pick, arena: 0, miss };
+      return true;
     }
     function pump(rep) {
       while (true) {
@@ -1095,8 +1123,14 @@
       if (copies) {
         let copyTok = 0;
         for (const s of segs) {
-          // lane released between turns: copy in the whole context so far, copy the segment's new KV out
-          if (rrRelease) { copyTok += s.k + s.n; s.copyS = plan.copyMs(s.k + s.n) / 1e3; continue; }
+          // round robin: copy the segment's new KV out, and the whole context so far in unless the lane holds it
+          if (rrPool) {
+            const ci = s.miss ? s.k : 0;
+            copyTok += ci + s.n; s.copyS = plan.copyMs(ci + s.n) / 1e3;
+            if (warmDone && !s.first) { st.rrSegs++; if (!s.miss) st.rrReuse++; }
+            if (warmDone) st.rrCopyIn += ci;
+            continue;
+          }
           if (s.first) { copyTok += s.q.hitTok; s.q.copyInS = plan.copyMs(s.q.hitTok) / 1e3; }
           if (s.last) { const nt = TR.req_blocks[s.q.r] * B - s.q.hitTok; copyTok += nt; s.q.copyOutS = plan.copyMs(nt) / 1e3; }
         }
@@ -1124,11 +1158,11 @@
       if (opts.onChunk) opts.onChunk(now, segs); // test hook: the segments of every chunk, in issue order
       if (warmDone && end >= t0 && end <= tEnd) { st.chunks++; st.segs += segs.length; st.processed += T; }
       for (const s of segs) {
-        if (rrRelease) { // every segment frees its lane (held for its copies, as below); the last one also inserts the KV
+        if (rrPool) { // every segment frees its lane (held for its copies, as below); the last one also inserts the KV
           let hold = 0;
           if (copies && cfg.copyMode === 'double') hold = s.copyS || 0;
           else if (copies && cfg.copyMode === 'overlap3') hold = 2 * (scratch[0] / 1e3 + blk);
-          ev.push((cfg.laneScope === 'stage' ? end0 : end) + hold, { e: EV_SEG, q: s.q, rep, upto: s.k + s.n, last: s.last, arena: s.arena });
+          ev.push((cfg.laneScope === 'stage' ? end0 : end) + hold, { e: EV_SEG, q: s.q, rep, upto: s.k + s.n, last: s.last, arena: s.arena, lane: s.lane });
           if (s.last) ev.push(end, { e: EV_DONE, q: s.q });
           continue;
         }
@@ -1163,11 +1197,15 @@
       if (q.prog) { rep.progTok -= q.prog; rep.nProg--; q.prog = 0; }
     }
     function onLaneFree(q, rep) { releaseLane(q, rep); insertKV(q, rep); }
-    // rrLanes 'release': a segment's lane is free; its new KV is now in the pool (reserved, i.e. pinned, until the
-    // whole request is inserted), beyond the part of the cached prefix that is pinned in place
+    // round robin on the pool: a segment's lane is free (it still holds the request's context until handed to another
+    // request); its new KV is now in the pool (reserved, i.e. pinned, until the whole request is inserted), beyond the
+    // part of the cached prefix that is pinned in place
     function onSegFree(p) {
       const q = p.q, rep = p.rep;
-      if (plan.lanes !== Infinity) rep.lanesUsed--;
+      if (p.lane >= 0) {
+        const l = rep.laneTab[p.lane]; l.busy--; l.t = now;
+        if (p.last && l.owner === q) { l.owner = null; q.laneIdx = -1; }
+      }
       if (p.arena) rep.arenaUsed -= p.arena;
       if (p.last) insertKV(q, rep);
       else if (!q.inserted && rep.pool && plan.poolTok !== Infinity) {
@@ -1280,6 +1318,9 @@
       gatedAtEnd: trees.reduce((a, tr) => { const u = new Set(); if (tr) for (const w of tr.waiters.values()) for (const g of w) u.add(g); return a + u.size; }, 0),
       warmupTimeout: !!st.warmupTimeout, eventCap: !!st.eventCap, events: evCount, duration: D,
       slotEvictions: reps.reduce((a, r) => a + (r.slots ? r.slots.evictions : 0), 0),
+      // round robin on the pool: share of continuation turns that found their context still in their lane, and the
+      // copy-in rate (tokens copied pool -> lane per second)
+      rrLaneReuse: st.rrSegs ? st.rrReuse / st.rrSegs : NaN, rrCopyInTps: st.rrCopyIn / D,
       reqLog: st.reqLog,
     };
   }
