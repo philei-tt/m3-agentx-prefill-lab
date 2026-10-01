@@ -13,7 +13,6 @@ const SLO = 10; // p90 TTFT seconds for goodput
 const CONCS = [8, 16, 24, 32, 48, 64, 96, 128, 160, 192, 256, 320, 384, 448, 512, 576, 640, 768, 896, 1024, 1152, 1280, 1536, 1792, 2048, 2560, 3072, 4096];
 
 const FEATURES = [
-  { key: 'unaligned', name: 'Unaligned (block-granular) resume', cfg: { unaligned: true } },
   { key: 'pool', name: 'Slot lanes + paged KV pool (4 x 1M lanes per stage, copy-in/out)', cfg: { cache: 'pool', lanes: 4, laneArena: false, laneScope: 'stage' } },
   { key: 'arena', name: 'Variable-size lanes (contiguous arena, 4M tokens)', cfg: { laneArena: true, arenaTokens: 4e6 }, requires: ['pool'] },
   { key: 'host', name: 'SSD KV tier (1 TB/galaxy, 64 GB/s)', cfg: { hostTier: true }, requires: ['pool'] },
@@ -28,8 +27,9 @@ const FEATURES = [
 ];
 
 function scenarios() {
-  const base4 = { galaxies: 4, stages: 16, mesh: [2, 4], split: 'auto', chunk: 2048, cache: 'slots' };
-  const base8 = { galaxies: 8, stages: 32, mesh: [2, 4], split: 'auto', chunk: 2048, cache: 'slots' };
+  // unaligned resume is part of today's baseline (tt-metal #57636), not a roadmap feature
+  const base4 = { galaxies: 4, stages: 16, mesh: [2, 4], split: 'auto', chunk: 2048, cache: 'slots', unaligned: true };
+  const base8 = { galaxies: 8, stages: 32, mesh: [2, 4], split: 'auto', chunk: 2048, cache: 'slots', unaligned: true };
   return [
     { key: 'g4_k0', label: '4 galaxies, today\'s kernels', base: Object.assign({ opEff: 0 }, base4) },
     { key: 'g4_k1', label: '4 galaxies, roofline kernels', base: Object.assign({ opEff: 1 }, base4) },

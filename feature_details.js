@@ -41,7 +41,7 @@ module.exports = {
   },
   idxbf8: {
     what: 'Store the index-key cache in bf8 (1.0625 B per value) instead of bf16 (2 B).',
-    why: 'KV per token per layer drops from 2112 to 1632 bytes (from 1344 to 1224 with de-replication): about 10-30% more capacity, for ×1.05-1.11 goodput.',
+    why: 'KV per token per layer drops from 2112 to 1632 bytes (from 1344 to 1224 with de-replication): about 10-30% more capacity, for ×1.05-1.08 goodput.',
     todo: [
       'bf8 is already the runner\'s default; the measured runs opt into bf16 with M3_INDEX_CACHE_BF16=1.',
       'Validate that top-k block selection and end-to-end PCC hold at long contexts with bf8 index keys.',
@@ -50,7 +50,7 @@ module.exports = {
   },
   async: {
     what: 'Today each stage receives a chunk, computes it, then sends the activation to the next stage (about 63 MB for a 5120-token chunk), and the send blocks the stage. Fitted from runs A/B/C: about 23 ms per chunk at 5120 (8 ms at 2048) of blocking send, plus 14-19 ms of hop latency. With async handoff the send overlaps with computing the next chunk.',
-    why: 'The blocking send adds 10-35% to the pipeline period. Its share grows with more stages (fewer layers per stage) and with faster kernels: ×1.12-1.20 at 4 galaxies with today\'s kernels, ×1.45-1.62 at 8 galaxies with roofline kernels. It also cuts TTFT, since 32 hops × 15 ms is about 0.5 s.',
+    why: 'The blocking send adds 10-35% to the pipeline period. Its share grows with more stages (fewer layers per stage) and with faster kernels: ×1.13-1.20 at 4 galaxies with today\'s kernels, ×1.37-1.62 at 8 galaxies with roofline kernels. It also cuts TTFT, since 32 hops × 15 ms is about 0.5 s.',
     todo: [
       'Double-buffered D2D send/receive: post the send and start the next chunk immediately; the receiver pre-posts buffers.',
       'Make sure the transfer uses enough links (the activation is spread over the stage\'s chips).',
@@ -60,7 +60,7 @@ module.exports = {
   },
   batch: {
     what: 'Put several requests\' new tokens into one chunk, up to a token budget (8-16k works best). Projections, norms and the whole MoE run on the concatenated tokens; attention runs per request (sequential).',
-    why: 'Most AgentX requests are small (median 1600 new tokens), so most chunks are small. An MoE layer has a large per-chunk cost that does not depend on tokens: expert weights (16 experts × 32 MB per chip per layer at [2,4]) and about 10 collectives per layer with ~40 µs latency each. More tokens per chunk amortise it. At chunk 2048 each expert sees only about 64 tokens (T×4/128), far below the 260-460 tokens per expert where the matmuls become compute-bound. Measured: ×1.14-1.29 when added, ×1.17-1.33 when removed from the full stack, at slightly higher TTFT. With sequential attention it does not matter which requests share a chunk.',
+    why: 'Most AgentX requests are small (median 1600 new tokens), so most chunks are small. An MoE layer has a large per-chunk cost that does not depend on tokens: expert weights (16 experts × 32 MB per chip per layer at [2,4]) and about 10 collectives per layer with ~40 µs latency each. More tokens per chunk amortise it. At chunk 2048 each expert sees only about 64 tokens (T×4/128), far below the 260-460 tokens per expert where the matmuls become compute-bound. Measured: ×1.11-1.22 when added, ×1.16-1.33 when removed from the full stack, at slightly higher TTFT. With sequential attention it does not matter which requests share a chunk.',
     todo: [
       'Chunk metadata per segment: lane/slot, start position, length.',
       'An attention loop over segments; each segment\'s KV is read and written in its own lane.',
@@ -82,12 +82,6 @@ module.exports = {
       'MoE buffers sized for the maximum budget; compile/trace buckets for variable token counts.',
     ],
     notes: 'Includes unaligned resume. Most of its value is realised together with batching. A small fixed chunk plus batching gets nearly all of it, as long as a request\'s chunk-units in one batch form one attention call (its prefix is gathered once). Fixed chunk 128-256 with a 16k budget matches variable layout + fused ("ragged") attention within 1% in every scenario; chunk 1024 is 0.2-2.4% behind (tools/layout_ab.js). Chunks below 2048 are extrapolated (calibrated at 2048 and 5120).',
-  },
-  unaligned: {
-    what: 'Resume a conversation at any 32-token boundary instead of rounding the cached prefix down to a chunk multiple. PR #57636, in review.',
-    why: 'With chunk 2048 the rounding throws away 1024 cached tokens per request on average, which is a large fraction of a typical 1600-token turn. up to ×1.12 when added before the variable layout.',
-    todo: ['Land PR #57636 and run the two-turn 60-layer PCC check.'],
-    notes: 'The variable layout includes it, which is why it shows ×1.00 in the full stack.',
   },
   arena: {
     what: 'Instead of fixed 1M lanes, give each request a lane of its actual length from one contiguous arena per stage (2-8M tokens).',
@@ -116,7 +110,7 @@ module.exports = {
   },
   srpt: {
     what: 'Order the queue by new tokens (shortest first), with 30 s aging so long requests are not starved.',
-    why: 'Short requests stop waiting behind 50k-token prefills, so p90 TTFT drops and more load fits under the SLO: ×1.00-1.08.',
+    why: 'Short requests stop waiting behind 50k-token prefills, so p90 TTFT drops and more load fits under the SLO: ×1.00-1.07.',
     todo: ['Scheduler-only change.'],
     notes: 'Cheap; its gain grows near saturation.',
   },

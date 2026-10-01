@@ -283,7 +283,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
         <p>Each scenario has two numbers per feature, measured from opposite ends:</p>
         <ul>
           <li><b>G = gain when added (step #).</b> Start from today's configuration, try every feature and keep the best; repeat from the new configuration until all features are in. "×1.65 #2" = this feature was the 2nd one added and multiplied goodput by 1.65 at that point. The order is a suggested build order; a gain depends on the features added before it.</li>
-          <li><b>LOO = loss if removed (leave-one-out).</b> Start with every feature on and turn only this one off. "×1.96" = goodput drops 1.96x without it. ×1.00 = it adds nothing once everything else is on. That is usually because another feature does the same job: variable chunk already includes unaligned resume, for example.</li>
+          <li><b>LOO = loss if removed (leave-one-out).</b> Start with every feature on and turn only this one off. "×1.96" = goodput drops 1.96x without it. ×1.00 = it adds nothing once everything else is on. That is usually because another feature does the same job: batching with a small fixed chunk already gets nearly all of the variable layout's gain, for example.</li>
         </ul>
         <p>Columns: "4gx today" = 4 galaxies with today's kernels, "4gx roofline" = 4 galaxies with kernels at roofline targets, and the same for 8 galaxies (Method tab).</p>
         <p><b>Order and tier</b> come from the "8gx today" column (8 galaxies, today's kernels): the larger of its G and LOO, highest first. P0 ≥ 1.25x, P1 ≥ 1.07x, else P2. The other columns show how the value changes with fewer galaxies or faster kernels. Complexity is a rough low / med / high judgement of the implementation work (Method tab).</p>
@@ -295,7 +295,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
         <h2>Greedy roadmap</h2>
         <div class="seg" id="scSeg" role="group" aria-label="Scenario"></div>
       </div>
-      <p class="muted small" style="margin:4px 0 10px">From the scenario's baseline (today's configuration: 16x[2,4] or 32x[2,4], chunk 2048, static 1M slots), each row adds whichever remaining feature raises goodput the most, on top of all the rows above it. The bar is the goodput after that step, the ×-number is the gain from that step alone, and the orange tick is the same configuration with an infinite cache (the gap is what the KV cache still loses).</p>
+      <p class="muted small" style="margin:4px 0 10px">From the scenario's baseline (today's configuration: 16x[2,4] or 32x[2,4], chunk 2048, static 1M slots, unaligned resume), each row adds whichever remaining feature raises goodput the most, on top of all the rows above it. The bar is the goodput after that step, the ×-number is the gain from that step alone, and the orange tick is the same configuration with an infinite cache (the gap is what the KV cache still loses).</p>
       <div class="steps" id="greedy"></div>
     </div>
     <div class="cols2">
@@ -545,10 +545,10 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Variable-size lanes (arena):</b> lanes allocated at the request's actual length from a contiguous arena (2-8M tokens) instead of 1M each.</li>
       <li><b>SSD KV tier:</b> see KV cache. It requires the paged pool or full paging.</li>
       <li><b>Not a feature: bounded dense gather.</b> Earlier versions listed bounding the dense ring-joint gather to [0, kv_len) as a P0 feature. The op already does this (tt-metal #47539), so it is part of today's baseline, and the old whole-lane behaviour is only a sensitivity row.</li>
+      <li><b>Not a feature: unaligned resume.</b> Resuming at any 32-token boundary instead of rounding the cached prefix down to a chunk multiple (with chunk 2048 the rounding discards about 1024 cached tokens per request). It is merged (tt-metal #57636), so it is part of today's baseline; untick "Unaligned resume" to see the old behaviour. The variable layout includes it anyway.</li>
       <li><b>index_k stored once:</b> the index-key cache is kept on one TP column instead of all four, and gathered when needed. This cuts KV size from 2112 to 1344 B per token per layer.</li>
       <li><b>index_k bf8:</b> the index-key cache in bf8 instead of bf16. It is the runner's default dtype, but the measured runs used bf16, and it needs an accuracy check.</li>
       <li><b>Variable chunk / flexible SP layout:</b> see Pipeline. It also makes resume block-granular.</li>
-      <li><b>Unaligned resume:</b> resume at any 32-token boundary within fixed layout. In review as PR #57636. Variable layout subsumes it.</li>
       <li><b>Multi-request batching:</b> see Pipeline; 16k-token budget in the roadmap, 4k-32k in the grid.</li>
       <li><b>Fused multi-user attention:</b> one attention kernel over all requests in a chunk.</li>
       <li><b>Async stage handoff:</b> the send to the next stage overlaps with computing the next chunk. Removes the blocking send; the transfer then runs at link rate.</li>
@@ -1110,7 +1110,7 @@ if (shared) { $('resTitle').textContent = 'Results: shared configuration'; syncU
 else (function seed() {
   const S = STUDY.scenarios.g4_k0;
   run = { name: 'study baseline, 4 gx', real: S.curves.base, inf: [], slo: STUDY.slo };
-  $('resTitle').textContent = 'Results: study baseline for 4 galaxies (16x[2,4], chunk 2048, auto split, static slots; precomputed, press Run for a live sweep)';
+  $('resTitle').textContent = 'Results: study baseline for 4 galaxies (16x[2,4], chunk 2048, auto split, static slots, unaligned resume; precomputed, press Run for a live sweep)';
   render();
 })();
 setTimeout(() => { decodeTraffic(); $('statusTxt').textContent = 'Ready. Press Run sweep.'; if (shared && !$('runBtn').disabled) startRun(); }, 30);
