@@ -383,10 +383,11 @@
     //   'srpt' = the same with the waiting queue sorted shortest-new-first (srptMaxWait s of aging);
     //   'rr' = round robin over the started requests (tt-d-gen PrefillQueue/PrefillWriter): a request is admitted
     //   (slot/lane acquired) at the back of the queue; each turn the front request takes one chunk, or with batching
-    //   up to the batch's remaining C-units as one segment, and goes to the back if it has tokens left (a request
-    //   appears at most once per batch).
+    //   as many of the batch's remaining C-units as it can fill (one attention call), and goes to the back if it has
+    //   tokens left (it is never split into two runs within one batch).
     srptMaxWait: 30,
-    // rrLanes (policy 'rr', cache 'pool'): 'keep' = a started request keeps its lane while it waits for its next turn,
+    // rrLanes (policy 'rr', cache 'pool'; a lane is a per-stage KV slot the attention kernels run on, filled from and
+    //   drained to the paged pool): 'keep' = a started request keeps its lane while it waits for its next turn,
     //   so at most `lanes` requests are in progress; 'release' = its lane is freed after every segment, the partial
     //   KV is copied out to the pool (pinned) and its whole context is copied back in for each batch it appears in.
     //   With 'release' and with paging, round robin admits a request only while the pool can hold every in-progress
@@ -1013,7 +1014,8 @@
       if (rr) {
         // admit every waiting request that gets a slot/lane (FCFS; static slots skip a stream whose slot is busy) to
         // the back of the round-robin queue (rep.active), then serve it from the front. A request that is not done
-        // goes to the back, behind everything waiting now, so it is never in one batch twice.
+        // goes to the back, behind everything waiting now. Batched, each popped request takes as many of the
+        // remaining C-units as it can fill, as one attention call, so it is never split into two runs in one batch.
         if (rep.queue.length) {
           const keep = []; let blocked = false;
           for (const q of rep.queue) {

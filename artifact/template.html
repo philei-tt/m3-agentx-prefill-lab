@@ -201,7 +201,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row"><label for="policy">Scheduling</label><select id="policy"><option value="fcfs">FCFS, run to completion</option><option value="srpt">shortest first (30 s aging)</option><option value="rr">round robin</option></select></div>
     <div class="row"><label for="rrLanes">RR lanes</label><select id="rrLanes"><option value="keep">kept</option><option value="release">released (re-copy)</option></select></div>
     <div class="row"><label for="rrMaxActive">RR max in progress</label><input id="rrMaxActive" type="number" min="0" step="1"></div>
-    <div class="hint">Round robin (tt-d-gen): one chunk per turn (batched: one segment), then to the back. Kept lanes cap requests in progress at the lane count; released lanes re-copy the whole context in every turn. Max in progress: released lanes and paging, 0 = pool-bounded.</div>
+    <div class="hint">Round robin (tt-d-gen): one chunk per turn (batched: as many chunk units as it can fill), then to the back. A lane is a per-stage KV slot. Kept lanes cap requests in progress at the lane count; released lanes re-copy the whole context in every turn. Max in progress: released lanes and paging, 0 = pool-bounded.</div>
   </fieldset>
   <fieldset>
     <legend>KV cache</legend>

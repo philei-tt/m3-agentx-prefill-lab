@@ -57,7 +57,8 @@ for (const cache of ['slots', 'inf']) {
   assert.ok(fair(r.chunks), `rr/${cache} is not round robin`);
 }
 
-// 2. batched round robin: each request at most once per batch as one segment of whole C-units, fair rotation
+// 2. batched round robin: a popped request fills as many C-units as it can, as one run (never split within a batch),
+//    and the rotation is fair
 {
   const C = 1024, budget = 8192;
   const { chunks } = trace({ cache: 'slots', policy: 'rr', batch: true, chunk: C, budget, layout: 'fixed', unaligned: true });
