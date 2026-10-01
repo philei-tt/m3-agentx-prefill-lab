@@ -165,11 +165,18 @@ Every buffer that must hold a whole request (slots, fixed lanes, the lane arena)
 * **`paging`**: an ideal paged kernel (no lanes, no copies). The pages a request is writing are reserved in the pool from start to completion. The SSD tier also works behind paging.
 * **`inf`**: infinite cache.
 
-## Findings (study of Sep 29 2026 b: kv-bounded dense gather, torus rings; decode 180 tok/s, AIPerf-exact replay, `results/study.json`)
+## Findings (study of Oct 1 2026: unaligned resume in the baseline, kv-bounded dense gather, torus rings; decode 180 tok/s, AIPerf-exact replay, `results/study.json`)
 
-Goodput in useful tok/s at p90 TTFT ≤ 10 s. "Today" = 16×[2,4] (or 32×[2,4]), chunk 2048, auto split, static 1M slots.
+Goodput in useful tok/s at p90 TTFT ≤ 10 s. "Today" = 16×[2,4] (or 32×[2,4]), chunk 2048, auto split, static 1M slots, unaligned resume.
 
-**Changes from the previous study (Sep 29 a):**
+**Changes from the previous study (Sep 29 b):**
+* **Unaligned resume is part of today's baseline** (tt-metal #57636, merged): a conversation resumes at any 32-token boundary instead of rounding its cached prefix down to a chunk multiple. It is no longer a roadmap feature.
+  * Still open on the tt-metal side: #57636 was validated on the first 5 layers (8x4, against a one-pass prefill); the end-to-end two-turn 60-layer PCC check against the CPU reference has not been run yet.
+  * Baselines barely move (8 gx today 8.2k → 8.3k, 8 gx roofline 11.4k → 11.8k): on static slots the goodput point is set by capacity.
+  * Variable chunk loses the part of its gain that was the rounding loss: at 4 gx today ×1.18 (step #3) → ×1.08 (step #7).
+  * The best stacks use the variable layout, which unaligned resume does not touch. Their configurations move by up to 1% from the peak-bisection fix (finding 10), which this study is the first to include; the 8 gx roofline winner now uses a 2M instead of a 4M arena.
+
+**Changes in Sep 29 b (from Sep 29 a):**
 * **The dense ring-joint gather is kv_len-bounded in today's op** (tt-metal #47539), and the #57827 data confirms it (see Cost model). The old fit charged every chunk a scan of the whole 1M slot.
   * Today's baselines rise: 2.2k → 3.1k at 4 gx and 4.0k → 8.2k at 8 gx.
   * "Bounded dense gather" is no longer a feature. It was a phantom ×3.0 at 8 gx.
@@ -217,26 +224,26 @@ It is not a time estimate and has not been checked with the code owners.
 Takeaways:
 1. **On AgentX, KV capacity sets the throughput, not compute.** The best stacks reach only 40–73% of their own ∞-cache goodput.
    * The pool (vs static 1M slots) and the SSD tier are the top features in every scenario.
-   * SSD capacity matters much more than its bandwidth: 0.5 → 2 TB/galaxy moves 4-gx goodput 36.8k → 54.5k (today's kernels) and 68.3k → 104k (roofline kernels). Dropping the bandwidth from 64 to 16 GB/s costs at most 13%.
+   * SSD capacity matters much more than its bandwidth: 0.5 → 2 TB/galaxy moves 4-gx goodput 36.8k → 54.5k (today's kernels) and 68.3k → 104k (roofline kernels). Dropping the bandwidth from 64 to 16 GB/s costs at most 12%.
    * The lane table must be per stage: a global lane table (today's slot_id) drops the best configs 3–4× with today's kernels (4 gx 45.3k → 13.8k).
 2. **Async stage handoff: ×1.13–1.62,** growing with pipeline depth and kernel speed. The measured blocking send is 6–23 ms per chunk per stage.
 3. **Batching: ×1.11–1.33.** Batches hold few requests at the goodput point.
-   * On today's 4-gx config + pool + SSD tier they average 1.27 requests; the average chunk is 7.5k of the 16k budget.
+   * On today's 4-gx config + pool + SSD tier they average 1.33 requests; the average chunk is 7.0k of the 16k budget.
    * Most of the gain comes from one request taking several chunk-units at once (big cold prefills in fewer, larger chunks), not from mixing users.
    * **Chunk sizing (`batchDynShape`, on by default).** The budget is a cap: a chunk is costed at the tokens it holds (a multiple of the chunk size), i.e. a trace compiled for every size. Off = one static budget-sized shape; routed MoE ops still trim to the real tokens (`tools/batch_shape_ab.js`):
-     * Today's 4-gx config + pool + host, budget 4k / 8k / 16k / 32k: sized 25.0k / 25.4k / 25.0k / 22.6k vs static 24.8k / 24.6k / 14.9k / 8.3k. No batching is 21.5k.
-       * A static 16k or 32k shape collapses below no batching (65–82% padding): batches there hold only 1.2 requests.
+     * Today's 4-gx config + pool + host, budget 4k / 8k / 16k / 32k: sized 26.9k / 28.1k / 28.0k / 22.4k vs static 26.1k / 25.5k / 15.5k / 8.2k. No batching is 23.0k.
+       * A static 16k or 32k shape collapses below no batching (71–85% padding): batches there hold only 1.1–1.2 requests.
      * Best stacks: static 16k costs 0–6% (4 gx today 45.2k → 42.3k; 8 gx 1%), and static 32k costs 1–21%.
        * These batches are fuller (2–3 requests), and cold prefills fill the budget.
-     * A static shape near the typical fill (8k), or a few buckets (4k/8k/16k), gets within 3–4% of per-size traces.
-   * With pool but no SSD tier, batching adds only 5% (13.1k → 13.8k): the goodput point is set by cache misses (39% of prefilled tokens are re-prefill), not compute.
-   * Paging vs pool: +13% without the SSD tier (14.8k vs 13.1k; paging frees the 4M lane tokens), identical with it (21.6k vs 21.5k). Pool/paging + SSD tier already reach the ∞-cache goodput of this compute config (21.6k), so further gains must come from compute and TTFT. Sequential per-request attention is as good as fused, so the proposed plan (batch the MoE, attention per request) is the right one, and fused attention is not worth building. Best budget: 16k.
+     * A static shape near the typical fill (8k) is within 1% of per-size traces on the best stacks, but 9% behind on today's config (25.5k vs 28.1k).
+   * With pool but no SSD tier, batching adds only 4% (13.6k → 14.2k): the goodput point is set by cache misses (31–42% of prefilled tokens are re-prefill), not compute (`tools/cache_batch_ab.js`).
+   * Paging vs pool: +10% without the SSD tier (15.0k vs 13.6k; paging frees the 4M lane tokens), +4% with it (24.0k vs 23.0k). Pool/paging + SSD tier come within 4–8% of the ∞-cache goodput of this compute config (25.1k), so most further gains must come from compute and TTFT. Sequential per-request attention is as good as fused, so the proposed plan (batch the MoE, attention per request) is the right one, and fused attention is not worth building. Best budget: 16k.
 4. **Bounded dense gather is already done** (tt-metal #47539). Without it (the old whole-lane gather), the best 4-gx config with 4 fixed 1M lanes would drop 45.3k → 31.1k. Configs with arena lanes are unaffected.
    * The M3 comments that say the dense layers gather the whole cache shard (`prefill.py`, `tt_prefill_runtime.reconfigure_capacity`, README `PREFILL_MAX_SEQ_LEN`) are stale. Only the gather buffer is capacity-sized, which costs memory, not time.
 5. **index_k stored once: ×1.06–1.16;** bf8 index_k adds another ×1.05–1.08.
 6. **Variable chunk / a2a KV write is worth 1–8%,** most at 4 gx with today's kernels. (Before unaligned resume (#57636) joined the baseline it showed up to 18%: most of that was the chunk-rounding loss on resume.) The a2a KV write before the cache write is costed on every layer.
    * **A small fixed chunk plus batching gets nearly all of it** (`tools/layout_ab.js`, `results/layout_ab.json`, same stack and topology as the best grid config).
-     * The budget is always 16k. The best chunk is 128–256 (45.2k / 81.7k / 100.6k / 162.5k), which matches variable layout + fused attention within 1%.
+     * The budget is always 16k. The best chunk is 128–256 (45.2k / 81.7k / 100.6k / 163.2k), which matches variable layout + fused attention within 1%.
      * Chunk 1024 is 0.2–2.4% behind that, and chunk 2048 is 1–3% behind 1024.
      * Batching itself is worth ×1.15–1.24 over the best unbatched fixed chunk.
      * Fixed layout here means each request takes whole C-token units, padded to C (8% padding at C=1024).
@@ -282,16 +289,16 @@ Takeaways:
        * With today's kernels the peak is 11–13% above goodput at 10 s (bigger budgets, 10–13 requests per chunk). With roofline kernels goodput is already the peak.
 7. **Topology** (best of the grid per topology; seeds move results by ±3%):
    * [4,2] is best or tied everywhere; it needs KV heads sharded 2 per chip.
-   * **[4,4] torus stages:** with ring collectives they tie with [4,2] at 4 gx today (44.5k vs 45.3k) and at 8 gx with roofline kernels (162.8k vs 162.0k), but lose at 8 gx today (87.1k vs 101.5k).
+   * **[4,4] torus stages:** with ring collectives they tie with [4,2] at 4 gx today (44.5k vs 45.3k) and at 8 gx with roofline kernels (163.3k vs 162.0k), but lose at 8 gx today (87.3k vs 101.5k).
      * Per chip, a [4,4] MoE layer is still about 20% more expensive than a [4,2] one. The TP=4 collectives cost more, and a 16-chip stage pays the same fixed per-op latency as an 8-chip one.
-     * Rings alone give [4,4] +7–13% (`tools/torus_ab.js`).
+     * Rings alone give [4,4] +5–12% (`tools/torus_ab.js`).
    * Rings on every 4-long axis ([4,2]'s SP axis, [2,4]'s TP axis) would add another 4–6% to [4,2]: 4 gx 45.3k → 48.0k, 8 gx 101.5k → 107.6k.
    * 8 gx: one 32-stage pipeline beats 2×16 (101.5k vs 78.4k today, 162k vs 150k roofline). [8,4] stages lose.
 8. **Faster decode raises prefill goodput** (90 → 360 tok/s: 42.6k → 46.7k at 4 gx), because it shrinks the live KV working set per unit of load.
 9. **Pool copies** are within 1–3% across sequential / double-buffered / triple-buffered, and 4 fixed 1M lanes are within 1–2% of an arena.
 10. **The SLO is not what limits batch fill; KV capacity is** (`tools/slo_ab.js`, `results/slo_ab.txt`).
-    * Requests per chunk at p90 ≤ 10 s → no SLO: 1.27 → 1.79 (today's 4-gx config + pool + host + batch) and 1.9–2.9 → 2.0–3.1 (best stacks).
-    * Goodput gains only 0–1% on the best stacks (+10% on today's config). Beyond that point more sessions stop fitting in the KV cache, so the throughput peak sits at about the same concurrency as the 10 s point.
+    * Requests per chunk at p90 ≤ 10 s → no SLO: 1.33 → 1.98 (today's 4-gx config + pool + host + batch) and 1.8–2.9 → 1.8–3.1 (best stacks).
+    * Goodput gains only 0–1% on the best stacks (+2% on today's config). Beyond that point more sessions stop fitting in the KV cache, so the throughput peak sits at about the same concurrency as the 10 s point.
     * With an infinite cache, batches fill: 2.8–4.3 requests per chunk (14–16k of the 16k budget) at 10 s, 3.8–4.5 with no SLO, and 96–99% of the bottleneck stage busy.
     * **Why the real cache fills batches less** (`tools/fill_diag.js`, `results/fill_diag.txt`: same stack, same concurrency, KV residency varied):
       * Pool lanes vs full paging and tier bandwidth make no difference. **Tier capacity is the whole gap**: at 8 TB/galaxy instead of 1 TB, every metric matches the infinite cache.
@@ -303,7 +310,7 @@ Takeaways:
     * A 5 s SLO costs 20–40% with today's kernels, and 0–2% with roofline kernels.
     * The page has an SLO slider, whose right end means no SLO. A no-SLO run bisects the throughput peak.
       * Any sweep whose throughput peaks before the SLO crossing also bisects the peak (`lib/sweep.js` step 4). Before that fix, a re-run with a looser SLO could report up to 3% *lower* goodput (4 gx roofline: 81.4k at 10 s, 78.9k at 30 s), because its bisection moved past the peak. Now it is within 0.2% across 5 s … no SLO.
-      * `results/study.json` predates the fix. Its goodputs would move by at most a few percent, and only for configurations whose peak comes before the SLO.
+      * `results/study.json` was re-run after the fix (Oct 1).
 11. **The cliff is steep.** Goodput can change by 10% between neighbouring concurrency points, so the sweep bisects the SLO crossing.
 
 ## Assumptions to revisit

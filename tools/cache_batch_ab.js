@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // Today's 4-gx config (16x[2,4], chunk 2048) with each KV mode (slots / pool / paging / host tier / inf), with and
 // without batching: goodput and the batch shape at the goodput point (requests per chunk, chunk tokens, padding).
-// Usage: JOB=<slurm job> ./on_node.sh node tools/cache_batch_ab.js
+// Usage: JOB=<slurm job> ./on_node.sh node tools/cache_batch_ab.js [--workers 38]
 'use strict';
 const { Pool, summarize } = require('../lib/pool.js');
 const { CONCS, SLO } = require('../study.js');
-const base = { galaxies: 4, stages: 16, mesh: [2, 4], chunk: 2048, split: 'auto' };
+const base = { galaxies: 4, stages: 16, mesh: [2, 4], chunk: 2048, split: 'auto', unaligned: true };
 const B = { batch: true, budget: 16384 };
 const variants = [
   ['slots (today)', { cache: 'slots' }],
@@ -23,7 +23,8 @@ const variants = [
   ['inf cache + batch 16k', { cache: 'inf', ...B }],
 ];
 (async () => {
-  const pool = new Pool(38);
+  const i = process.argv.indexOf('--workers');
+  const pool = new Pool(i >= 0 ? Number(process.argv[i + 1]) : 38);
   const res = await Promise.all(variants.map(([name, d]) => pool.evalCfg(name, Object.assign({}, base, d), CONCS, SLO).then((r) => [name, summarize(r.points, SLO)])));
   pool.close();
   for (const [name, s] of res) {

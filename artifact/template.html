@@ -525,8 +525,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Chunk sized to its tokens</b> (on by default). A batched chunk is costed at the tokens it holds, a multiple of the chunk size (fixed layout) or of 32·SP (variable layout). This assumes a compiled trace for every size up to the budget.
         <ul>
           <li>Off, every batched chunk has one static budget-sized shape. A partly filled batch pays for the whole budget in every token-proportional op and in the stage-to-stage send. Routed MoE ops still trim to the real tokens, as they do for a padded chunk tail today.</li>
-          <li>With few requests per batch this hurts large budgets: on today's 4-galaxy config with pool and SSD tier, a static 16k shape drops 25.0k → 14.9k, below no batching (21.5k).</li>
-          <li>A static shape near the typical fill (4–8k) loses at most 3%, and on the best stacks, which fill batches better, static 16k costs 0–6%.</li>
+          <li>With few requests per batch this hurts large budgets: on today's 4-galaxy config with pool and SSD tier, a static 16k shape drops 28.0k → 15.5k, below no batching (23.0k).</li>
+          <li>There a static 4k shape loses 3% and 8k loses 9%. On the best stacks, which fill batches better, static 8k is within 1% and static 16k costs 0–6%.</li>
         </ul>
       </li>
       <li><b>Prefetch of KV-prefix gathers</b> (off by default). The cached-prefix gather does not depend on the current chunk, so it can overlap the layer's non-collective compute: projections, experts, and the other requests' attention. Only the part beyond that window stays exposed.
@@ -545,7 +545,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Variable-size lanes (arena):</b> lanes allocated at the request's actual length from a contiguous arena (2-8M tokens) instead of 1M each.</li>
       <li><b>SSD KV tier:</b> see KV cache. It requires the paged pool or full paging.</li>
       <li><b>Not a feature: bounded dense gather.</b> Earlier versions listed bounding the dense ring-joint gather to [0, kv_len) as a P0 feature. The op already does this (tt-metal #47539), so it is part of today's baseline, and the old whole-lane behaviour is only a sensitivity row.</li>
-      <li><b>Not a feature: unaligned resume.</b> Resuming at any 32-token boundary instead of rounding the cached prefix down to a chunk multiple (with chunk 2048 the rounding discards about 1024 cached tokens per request). It is merged (tt-metal #57636), so it is part of today's baseline; untick "Unaligned resume" to see the old behaviour. The variable layout includes it anyway.</li>
+      <li><b>Not a feature: unaligned resume.</b> Resuming at any 32-token boundary instead of rounding the cached prefix down to a chunk multiple (with chunk 2048 the rounding discards about 1024 cached tokens per request). It is merged (tt-metal #57636; validated on 5 layers, the full 60-layer two-turn accuracy check is still to run), so it is part of today's baseline; untick "Unaligned resume" to see the old behaviour. The variable layout includes it anyway.</li>
       <li><b>index_k stored once:</b> the index-key cache is kept on one TP column instead of all four, and gathered when needed. This cuts KV size from 2112 to 1344 B per token per layer.</li>
       <li><b>index_k bf8:</b> the index-key cache in bf8 instead of bf16. It is the runner's default dtype, but the measured runs used bf16, and it needs an accuracy check.</li>
       <li><b>Variable chunk / flexible SP layout:</b> see Pipeline. It also makes resume block-granular.</li>

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // The page's sweep (default grid, SLO 10 s) of a study winner with paging and a 1 TB vs 8 TB host tier: full curves,
 // so the goodput point (and its requests per chunk) can be read against concurrency.
-// Usage: JOB=<slurm job> ./on_node.sh node tools/host_curve.js [--scenarios g4_k0,g8_k0]
+// Usage: JOB=<slurm job> ./on_node.sh node tools/host_curve.js [--scenarios g4_k0,g8_k0] [--workers 38]
 'use strict';
 const fs = require('fs');
 const { Pool, summarize } = require('../lib/pool.js');
@@ -13,7 +13,7 @@ async function main() {
   const args = process.argv.slice(2);
   const get = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
   const study = JSON.parse(fs.readFileSync(STUDY));
-  const pool = new Pool(38);
+  const pool = new Pool(Number(get('--workers', 38)));
   const jobs = [];
   for (const key of get('--scenarios', 'g4_k0,g8_k0').split(',')) {
     const R = study.scenarios[key];

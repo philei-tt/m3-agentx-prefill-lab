@@ -16,7 +16,7 @@ async function main() {
   const args = process.argv.slice(2);
   const get = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
   const study = JSON.parse(fs.readFileSync(STUDY));
-  const cfgs = [['today 4gx + pool + host + batch 16k', { galaxies: 4, stages: 16, mesh: [2, 4], chunk: 2048, cache: 'pool', lanes: 4, hostTier: true, batch: true, budget: 16384 }]];
+  const cfgs = [['today 4gx + pool + host + batch 16k', { galaxies: 4, stages: 16, mesh: [2, 4], chunk: 2048, cache: 'pool', lanes: 4, hostTier: true, batch: true, budget: 16384, unaligned: true }]];
   for (const [key, R] of Object.entries(study.scenarios)) {
     const best = Object.assign(withFeatures(R.base, R.bestKeys), R.grid[0].extra);
     cfgs.push([`${key} best`, best]);

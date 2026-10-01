@@ -1,9 +1,10 @@
 // Infinite cache: extend the budget beyond 32k (the roofline-kernel optimum was at the grid edge)
-const { Pool, summarize } = require('/data/philei/m3-agentx-prefill-lab/lib/pool.js');
-const { withFeatures, CONCS, SLO } = require('/data/philei/m3-agentx-prefill-lab/study.js');
-const study = require('/data/philei/m3-agentx-prefill-lab/results/study.json');
+const { Pool, summarize } = require('../lib/pool.js');
+const { withFeatures, CONCS, SLO } = require('../study.js');
+const study = require(require('../lib/paths.js').STUDY);
 (async () => {
-  const pool = new Pool(38);
+  const i = process.argv.indexOf('--workers');
+  const pool = new Pool(i >= 0 ? Number(process.argv[i + 1]) : 38);
   const jobs = [];
   for (const [key, R] of Object.entries(study.scenarios)) {
     const keys = R.bestKeys.filter((k) => !['var', 'fused', 'batch'].includes(k));
