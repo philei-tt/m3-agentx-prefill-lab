@@ -19,3 +19,6 @@ run --set boundedDense=true --set cache=inf --set asyncHandoff=true
 run --set boundedDense=true --set cache=inf --set opEff=1
 run --set boundedDense=true --set cache=inf --set opEff=1 --set layout=var --set batch=true --set budget=16384 --set asyncHandoff=true
 run --set boundedDense=true --set cache=inf --set policy=srpt
+run --set policy=rr --set cache=pool --set lanes=3 --set batch=true --set chunk=1024 --set budget=8192
+run --set policy=rr --set cache=pool --set lanes=3 --set rrLanes=release --set hostTier=true
+run --set policy=rr --set cache=paging --set rrMaxActive=8

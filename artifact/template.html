@@ -198,7 +198,10 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row check"><input id="kvDedup" type="checkbox"><label for="kvDedup">One attention call per request per chunk (prefix gathered once)</label></div>
     <div class="hint">Off: with a fixed layout, each chunk-unit of a request makes its own call and re-gathers the cached prefix.</div>
     <div class="row check"><input id="prefetchKV" type="checkbox"><label for="prefetchKV">Prefetch KV-prefix gathers (overlap with compute)</label></div>
-    <div class="row"><label for="policy">Queue order</label><select id="policy"><option value="fcfs">FCFS</option><option value="srpt">shortest first (30 s aging)</option></select></div>
+    <div class="row"><label for="policy">Scheduling</label><select id="policy"><option value="fcfs">FCFS, run to completion</option><option value="srpt">shortest first (30 s aging)</option><option value="rr">round robin</option></select></div>
+    <div class="row"><label for="rrLanes">RR lanes</label><select id="rrLanes"><option value="keep">kept</option><option value="release">released (re-copy)</option></select></div>
+    <div class="row"><label for="rrMaxActive">RR max in progress</label><input id="rrMaxActive" type="number" min="0" step="1"></div>
+    <div class="hint">Round robin (tt-d-gen): one chunk per turn (batched: one segment), then to the back. Kept lanes cap requests in progress at the lane count; released lanes re-copy the whole context in every turn. Max in progress: released lanes and paging, 0 = pool-bounded.</div>
   </fieldset>
   <fieldset>
     <legend>KV cache</legend>
@@ -694,9 +697,9 @@ function mkWorker() {
 }
 
 // ---------------------------------------------------------------- form <-> cfg
-const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'batchDynShape', 'attn', 'kvDedup', 'prefetchKV', 'policy',
+const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'batchDynShape', 'attn', 'kvDedup', 'prefetchKV', 'policy', 'rrLanes', 'rrMaxActive',
   'cache', 'laneScope', 'copyMode', 'lanes', 'laneArena', 'arenaTokens', 'unaligned', 'hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'duration', 'seed'];
-const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'lanes', 'arenaTokens', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'reserveGB', 'decodeTps', 'duration', 'seed']);
+const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'lanes', 'arenaTokens', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'reserveGB', 'decodeTps', 'duration', 'seed', 'rrMaxActive']);
 function setForm(cfg) {
   const c = Object.assign({}, SIM.DEFAULTS, cfg);
   for (const f of FIELDS) {
@@ -730,6 +733,9 @@ function syncUi() {
   $('lanes').disabled = !pool || $('laneArena').checked;
   $('budget').disabled = !$('batch').checked; $('attn').disabled = !$('batch').checked; $('batchDynShape').disabled = !$('batch').checked;
   $('unaligned').disabled = $('layout').value === 'var';
+  const rr = $('policy').value === 'rr';
+  $('rrLanes').disabled = !rr || !pool;
+  $('rrMaxActive').disabled = !rr || !((pool && $('rrLanes').value === 'release') || $('cache').value === 'paging');
   // with batching on a variable layout the token budget is the chunk size; the chunk field is unused
   const chunkUnused = $('batch').checked && $('layout').value === 'var';
   $('chunk').disabled = chunkUnused; $('chunkHint').hidden = !chunkUnused;

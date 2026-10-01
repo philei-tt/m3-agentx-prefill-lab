@@ -9,7 +9,7 @@
     "start": "node server.js",
     "build": "node build_artifact.js --standalone",
     "validate": "node validate.js",
-    "test": "node tests/test_sweep.js && node tests/test_model.js",
+    "test": "node tests/test_sweep.js && node tests/test_model.js && node tests/test_rr.js",
     "study": "node study.js",
     "analyze": "node analyze.js",
     "table": "node tools/feature_table.js"

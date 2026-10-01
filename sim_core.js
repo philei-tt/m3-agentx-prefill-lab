@@ -378,7 +378,20 @@
     reserveGB: 3, expertImb: IMB0, maxInflight: 0,
     concurrency: 64, decodeTps: 180, duration: 1800, seed: 1, idleCap: 10, startMin: 0, startMax: 1, maxWarmup: 1e6,
     gapCap: Infinity,      // AgentX forbids capping recorded idle gaps (only the 10 s system-idle cap applies)
+    // policy: 'fcfs' = run to completion: every chunk continues the oldest started request, new requests start only
+    //   when no started one has tokens left (batched: started requests first, new ones fill the leftover room);
+    //   'srpt' = the same with the waiting queue sorted shortest-new-first (srptMaxWait s of aging);
+    //   'rr' = round robin over the started requests (tt-d-gen PrefillQueue/PrefillWriter): a request is admitted
+    //   (slot/lane acquired) at the back of the queue; each turn the front request takes one chunk, or with batching
+    //   up to the batch's remaining C-units as one segment, and goes to the back if it has tokens left (a request
+    //   appears at most once per batch).
     srptMaxWait: 30,
+    // rrLanes (policy 'rr', cache 'pool'): 'keep' = a started request keeps its lane while it waits for its next turn,
+    //   so at most `lanes` requests are in progress; 'release' = its lane is freed after every segment, the partial
+    //   KV is copied out to the pool (pinned) and its whole context is copied back in for each batch it appears in.
+    //   With 'release' and with paging, round robin admits a request only while the pool can hold every in-progress
+    //   request in full, and rrMaxActive caps their number (0 = no cap beyond the pool).
+    rrLanes: 'keep', rrMaxActive: 0,
   };
 
   function kvBytesPerTokenLayer(cfg, tp) { // whole stage, physical
@@ -524,7 +537,8 @@
       // time (ms) to copy `tok` tokens of KV between pool and lane on the stage holding the most layers
       copyMs: (tok) => tok * Math.max(...stages.map((x) => x.n)) * kvbL / P * 2 / (HW.dram * 0.5) * 1e3,
       pcieBps: cfg.pcieGBsPerGalaxy * GB * (cfg.galaxies / cfg.replicas),
-      maxInflight: cfg.maxInflight > 0 ? cfg.maxInflight : 2 * S + 4,
+      // in-flight chunks: round robin on static slots mirrors tt-d-gen's ChunkFifo, max(8, 4 x max_slots)
+      maxInflight: cfg.maxInflight > 0 ? cfg.maxInflight : cfg.policy === 'rr' && cfg.cache === 'slots' ? Math.max(8, 4 * nSlots) : 2 * S + 4,
       tokensPerSec: null,
     };
   }
@@ -625,7 +639,7 @@
     constructor(TR, capBlocks, hostBlocks) {
       this.TR = TR; this.cap = capBlocks; this.hcap = hostBlocks;
       this.n = 0; this.tier = new Uint8Array(1 << 16); this.t = new Float64Array(1 << 16); this.pk = new Int32Array(1 << 16);
-      this.len = new Int32Array(1 << 16); this.dep = new Int32Array(1 << 16);
+      this.len = new Int32Array(1 << 16); this.dep = new Int32Array(1 << 16); this.pin = new Int32Array(1 << 16);
       this.used = 0; this.hused = 0; this.heap = new LruHeap(); this.hheap = new LruHeap(); this.path = new Int32Array(1024);
       this.evictedBlocks = 0;
     }
@@ -635,7 +649,7 @@
       if (this.n > this.tier.length) {
         let L = this.tier.length; while (L < this.n) L *= 2;
         const g = (A, C) => { const B = new C(L); B.set(A); return B; };
-        this.tier = g(this.tier, Uint8Array); this.t = g(this.t, Float64Array); this.pk = g(this.pk, Int32Array); this.len = g(this.len, Int32Array); this.dep = g(this.dep, Int32Array);
+        this.tier = g(this.tier, Uint8Array); this.t = g(this.t, Float64Array); this.pk = g(this.pk, Int32Array); this.len = g(this.len, Int32Array); this.dep = g(this.dep, Int32Array); this.pin = g(this.pin, Int32Array);
       }
       for (let i = 0; i < np; i++) {
         const q = p0 + i; const par = TR.pc_parent[q];
@@ -670,13 +684,22 @@
         else if (this.tier[k] === 2) { this.t[k] = now; this.hheap.push(now, this.dep[k], k); }
       }
     }
+    // pin the device-resident pieces from the root that overlap the first `blocks` blocks of the path (the cached
+    // prefix an in-progress request keeps reading); pinned pieces are skipped by evict() until unpinned.
+    // Returns the pinned keys; this.pinB = blocks of the prefix they cover.
+    pinPrefix(n, blocks) {
+      const keys = []; let acc = 0;
+      for (let i = n - 1; i >= 0 && acc < blocks; i--) { const k = this.path[i]; if (this.tier[k] !== 1) break; this.pin[k]++; keys.push(k); acc += this.len[k]; }
+      this.pinB = Math.min(acc, blocks); return keys;
+    }
+    unpin(keys) { for (const k of keys) if (--this.pin[k] === 0 && this.tier[k] === 1) this.heap.push(this.t[k], this.dep[k], k); }
     // space held by KV that is being written but not yet inserted (paging: pages written in place)
     reserve(blocks) { this.used += blocks; this.evict(); }
     unreserve(blocks) { this.used -= blocks; }
     evict() {
       while (this.used > this.cap && this.heap.n > 0) {
         const k = this.heap.pop(); const t = this.heap.ot;
-        if (this.tier[k] !== 1 || this.t[k] !== t) continue;
+        if (this.tier[k] !== 1 || this.t[k] !== t || this.pin[k] > 0) continue; // pinned: re-pushed by unpin()
         this.used -= this.len[k]; this.evictedBlocks += this.len[k];
         if (this.hcap > 0) { this.tier[k] = 2; this.hused += this.len[k]; this.hheap.push(t, this.dep[k], k); if (this.onDemote) this.onDemote(this.len[k]); }
         else this.tier[k] = 0;
@@ -718,7 +741,7 @@
   // ------------------------------------------------------------------------------------------------------
   // The replay simulation
   // ------------------------------------------------------------------------------------------------------
-  const EV_READY = 1, EV_DONE = 2, EV_END = 3, EV_PUMP = 4, EV_LANE = 5, EV_FETCHED = 6;
+  const EV_READY = 1, EV_DONE = 2, EV_END = 3, EV_PUMP = 4, EV_LANE = 5, EV_FETCHED = 6, EV_SEG = 7;
 
   function simulate(TR, cal, cfgIn, opts) {
     opts = opts || {};
@@ -728,6 +751,11 @@
     const rnd = mulberry32(cfg.seed * 2654435761 >>> 0);
     const S = plan.S, B = 64;
     const ev = new EvHeap();
+    const rr = cfg.policy === 'rr';
+    const rrRelease = rr && cfg.rrLanes === 'release' && cfg.cache === 'pool'; // lane per segment, partial KV in the pool
+    // in-progress requests whose KV lives in the pool (round robin with released lanes, or paging): their cached
+    // prefix is pinned and their new KV reserved, and admission is bounded by the pool (and rrMaxActive)
+    const pinHits = rrRelease || (rr && cfg.cache === 'paging');
     let now = 0, t0 = null, tEnd = Infinity, primersLeft = 0, warmDone = false;
     let inflightReqs = 0; // queued + prefill + decode (system idle check)
     // replicas
@@ -735,7 +763,7 @@
     for (let r = 0; r < cfg.replicas; r++) {
       reps.push({
         id: r, free: new Float64Array(S), busy: new Float64Array(S), queue: [], active: [], exits: [], pumpAt: -1,
-        trees: 0, lanesUsed: 0, arenaUsed: 0,
+        trees: 0, lanesUsed: 0, arenaUsed: 0, progTok: 0, nProg: 0,
         pool: cfg.cache === 'slots' ? null : new PoolCache(TR, plan.poolTok / B, plan.hostTok / B),
         slots: cfg.cache === 'slots' ? new SlotCache(plan.nSlots) : null, pcieFree: 0,
       });
@@ -915,11 +943,18 @@
         const lp = a.warm ? TR.req_lcp_prev[r] : 0;
         q.hitTok = hitTokens(q, lp);
       } else {
-        if (plan.lanes !== Infinity && rep.lanesUsed >= plan.lanes) return false;
         const need = TR.req_blocks[r] * B;
-        if (cfg.laneArena && cfg.cache === 'pool') { if (rep.arenaUsed + need > plan.arena) return false; rep.arenaUsed += need; q.arena = need; }
-        if (plan.lanes !== Infinity) rep.lanesUsed++;
-        q.lane = 1;
+        if (pinHits) { // the pool must hold every in-progress request in full (pinned prefix + new KV)
+          if (rep.nProg > 0 && rep.progTok + need > plan.poolTok) return false;
+          if (cfg.rrMaxActive > 0 && rep.nProg >= cfg.rrMaxActive) return false;
+          rep.progTok += need; rep.nProg++; q.prog = need;
+        }
+        if (rrRelease) { /* lanes are taken per segment (laneGet) */ } else {
+          if (plan.lanes !== Infinity && rep.lanesUsed >= plan.lanes) return false;
+          if (cfg.laneArena && cfg.cache === 'pool') { if (rep.arenaUsed + need > plan.arena) return false; rep.arenaUsed += need; q.arena = need; }
+          if (plan.lanes !== Infinity) rep.lanesUsed++;
+          q.lane = 1;
+        }
         // dense ring-joint scans the whole lane: fixed lanes are laneLen; arena lanes / paged kernels are request-sized
         q.laneCap = cfg.cache === 'pool' && !cfg.laneArena ? cfg.laneLen : need;
         // re-check the hit: the READY-time refresh does not pin, so pages may have been evicted (lost) or demoted to
@@ -933,6 +968,7 @@
           if (warmDone) st.hostTok += extra * B;
         }
         q.hitTok = hitTokens(q, hitB);
+        if (pinHits) { q.pins = pool.pinPrefix(n, q.hitTok / B); q.pinTok = Math.min(pool.pinB * B, q.hitTok); }
         if (cfg.cache === 'paging' && plan.poolTok !== Infinity) { q.resv = (TR.req_blocks[r] * B - q.hitTok) / B; pool.reserve(q.resv); }
       }
       q.started = true; q.tStart = now;
@@ -974,6 +1010,32 @@
         q.first = false; q.pos += n; q.rem -= n; T += npad;
         return true;
       };
+      if (rr) {
+        // admit every waiting request that gets a slot/lane (FCFS; static slots skip a stream whose slot is busy) to
+        // the back of the round-robin queue (rep.active), then serve it from the front. A request that is not done
+        // goes to the back, behind everything waiting now, so it is never in one batch twice.
+        if (rep.queue.length) {
+          const keep = []; let blocked = false;
+          for (const q of rep.queue) {
+            if (!blocked && tryStart(q, rep)) rep.active.push(q);
+            else { keep.push(q); if (!rep.slots) blocked = true; }
+          }
+          rep.queue = keep;
+        }
+        const again = [];
+        while (rep.active.length && room()) {
+          const q = rep.active[0];
+          const a = rrRelease ? laneGet(q, rep) : 0;
+          if (a < 0) break; // no lane free: a lane release re-pumps
+          rep.active.shift();
+          take(q, budget - T);
+          if (rrRelease) segs[segs.length - 1].arena = a;
+          if (q.rem > 0) again.push(q);
+          if (!cfg.batch) break;
+        }
+        for (const q of again) rep.active.push(q);
+        return segs.length ? { segs, T } : null;
+      }
       // 1) continue active requests (they hold lanes), in start order
       for (let i = 0; i < cands.length && room(); i++) {
         if (cands[i].rem > 0) take(cands[i], budget - T);
@@ -993,6 +1055,14 @@
       }
       rep.active = rep.active.filter((q) => q.rem > 0);
       return segs.length ? { segs, T } : null;
+    }
+    // rrLanes 'release': a lane (or arena space for the whole request) for one segment; -1 if none is free
+    function laneGet(q, rep) {
+      if (plan.lanes !== Infinity && rep.lanesUsed >= plan.lanes) return -1;
+      let a = 0;
+      if (cfg.laneArena) { a = TR.req_blocks[q.r] * B; if (rep.arenaUsed + a > plan.arena) return -1; rep.arenaUsed += a; }
+      if (plan.lanes !== Infinity) rep.lanesUsed++;
+      return a;
     }
     function pump(rep) {
       while (true) {
@@ -1023,6 +1093,8 @@
       if (copies) {
         let copyTok = 0;
         for (const s of segs) {
+          // lane released between turns: copy in the whole context so far, copy the segment's new KV out
+          if (rrRelease) { copyTok += s.k + s.n; s.copyS = plan.copyMs(s.k + s.n) / 1e3; continue; }
           if (s.first) { copyTok += s.q.hitTok; s.q.copyInS = plan.copyMs(s.q.hitTok) / 1e3; }
           if (s.last) { const nt = TR.req_blocks[s.q.r] * B - s.q.hitTok; copyTok += nt; s.q.copyOutS = plan.copyMs(nt) / 1e3; }
         }
@@ -1047,8 +1119,17 @@
         arr = end + hop;
       }
       heapPushNum(rep.exits, end);
+      if (opts.onChunk) opts.onChunk(now, segs); // test hook: the segments of every chunk, in issue order
       if (warmDone && end >= t0 && end <= tEnd) { st.chunks++; st.segs += segs.length; st.processed += T; }
       for (const s of segs) {
+        if (rrRelease) { // every segment frees its lane (held for its copies, as below); the last one also inserts the KV
+          let hold = 0;
+          if (copies && cfg.copyMode === 'double') hold = s.copyS || 0;
+          else if (copies && cfg.copyMode === 'overlap3') hold = 2 * (scratch[0] / 1e3 + blk);
+          ev.push((cfg.laneScope === 'stage' ? end0 : end) + hold, { e: EV_SEG, q: s.q, rep, upto: s.k + s.n, last: s.last, arena: s.arena });
+          if (s.last) ev.push(end, { e: EV_DONE, q: s.q });
+          continue;
+        }
         if (s.last) {
           ev.push(end, { e: EV_DONE, q: s.q });
           // lane release: per-stage lanes when stage 0 finishes the last chunk, global lanes at prefill completion,
@@ -1076,8 +1157,23 @@
       const pool = rep.pool;
       if (q.resv) { pool.unreserve(q.resv); q.resv = 0; }
       const n = pool.walk(q.tree.ns, TR.req_leaf[q.r] - TR.tr_pc0[q.tree.trace]); pool.touch(n, now);
+      if (q.pins) { pool.unpin(q.pins); q.pins = null; }
+      if (q.prog) { rep.progTok -= q.prog; rep.nProg--; q.prog = 0; }
     }
     function onLaneFree(q, rep) { releaseLane(q, rep); insertKV(q, rep); }
+    // rrLanes 'release': a segment's lane is free; its new KV is now in the pool (reserved, i.e. pinned, until the
+    // whole request is inserted), beyond the part of the cached prefix that is pinned in place
+    function onSegFree(p) {
+      const q = p.q, rep = p.rep;
+      if (plan.lanes !== Infinity) rep.lanesUsed--;
+      if (p.arena) rep.arenaUsed -= p.arena;
+      if (p.last) insertKV(q, rep);
+      else if (!q.inserted && rep.pool && plan.poolTok !== Infinity) {
+        const tgt = Math.max(0, p.upto - (q.pinTok || 0)) / B;
+        if (tgt > (q.resv || 0)) { rep.pool.reserve(tgt - (q.resv || 0)); q.resv = tgt; }
+      }
+      pump(rep);
+    }
     function onDone(q) { // prefill complete (TTFT)
       const tree = q.tree, rep = tree.rep, r = q.r;
       q.tDone = now;
@@ -1160,6 +1256,7 @@
         case EV_END: onEnd(p.q); break;
         case EV_PUMP: if (p.rep.pumpAt === t) p.rep.pumpAt = -1; pump(p.rep); break;
         case EV_LANE: onLaneFree(p.q, p.rep); break;
+        case EV_SEG: onSegFree(p); break;
       }
     }
     // ---------- results

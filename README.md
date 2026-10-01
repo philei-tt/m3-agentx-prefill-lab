@@ -165,6 +165,15 @@ Every buffer that must hold a whole request (slots, fixed lanes, the lane arena)
 * **`paging`**: an ideal paged kernel (no lanes, no copies). The pages a request is writing are reserved in the pool from start to completion. The SSD tier also works behind paging.
 * **`inf`**: infinite cache.
 
+## Scheduling (`policy`)
+
+* **`fcfs`** (default, used by the study): run to completion. Every chunk continues the oldest started request; a new request starts only when no started request has tokens left. With batching, started requests are continued first and new ones fill the leftover room.
+* **`srpt`**: the same, with the waiting queue sorted shortest-new-first (30 s aging).
+* **`rr`**: round robin, as in tt-d-gen (`PrefillQueue` + `PrefillWriter::step`). A request joins the back of the queue when it is admitted, i.e. when it gets a slot or lane. Each turn the front request takes one chunk and goes to the back if it has chunks left. With batching, requests are popped from the front, each takes up to the batch's remaining chunk units as one segment, and unfinished ones go to the back behind everything waiting, so a request is never in one batch twice. On static slots the in-flight cap is tt-d-gen's ChunkFifo, max(8, 4 × slots).
+  * Pool lanes, `rrLanes: 'keep'` (default): a request keeps its lane between turns, so at most `lanes` requests are in progress.
+  * Pool lanes, `rrLanes: 'release'`: the lane is freed after every segment. The new KV is copied out to the pool and stays pinned there until the request finishes, and the whole context so far is copied in again for every batch the request is in. At most `lanes` requests share a batch.
+  * With `'release'` and with paging, round robin pins the cached prefix of every request in progress. It admits a request only while the pool can hold all in-progress requests in full; `rrMaxActive` (default 0, off) caps their number.
+
 ## Findings (study of Sep 29 2026 b: kv-bounded dense gather, torus rings; decode 180 tok/s, AIPerf-exact replay, `results/study.json`)
 
 Goodput in useful tok/s at p90 TTFT ≤ 10 s. "Today" = 16×[2,4] (or 32×[2,4]), chunk 2048, auto split, static 1M slots.
