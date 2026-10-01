@@ -49,10 +49,10 @@ function maxOpen(chunks) {
   return m;
 }
 
-// 1. unbatched FCFS runs every request to completion; round robin gives one chunk per turn and rotates
+// 1. unbatched 'rtc' runs every request to completion; round robin gives one chunk per turn and rotates
 for (const cache of ['slots', 'inf']) {
   const f = trace({ cache }), r = trace({ cache, policy: 'rr' });
-  assert.strictEqual(interleaved(f.chunks), 0, `fcfs/${cache} interleaves requests`);
+  assert.strictEqual(interleaved(f.chunks), 0, `rtc/${cache} interleaves requests`);
   assert.ok(interleaved(r.chunks) > 0, `rr/${cache} never interleaves`);
   assert.ok(r.chunks.every((ch) => ch.length === 1 && ch[0][1] <= 2048), `rr/${cache}: one chunk per turn`);
   assert.ok(fair(r.chunks), `rr/${cache} is not round robin`);
@@ -75,7 +75,7 @@ const batched = Object.assign({ batch: true, chunk: 1024, budget: 8192, layout: 
 assert.strictEqual(SIM.makePlan(Object.assign({ chunk: 2048 }, pool), cal).lanes, 16);
 assert.strictEqual(SIM.makePlan(batched, cal).lanes, 8);
 assert.strictEqual(SIM.makePlan(Object.assign({}, batched, { rrLanes: 3 }), cal).lanes, 3);
-assert.strictEqual(SIM.makePlan(Object.assign({ lanes: 5 }, pool, { policy: 'fcfs' }), cal).lanes, 5, 'other policies keep `lanes`');
+assert.strictEqual(SIM.makePlan(Object.assign({ lanes: 5 }, pool, { policy: 'rtc' }), cal).lanes, 5, 'other policies keep `lanes`');
 // 3b. the lane count bounds the requests per batch, not the requests in progress (the partial KV is in the pool);
 //     each request of a batch has its own lane
 {
@@ -104,7 +104,7 @@ assert.ok(maxOpen(trace(Object.assign({}, batched, { rrMaxActive: 5 })).chunks) 
 // 4. the default policy is unchanged by the round-robin code (same results as without the option set)
 {
   const a = SIM.simulate(TR, cal, { concurrency: 64, duration: 300, chunk: 2048 });
-  const b = SIM.simulate(TR, cal, { concurrency: 64, duration: 300, chunk: 2048, policy: 'fcfs', rrLanes: 4, rrCopyIn: 'always' });
+  const b = SIM.simulate(TR, cal, { concurrency: 64, duration: 300, chunk: 2048, policy: 'rtc', rrLanes: 4, rrCopyIn: 'always' });
   assert.strictEqual(a.usefulTps, b.usefulTps); assert.strictEqual(a.events, b.events);
 }
 

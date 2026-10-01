@@ -355,7 +355,7 @@
     boundedDense: true,    // dense ring-joint gathers [0, kv_len) (op-bounded since #47539); false = whole lane capacity
     msaLocal: false,       // MSA: SP-local indexer + top-k merge, fetch only selected K/V blocks (no prefix all-gather)
     idxBf16: true, idxDerep: false, // index_k cache dtype / de-replicated over TP (today: bf16 x TP replicas)
-    chunk: 5120, layout: 'fixed', batch: false, budget: 16384, attn: 'seq', policy: 'fcfs',
+    chunk: 5120, layout: 'fixed', batch: false, budget: 16384, attn: 'seq', policy: 'rtc',
     // kvDedup: a request that takes several C-units of a batched fixed-layout chunk makes ONE attention call (one
     //   gather of its cached prefix); false = one call and one prefix gather per C-unit (today's kernels process
     //   one chunk at a time). prefetchKV: overlap the KV-prefix gathers with the layer's non-collective compute.
@@ -378,9 +378,10 @@
     reserveGB: 3, expertImb: IMB0, maxInflight: 0,
     concurrency: 64, decodeTps: 180, duration: 1800, seed: 1, idleCap: 10, startMin: 0, startMax: 1, maxWarmup: 1e6,
     gapCap: Infinity,      // AgentX forbids capping recorded idle gaps (only the 10 s system-idle cap applies)
-    // policy: 'fcfs' = run to completion: every chunk continues the oldest started request, new requests start only
-    //   when no started one has tokens left (batched: started requests first, new ones fill the leftover room);
-    //   'srpt' = the same with the waiting queue sorted shortest-new-first (srptMaxWait s of aging);
+    // policy: 'rtc' = run to completion (no preemption), oldest first ('fcfs', its old name, is still accepted):
+    //   every chunk continues the oldest started request, new requests start only when no started one has tokens
+    //   left (batched: started requests first, new ones fill the leftover room);
+    //   'srpt' = also run to completion, with the waiting queue sorted shortest-new-first (srptMaxWait s of aging);
     //   'rr' = round robin over the started requests (tt-d-gen PrefillQueue/PrefillWriter): a request is admitted
     //   (slot/lane acquired) at the back of the queue; each turn the front request takes one chunk, or with batching
     //   as many of the batch's remaining C-units as it can fill (one attention call), and goes to the back if it has
@@ -1023,7 +1024,7 @@
         return true;
       };
       if (rr) {
-        // admit every waiting request that gets a slot/lane (FCFS; static slots skip a stream whose slot is busy) to
+        // admit every waiting request that gets a slot/lane (oldest first; static slots skip a stream whose slot is busy) to
         // the back of the round-robin queue (rep.active), then serve it from the front. A request that is not done
         // goes to the back, behind everything waiting now. Batched, each popped request takes as many of the
         // remaining C-units as it can fill, as one attention call, so it is never split into two runs in one batch.

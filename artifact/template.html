@@ -198,7 +198,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row check"><input id="kvDedup" type="checkbox"><label for="kvDedup">One attention call per request per chunk (prefix gathered once)</label></div>
     <div class="hint">Off: with a fixed layout, each chunk-unit of a request makes its own call and re-gathers the cached prefix.</div>
     <div class="row check"><input id="prefetchKV" type="checkbox"><label for="prefetchKV">Prefetch KV-prefix gathers (overlap with compute)</label></div>
-    <div class="row"><label for="policy">Scheduling</label><select id="policy"><option value="fcfs">FCFS, run to completion</option><option value="srpt">shortest first (30 s aging)</option><option value="rr">round robin</option></select></div>
+    <div class="row"><label for="policy">Scheduling</label><select id="policy"><option value="rtc">run to completion, oldest first</option><option value="srpt">run to completion, shortest first (30 s aging)</option><option value="rr">round robin</option></select></div>
     <div class="row"><label for="rrLanes">RR lanes / stage (0 = auto)</label><input id="rrLanes" type="number" min="0" max="64" step="1"></div>
     <div class="row"><label for="rrCopyIn">RR copy-in</label><select id="rrCopyIn"><option value="miss">only on a lane miss</option><option value="always">every turn</option></select></div>
     <div class="row"><label for="rrMaxActive">RR max in progress</label><input id="rrMaxActive" type="number" min="0" step="1"></div>
@@ -795,7 +795,7 @@ function applyUrl() {
   const cfg = {}, bad = [];
   for (const f of FIELDS) {
     if (!q.has(f)) continue;
-    const s = q.get(f), el = $(f);
+    const s = f === 'policy' && q.get(f) === 'fcfs' ? 'rtc' : q.get(f), el = $(f); // old name of 'rtc'
     const custom = f === 'split' && /^[\d,]+$/.test(s);
     if (el.tagName === 'SELECT' && !custom && ![...el.options].some((o) => o.value === s)) { bad.push(`${f}=${s}`); continue; }
     if (NUMS.has(f) && !Number.isFinite(Number(s))) { bad.push(`${f}=${s}`); continue; }
