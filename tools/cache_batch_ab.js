@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Today's 4-gx config (16x[2,4], chunk 2048) with each KV mode (slots / pool / paging / host tier / inf), with and
-// without batching: goodput and the batch shape at the goodput point (requests per chunk, chunk tokens, padding).
+// without batching (batching needs the pool + lanes cache): goodput and the batch shape at the goodput point (requests per chunk, chunk tokens, padding).
 // Usage: JOB=<slurm job> ./on_node.sh node tools/cache_batch_ab.js
 'use strict';
 const { Pool, summarize } = require('../lib/pool.js');
@@ -9,12 +9,10 @@ const base = { galaxies: 4, stages: 16, mesh: [2, 4], chunk: 2048, split: 'auto'
 const B = { batch: true, budget: 16384 };
 const variants = [
   ['slots (today)', { cache: 'slots' }],
-  ['slots + batch 16k', { cache: 'slots', ...B }],
   ['pool 4 lanes', { cache: 'pool', lanes: 4 }],
   ['pool 4 lanes + batch 16k', { cache: 'pool', lanes: 4, ...B }],
   ['pool 8 lanes + batch 16k', { cache: 'pool', lanes: 8, ...B }],
   ['paging', { cache: 'paging' }],
-  ['paging + batch 16k', { cache: 'paging', ...B }],
   ['pool 4 lanes + host', { cache: 'pool', lanes: 4, hostTier: true }],
   ['pool 4 lanes + host + batch 16k', { cache: 'pool', lanes: 4, hostTier: true, ...B }],
   ['paging + host', { cache: 'paging', hostTier: true }],

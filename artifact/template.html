@@ -733,6 +733,10 @@ function syncUi() {
   for (const id of ['hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy']) $(id).disabled = !paged;
   $('arenaTokens').disabled = !pool || !$('laneArena').checked;
   $('lanes').disabled = !pool || $('laneArena').checked;
+  // several requests per chunk need the pool + lanes cache (the infinite cache is the reference, so it is allowed)
+  const canBatch = pool || $('cache').value === 'inf';
+  if (!canBatch) $('batch').checked = false;
+  $('batch').disabled = !canBatch;
   $('budget').disabled = !$('batch').checked; $('attn').disabled = !$('batch').checked; $('batchDynShape').disabled = !$('batch').checked;
   $('unaligned').disabled = $('layout').value === 'var';
   // round robin on fixed pool lanes sets the lane count itself (rrLanes, 0 = auto)

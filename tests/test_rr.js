@@ -62,7 +62,7 @@ for (const cache of ['slots', 'inf']) {
 //    and the rotation is fair
 {
   const C = 1024, budget = 8192;
-  const { chunks } = trace({ cache: 'slots', policy: 'rr', batch: true, chunk: C, budget, layout: 'fixed', unaligned: true });
+  const { chunks } = trace({ cache: 'pool', policy: 'rr', batch: true, chunk: C, budget, layout: 'fixed', unaligned: true });
   assert.ok(once(chunks), 'a request appears twice in one batch');
   assert.ok(chunks.every((ch) => ch.reduce((a, s) => a + Math.ceil(s[1] / C) * C, 0) <= budget), 'batch over budget');
   assert.ok(chunks.some((ch) => ch.length > 1) && fair(chunks), 'batched rr is not round robin');
