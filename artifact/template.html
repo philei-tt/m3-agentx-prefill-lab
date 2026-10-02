@@ -186,24 +186,6 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row check"><input id="msaLocal" type="checkbox"><label for="msaLocal">MSA SP-local indexer</label></div>
   </fieldset>
   <fieldset>
-    <legend>Chunking &amp; batching</legend>
-    <div class="row"><label for="layout">KV layout</label><select id="layout"><option value="fixed">fixed chunk (block-cyclic)</option><option value="var">variable chunk (a2a KV write)</option></select></div>
-    <div class="row"><label for="chunk">Chunk size</label><select id="chunk"><option>128</option><option>256</option><option>512</option><option>1024</option><option>2048</option><option>4096</option><option>5120</option><option>8192</option></select></div>
-    <div class="hint" id="chunkHint" hidden>Not used: with batching on a variable layout, the token budget below is the chunk size.</div>
-    <div class="row check"><input id="batch" type="checkbox"><label for="batch">Batch several requests per chunk</label></div>
-    <div class="row"><label for="budget">Token budget</label><select id="budget"><option>4096</option><option>5120</option><option>8192</option><option>16384</option><option>32768</option></select></div>
-    <div class="row check"><input id="batchDynShape" type="checkbox"><label for="batchDynShape">Size each chunk to its tokens (a trace per size)</label></div>
-    <div class="hint">Off: one static budget-sized shape; a partly filled batch pays for the whole budget.</div>
-    <div class="row"><label for="attn">Attention</label><select id="attn"><option value="seq">sequential per request</option><option value="fused">fused multi-user</option></select></div>
-    <div class="row check"><input id="kvDedup" type="checkbox"><label for="kvDedup">One attention call per request per chunk (prefix gathered once)</label></div>
-    <div class="hint">Off: with a fixed layout, each chunk-unit of a request makes its own call and re-gathers the cached prefix.</div>
-    <div class="row check"><input id="prefetchKV" type="checkbox"><label for="prefetchKV">Prefetch KV-prefix gathers (overlap with compute)</label></div>
-    <div class="row"><label for="policy">Scheduling</label><select id="policy"><option value="rtc">run to completion, oldest first</option><option value="srpt">run to completion, shortest first (30 s aging)</option><option value="rr">round robin</option></select></div>
-    <div class="row check"><input id="rrLanesAuto" type="checkbox"><label for="rrLanesAuto">Auto RR lanes (stages; fixed-layout batches: chunk units per batch)</label></div>
-    <div class="row"><label for="rrLanes">RR lanes / stage</label><input id="rrLanes" type="number" min="1" max="64" step="1"></div>
-    <div class="hint">Round robin (tt-d-gen): one chunk per turn (batched: as many chunk units as it can fill), then to the back. On the pool, a lane (per-stage KV slot) is taken per turn and the new KV is always copied out; a request whose lane still holds its context skips the copy-in. Each request in a batch holds a lane, so the lane count caps the requests per batch; with variable-layout batching it must be set.</div>
-  </fieldset>
-  <fieldset>
     <legend>KV cache</legend>
     <div class="row"><label for="cache">Residency</label><select id="cache"><option value="slots">static 1M slots</option><option value="pool">slot lanes + paged pool</option><option value="paging">full paging (ideal)</option><option value="inf">infinite cache</option></select></div>
     <div class="row"><label for="laneScope">Lane table</label><select id="laneScope"><option value="stage">per stage</option><option value="global">global (today's slot_id)</option></select></div>
@@ -219,6 +201,25 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row check"><input id="idxDerep" type="checkbox"><label for="idxDerep">index_k stored once (not ×TP)</label></div>
     <div class="row check"><input id="idxBf16" type="checkbox"><label for="idxBf16">index_k bf16 (off = bf8)</label></div>
     <div class="row"><label for="reserveGB">Reserve GB / chip</label><input id="reserveGB" type="number" min="0" step="0.5"></div>
+  </fieldset>
+  <fieldset>
+    <legend>Chunking &amp; batching</legend>
+    <div class="row"><label for="layout">KV layout</label><select id="layout"><option value="fixed">fixed chunk (block-cyclic)</option><option value="var">variable chunk (a2a KV write)</option></select></div>
+    <div class="row"><label for="chunk">Chunk size</label><select id="chunk"><option>128</option><option>256</option><option>512</option><option>1024</option><option>2048</option><option>4096</option><option>5120</option><option>8192</option></select></div>
+    <div class="hint" id="chunkHint" hidden>Not used: with batching on a variable layout, the token budget below is the chunk size.</div>
+    <div class="row check"><input id="batch" type="checkbox"><label for="batch">Batch several requests per chunk</label></div>
+    <div class="hint" id="batchHint" hidden>Not available with static 1M slots, which run one request per chunk. Choose another KV residency above to batch.</div>
+    <div class="row"><label for="budget">Token budget</label><select id="budget"><option>4096</option><option>5120</option><option>8192</option><option>16384</option><option>32768</option></select></div>
+    <div class="row check"><input id="batchDynShape" type="checkbox"><label for="batchDynShape">Run each batch at the size it fills (a compiled trace per size)</label></div>
+    <div class="hint">A compiled device program (trace) has a fixed input size. On: a batch that fills 3 of the budget's 8 chunk units runs as a 3-unit chunk, which needs a trace for every size up to the budget. Off: one trace at the full budget, so a partly filled batch is padded to the budget and pays for the padding in every op that scales with tokens and in the stage-to-stage send (the routed MoE ops still skip padding).</div>
+    <div class="row"><label for="attn">Attention</label><select id="attn"><option value="seq">sequential per request</option><option value="fused">fused multi-user</option></select></div>
+    <div class="row check"><input id="kvDedup" type="checkbox"><label for="kvDedup">One attention call per request per chunk (prefix gathered once)</label></div>
+    <div class="hint">Off: with a fixed layout, each chunk-unit of a request makes its own call and re-gathers the cached prefix.</div>
+    <div class="row check"><input id="prefetchKV" type="checkbox"><label for="prefetchKV">Prefetch KV-prefix gathers (overlap with compute)</label></div>
+    <div class="row"><label for="policy">Scheduling</label><select id="policy"><option value="rtc">run to completion, oldest first</option><option value="srpt">run to completion, shortest first (30 s aging)</option><option value="rr">round robin</option></select></div>
+    <div class="row check"><input id="rrLanesAuto" type="checkbox"><label for="rrLanesAuto">Auto RR lanes (stages; fixed-layout batches: chunk units per batch)</label></div>
+    <div class="row"><label for="rrLanes">RR lanes / stage</label><input id="rrLanes" type="number" min="1" max="64" step="1"></div>
+    <div class="hint">Round robin (tt-d-gen): one chunk per turn (batched: as many chunk units as it can fill), then to the back. On the pool, a lane (per-stage KV slot) is taken per turn and the new KV is always copied out; a request whose lane still holds its context skips the copy-in. Each request in a batch holds a lane, so the lane count caps the requests per batch; with variable-layout batching it must be set.</div>
   </fieldset>
   <fieldset>
     <legend>Traffic &amp; SLO</legend>
@@ -736,7 +737,7 @@ function syncUi() {
   // static slots run one request per chunk; every other cache can batch
   const canBatch = $('cache').value !== 'slots';
   if (!canBatch) $('batch').checked = false;
-  $('batch').disabled = !canBatch;
+  $('batch').disabled = !canBatch; $('batchHint').hidden = canBatch;
   $('budget').disabled = !$('batch').checked; $('attn').disabled = !$('batch').checked; $('batchDynShape').disabled = !$('batch').checked;
   $('unaligned').disabled = $('layout').value === 'var';
   // round robin on fixed pool lanes sets the lane count itself (rrLanes, 0 = auto)
