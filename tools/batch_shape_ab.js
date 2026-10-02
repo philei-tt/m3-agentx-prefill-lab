@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-// Batched chunks sized to their tokens (batchDynShape, traces per size) vs one static budget-sized shape.
+// Dynamic batch size (batchDynShape: a batch runs at the tokens it holds) vs padding every batch to the budget (traced).
 //   A) today's 4-gx config (16x[2,4], chunk 2048) + pool + host tier
 //   B) each scenario's best stack and topology from results/study.json, fixed chunk 256 and variable layout
 // Usage: JOB=<slurm job> ./on_node.sh node tools/batch_shape_ab.js [--workers 38]
 'use strict';
 const fs = require('fs');
 const { Pool, summarize } = require('../lib/pool.js');
-const { withFeatures, CONCS, SLO } = require('../study.js');
+const { withFeatures, laneCount, CONCS, SLO } = require('../study.js');
 const { STUDY } = require('../lib/paths.js');
 
 const BUDGETS = [4096, 8192, 16384, 32768];
@@ -27,7 +27,7 @@ async function main() {
     groups.push({ name: `${key} best stack, fixed C=256`, base: Object.assign({}, b, { layout: 'fixed', chunk: 256 }), noBatch: Object.assign({}, b, { layout: 'fixed', chunk: 2048 }) });
     groups.push({ name: `${key} best stack, var layout`, base: Object.assign({}, b, { layout: 'var', chunk: 5120 }) });
   }
-  const run = (id, cfg) => pool.evalCfg(id, cfg, CONCS, SLO).then((r) => summarize(r.points, SLO));
+  const run = (id, cfg) => pool.evalCfg(id, laneCount(cfg), CONCS, SLO).then((r) => summarize(r.points, SLO));
   const res = await Promise.all(groups.map(async (G) => {
     const rows = await Promise.all(BUDGETS.flatMap((B) => [true, false].map((dyn) =>
       run(`${G.name} ${B} ${dyn}`, Object.assign({}, G.base, { batch: true, budget: B, batchDynShape: dyn })).then((s) => ({ B, dyn, s })))));

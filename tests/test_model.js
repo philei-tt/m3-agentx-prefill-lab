@@ -38,6 +38,13 @@ assert.strictEqual(e0.moe.qkv, cal.effs['2x4'].moe.qkv);
 // 4. buffers that must hold a whole request are rejected when too small
 assert.ok(plan({ cache: 'pool', laneArena: true, arenaTokens: 5e5 }).errors.some((e) => e.includes('arena')));
 assert.ok(plan({ cache: 'slots', slotLen: 262144 }).errors.some((e) => e.includes('slots')));
+// batching works with every cache; static slots run out of memory when requests per batch x stages > slots
+const oom = (cfg) => plan(cfg).errors.some((e) => e.startsWith('out of memory'));
+assert.ok(oom({ cache: 'slots', batch: true, budget: 8192 }), '4 per batch x 16 stages > 20 slots');
+assert.ok(!oom({ cache: 'slots' }) && !oom({ cache: 'slots', galaxies: 8, stages: 32 }), 'unbatched slots fit');
+assert.ok(!oom({ cache: 'slots', batch: true, budget: 8192, stages: 4, mesh: [8, 4] }), '4 per batch x 4 stages <= 22 slots');
+assert.ok(oom({ cache: 'slots', batch: true, budget: 8192, layout: 'var', stages: 4, mesh: [8, 4] }), 'var layout: budget / 32SP per batch');
+for (const cache of ['pool', 'paging', 'inf']) assert.ok(!plan({ cache, batch: true }).errors.length, cache);
 
 // 5. replay: paging with an unbounded pool behaves exactly like the infinite cache
 const base = { concurrency: 24, duration: 600, chunk: 2048 };
@@ -48,5 +55,15 @@ assert.strictEqual(a.done, b.done); assert.ok(Math.abs(a.usefulTps - b.usefulTps
 // 6. replay: fixed-layout batching packs one segment per request per chunk, so chunks carry several requests
 const r = SIM.simulate(TR, cal, Object.assign({ cache: 'inf', batch: true, budget: 16384, layout: 'fixed' }, base, { concurrency: 64 }));
 assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
+
+// 7. replay: an SSD tier behind static slots keeps evicted slots' KV, so reads happen and the hit rate improves; the
+//    infinite cache has no tier
+{
+  const cfg = Object.assign({ cache: 'slots', chunk: 2048, unaligned: true }, base, { concurrency: 64 });
+  const a = SIM.simulate(TR, cal, cfg), b = SIM.simulate(TR, cal, Object.assign({ hostTier: true }, cfg));
+  assert.ok(SIM.makePlan(Object.assign({ hostTier: true }, cfg), cal).hostTok > 0 && b.hostTok > 0, 'no SSD reads behind slots');
+  assert.ok(b.hitRate > a.hitRate, `slots + SSD hit ${b.hitRate} <= ${a.hitRate}`);
+  assert.strictEqual(SIM.makePlan(Object.assign({ hostTier: true }, cfg, { cache: 'inf' }), cal).hostTok, 0);
+}
 
 console.log('test_model: all checks passed');

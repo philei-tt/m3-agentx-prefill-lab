@@ -12,7 +12,7 @@
 'use strict';
 const fs = require('fs');
 const { Pool, summarize } = require('../lib/pool.js');
-const { withFeatures, CONCS, SLO } = require('../study.js');
+const { withFeatures, laneCount, CONCS, SLO } = require('../study.js');
 const { STUDY } = require('../lib/paths.js');
 
 const CHUNKS = [128, 256, 512, 1024, 2048, 5120];
@@ -51,7 +51,7 @@ async function main() {
     }
     out[key] = await Promise.all(jobs.map((j) => {
       const { mode, md, ...d } = j;
-      const cfg = Object.assign(withFeatures(R.base, keys), topo, lanes, d, md);
+      const cfg = laneCount(Object.assign(withFeatures(R.base, keys), topo, lanes, d, md));
       const label = `${mode} ${d.layout} ${d.attn} C=${d.chunk} B=${d.budget || 0}`;
       return pool.evalCfg(key + label, cfg, concs, slo, noSlo ? 1e9 : 4, noSlo ? { extend: 0, refinePeak: 3 } : {})
         .then((r) => Object.assign({ mode, layout: d.layout, attn: d.attn, chunk: d.chunk, budget: d.budget || 0 }, summarize(r.points, slo)));
