@@ -14,17 +14,22 @@ const CONCS = [8, 16, 24, 32, 48, 64, 96, 128, 160, 192, 256, 320, 384, 448, 512
 
 const FEATURES = [
   { key: 'unaligned', name: 'Unaligned (block-granular) resume', cfg: { unaligned: true } },
-  { key: 'pool', name: 'Slot lanes + paged KV pool (4 x 1M lanes per stage, copy-in/out)', cfg: { cache: 'pool', lanes: 4, laneArena: false, laneScope: 'stage' } },
+  // lanes 4 applies only with batching (lanesOverride, see laneCount); without it the lane count is derived (1 lane
+  // per stage with the default sequential copies)
+  { key: 'pool', name: 'Slot lanes + paged KV pool (1M lanes per stage, copy-in/out)', cfg: { cache: 'pool', lanes: 4, laneArena: false, laneScope: 'stage' } },
   { key: 'arena', name: 'Variable-size lanes (contiguous arena, 4M tokens)', cfg: { laneArena: true, arenaTokens: 4e6 }, requires: ['pool'] },
-  { key: 'host', name: 'SSD KV tier (1 TB/galaxy, 64 GB/s)', cfg: { hostTier: true }, requires: ['pool'] },
+  // behind static slots too: an evicted slot is written to SSD and read back when its stream returns
+  { key: 'host', name: 'SSD KV tier (1 TB/galaxy, 64 GB/s)', cfg: { hostTier: true } },
   { key: 'idxdedup', name: 'index_k cache not replicated over TP (store once)', cfg: { idxDerep: true } },
   { key: 'idxbf8', name: 'index_k cache bf8 instead of bf16', cfg: { idxBf16: false } },
   { key: 'var', name: 'Variable chunk / flexible SP layout (a2a KV write)', cfg: { layout: 'var' } },
-  { key: 'batch', name: 'Multi-request batching (16k token budget)', cfg: { batch: true, budget: 16384 } },
-  { key: 'fused', name: 'Fused multi-user attention', cfg: { attn: 'fused' }, requires: ['batch'] },
+  // on the static-slot base, batching runs out of memory (8 requests per batch x 16 stages > 20 slots), so it needs pool
+  { key: 'batch', name: 'Multi-request batching (16k token budget)', cfg: { batch: true, budget: 16384 }, requires: ['pool'] },
+  { key: 'fused', name: 'Fused multi-user attention', cfg: { attn: 'fused' }, requires: ['batch', 'pool'] },
   { key: 'async', name: 'Async stage handoff (overlap D2D)', cfg: { asyncHandoff: true } },
   { key: 'msa', name: 'MSA SP-local indexer (no K/V/index prefix all-gather)', cfg: { msaLocal: true } },
-  { key: 'srpt', name: 'Shortest-first scheduling (30 s aging)', cfg: { policy: 'srpt' } },
+  // the base schedules round robin (the simulator's default, as tt-d-gen); this switches to shortest-first run to completion
+  { key: 'srpt', name: 'Shortest-first run to completion (30 s aging)', cfg: { policy: 'srpt' } },
 ];
 
 function scenarios() {
@@ -41,8 +46,10 @@ function scenarios() {
 function withFeatures(base, keys) {
   const cfg = Object.assign({}, base);
   for (const k of keys) Object.assign(cfg, FEATURES.find((f) => f.key === k).cfg);
-  return cfg;
+  return laneCount(cfg);
 }
+// the lane count (`lanes`) can only be set with batching on the pool; otherwise it is derived (one request per chunk)
+function laneCount(cfg) { cfg.lanesOverride = !!cfg.batch && cfg.cache === 'pool'; return cfg; }
 const allowed = (keys, f) => (f.requires || []).every((r) => keys.includes(r));
 
 async function main() {
@@ -54,7 +61,7 @@ async function main() {
   const concs = quick ? CONCS.filter((_, i) => i % 3 === 0) : CONCS;
   const cache = new Map();
   const evalKeys = async (sc, keys, extra) => {
-    const cfg = Object.assign(withFeatures(sc.base, keys), extra || {});
+    const cfg = laneCount(Object.assign(withFeatures(sc.base, keys), extra || {}));
     const id = JSON.stringify(cfg);
     if (!cache.has(id)) cache.set(id, pool.evalCfg(id, cfg, concs, SLO).then((r) => Object.assign(r, summarize(r.points, SLO))));
     return cache.get(id);
@@ -133,8 +140,8 @@ async function main() {
       ['[4,4] torus stages', sc.base.galaxies === 4 ? { mesh: [4, 4], stages: 8, replicas: 1 } : { mesh: [4, 4], stages: 16, replicas: 1 }],
     ];
     if (good.includes('pool')) sens.push(
-      ['global lane table', { laneScope: 'global' }],
-      ['copies sequential', { copyMode: 'sequential' }], ['copies triple-buffered', { copyMode: 'overlap3' }],
+      ['global lane table', { laneScope: 'global' }], // sequential copies only (the default)
+      ['copies double-buffered', { copyMode: 'double' }], ['copies triple-buffered', { copyMode: 'overlap3' }],
       good.includes('arena') ? ['4 fixed 1M lanes', { laneArena: false, lanes: 4 }] : ['2M lane arena', { laneArena: true, arenaTokens: 2e6 }],
     );
     R.sens = await Promise.all(sens.map(([name, d]) => evalKeys(sc, good, Object.assign({}, bestExtra, d)).then((r) => ({ name, goodput: r.goodput, peak: r.peak ? r.peak.usefulTps : 0, at: r.at }))));
@@ -146,4 +153,4 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { FEATURES, scenarios, withFeatures, CONCS, SLO };
+module.exports = { FEATURES, scenarios, withFeatures, laneCount, CONCS, SLO };

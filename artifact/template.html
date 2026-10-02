@@ -186,26 +186,10 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row check"><input id="msaLocal" type="checkbox"><label for="msaLocal">MSA SP-local indexer</label></div>
   </fieldset>
   <fieldset>
-    <legend>Chunking &amp; batching</legend>
-    <div class="row"><label for="layout">KV layout</label><select id="layout"><option value="fixed">fixed chunk (block-cyclic)</option><option value="var">variable chunk (a2a KV write)</option></select></div>
-    <div class="row"><label for="chunk">Chunk size</label><select id="chunk"><option>128</option><option>256</option><option>512</option><option>1024</option><option>2048</option><option>4096</option><option>5120</option><option>8192</option></select></div>
-    <div class="hint" id="chunkHint" hidden>Not used: with batching on a variable layout, the token budget below is the chunk size.</div>
-    <div class="row check"><input id="batch" type="checkbox"><label for="batch">Batch several requests per chunk</label></div>
-    <div class="row"><label for="budget">Token budget</label><select id="budget"><option>4096</option><option>5120</option><option>8192</option><option>16384</option><option>32768</option></select></div>
-    <div class="row check"><input id="batchDynShape" type="checkbox"><label for="batchDynShape">Size each chunk to its tokens (a trace per size)</label></div>
-    <div class="hint">Off: one static budget-sized shape; a partly filled batch pays for the whole budget.</div>
-    <div class="row"><label for="attn">Attention</label><select id="attn"><option value="seq">sequential per request</option><option value="fused">fused multi-user</option></select></div>
-    <div class="row check"><input id="kvDedup" type="checkbox"><label for="kvDedup">One attention call per request per chunk (prefix gathered once)</label></div>
-    <div class="hint">Off: with a fixed layout, each chunk-unit of a request makes its own call and re-gathers the cached prefix.</div>
-    <div class="row check"><input id="prefetchKV" type="checkbox"><label for="prefetchKV">Prefetch KV-prefix gathers (overlap with compute)</label></div>
-    <div class="row"><label for="policy">Queue order</label><select id="policy"><option value="fcfs">FCFS</option><option value="srpt">shortest first (30 s aging)</option></select></div>
-  </fieldset>
-  <fieldset>
     <legend>KV cache</legend>
     <div class="row"><label for="cache">Residency</label><select id="cache"><option value="slots">static 1M slots</option><option value="pool">slot lanes + paged pool</option><option value="paging">full paging (ideal)</option><option value="inf">infinite cache</option></select></div>
     <div class="row"><label for="laneScope">Lane table</label><select id="laneScope"><option value="stage">per stage</option><option value="global">global (today's slot_id)</option></select></div>
-    <div class="row"><label for="copyMode">Pool copies</label><select id="copyMode"><option value="double">double-buffered</option><option value="sequential">sequential</option><option value="overlap3">triple-buffered</option></select></div>
-    <div class="row"><label for="lanes">Lanes per stage</label><input id="lanes" type="number" min="1" max="32" step="1"></div>
+    <div class="row"><label for="copyMode">Pool copies</label><select id="copyMode"><option value="sequential">sequential</option><option value="double">double-buffered</option><option value="overlap3">triple-buffered</option></select></div>
     <div class="row check"><input id="laneArena" type="checkbox"><label for="laneArena">Variable-size lanes (arena)</label></div>
     <div class="row"><label for="arenaTokens">Arena (M tokens)</label><select id="arenaTokens"><option value="2000000">2</option><option value="4000000">4</option><option value="8000000">8</option></select></div>
     <div class="row check"><input id="unaligned" type="checkbox"><label for="unaligned">Unaligned resume</label></div>
@@ -216,6 +200,26 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row check"><input id="idxDerep" type="checkbox"><label for="idxDerep">index_k stored once (not ×TP)</label></div>
     <div class="row check"><input id="idxBf16" type="checkbox"><label for="idxBf16">index_k bf16 (off = bf8)</label></div>
     <div class="row"><label for="reserveGB">Reserve GB / chip</label><input id="reserveGB" type="number" min="0" step="0.5"></div>
+  </fieldset>
+  <fieldset>
+    <legend>Chunking &amp; batching</legend>
+    <div class="row"><label for="layout">KV layout</label><select id="layout"><option value="fixed">fixed chunk (block-cyclic)</option><option value="var">variable chunk (a2a KV write)</option></select></div>
+    <div class="row"><label for="chunk">Chunk size</label><select id="chunk"><option>128</option><option>256</option><option>512</option><option>1024</option><option>2048</option><option>4096</option><option>5120</option><option>8192</option></select></div>
+    <div class="hint" id="chunkHint" hidden>Not used: with batching on a variable layout, the token budget below is the chunk size.</div>
+    <div class="row check"><input id="batch" type="checkbox"><label for="batch">Batch several requests per pipeline pass</label></div>
+    <div class="hint" id="batchHint" hidden>With static 1M slots a request holds its slot for the whole pipeline trip, so requests per batch × stages must fit in the slots; otherwise the plan reports out of memory.</div>
+    <div class="row"><label for="budget">Token budget</label><select id="budget"><option>4096</option><option>5120</option><option>8192</option><option>16384</option><option>32768</option></select></div>
+    <div class="row check"><input id="lanesOverride" type="checkbox"><label for="lanesOverride">Override lanes per stage (batching + hybrid pool only)</label></div>
+    <div class="row"><label for="lanes">Lanes per stage</label><input id="lanes" type="number" min="1" max="32" step="1"></div>
+    <div class="hint">Default: requests per batch × copy buffers (sequential 1, double 2, triple 3); with a global lane table, stages × requests per batch (sequential copies only). Variable-layout batching must override.</div>
+    <div class="row check"><input id="batchDynShape" type="checkbox"><label for="batchDynShape">Dynamic batch size (no padding to the budget)</label></div>
+    <div class="hint">On: a partly filled batch runs at its actual size (untraced). Off: it is padded to the full budget, as tracing requires.</div>
+    <div class="row"><label for="attn">Attention</label><select id="attn"><option value="seq">sequential per request</option><option value="fused">fused multi-user</option></select></div>
+    <div class="row check"><input id="kvDedup" type="checkbox"><label for="kvDedup">One attention call per request per chunk (prefix gathered once)</label></div>
+    <div class="hint">Off: with a fixed layout, each chunk-unit of a request makes its own call and re-gathers the cached prefix.</div>
+    <div class="row check"><input id="prefetchKV" type="checkbox"><label for="prefetchKV">Prefetch KV-prefix gathers (overlap with compute)</label></div>
+    <div class="row"><label for="policy">Scheduling</label><select id="policy"><option value="rr">round robin</option><option value="rtc">run to completion, oldest first</option><option value="srpt">run to completion, shortest first (30 s aging)</option></select></div>
+    <div class="hint">Round robin (tt-d-gen): a request enqueues at most one token budget (one chunk without batching) per turn, then goes to the back of the queue, so a request with a long sequence cannot starve shorter ones.<br>Run to completion: a request keeps enqueuing token budgets until its whole sequence is processed, which can starve shorter requests waiting in the queue.</div>
   </fieldset>
   <fieldset>
     <legend>Traffic &amp; SLO</legend>
@@ -250,7 +254,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <div class="chart" id="chU"><h4>Useful tok/s vs concurrency</h4></div>
       <div class="chart" id="chT"><h4>p90 TTFT (s, log) vs concurrency</h4></div>
       <div class="chart" id="chH"><h4>Prefix-cache hit rate vs concurrency</h4></div>
-      <div class="chart" id="chR"><h4>Requests per chunk vs concurrency</h4></div>
+      <div class="chart" id="chR"><h4>Requests per batch vs concurrency</h4></div>
     </div>
     <p class="hint" style="margin-top:6px">Concurrency is AIPerf's lane count: live agent trees, each replaying a session with its recorded (uncapped) idle gaps, sub-agent fan-out and joins. Hover a chart for values.</p>
   </div>
@@ -305,7 +309,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="panel">
       <h3>Baseline vs best, this scenario</h3>
       <div class="legend" id="cmpLegend"></div>
-      <div class="charts"><div class="chart" id="cmpU"><h4>Useful tok/s</h4></div><div class="chart" id="cmpT"><h4>p90 TTFT (s, log)</h4></div><div class="chart" id="cmpH"><h4>Hit rate</h4></div><div class="chart" id="cmpR"><h4>Requests per chunk</h4></div></div>
+      <div class="charts"><div class="chart" id="cmpU"><h4>Useful tok/s</h4></div><div class="chart" id="cmpT"><h4>p90 TTFT (s, log)</h4></div><div class="chart" id="cmpH"><h4>Hit rate</h4></div><div class="chart" id="cmpR"><h4>Requests per batch</h4></div></div>
     </div>
   </div>
 </section>
@@ -366,7 +370,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li><b>C:</b> chunk 2048, same split as B.</li>
         </ul>
         Each run measures a (new tokens × cached tokens) matrix, loaded and idle. The preset <span class="mono">today-C</span> is run C.</li>
-      <li><b>Features under consideration</b> (defined in "Features" below): batching several requests per chunk; slot lanes plus a paged KV pool; variable chunk size with an all-to-all KV write; plus a few more the study adds (SSD KV tier, index-cache layout, async stage handoff, and others).</li>
+      <li><b>Features under consideration</b> (defined in "Features" below): batching several requests per pipeline pass; slot lanes plus a paged KV pool; variable chunk size with an all-to-all KV write; plus a few more the study adds (SSD KV tier, index-cache layout, async stage handoff, and others).</li>
     </ul>
 
     <h2 id="m-metric">The metric: goodput</h2>
@@ -471,19 +475,20 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <ul>
       <li><b>KV size.</b> Per token per layer: K and V cost 1088 B (bf8). The index-key cache costs 128 values × 2 B (bf16) and is today stored on all 4 TP columns, so 1024 B. Total 2112 B per token per layer, about 127 KB per token over 60 layers, about 133 GB for one 1M-token context. Four galaxies hold about 21.5M tokens of KV after weights and reserves, which is <b>20 static 1M slots</b>.</li>
       <li><b>Static slots</b> (today). A conversation owns one 1M slot while it is resident. A new conversation takes a free slot or evicts the least recently used idle one. A hit is the prefix shared with that conversation's previous request, rounded down to a chunk multiple unless "unaligned resume" is on. Slots are never shared across conversations.</li>
-      <li><b>Slot lanes + paged pool.</b> A few <b>lanes</b> per stage are the contiguous KV buffers the attention kernels run on (fixed 1M each, or sized per request in an arena). All other memory is a <b>paged pool</b>: content-addressed pages shared by every conversation that has the same prefix, evicted by exact least-recently-used order. Before a request runs, its cached prefix is copied from the pool into its lane; afterwards the new tokens are copied back. The copies are DRAM-bound, overlapped with compute, and charged 25% for bandwidth contention.
+      <li><b>Slot lanes + paged pool.</b> A few <b>lanes</b> per stage are the contiguous KV buffers the attention kernels run on (fixed 1M each, or sized per request in an arena). All other memory is a <b>paged pool</b>: content-addressed pages shared by every conversation that has the same prefix, evicted by exact least-recently-used order. Before a request runs, its cached prefix is copied from the pool into its lane; afterwards the new tokens are copied back. The copies are DRAM-bound. By default they run on the stage before the chunk (sequential); double or triple buffering overlaps them with compute and charges 25% of their time for bandwidth contention.
         <ul>
           <li><b>Lane table ("Lane table" control).</b>
             <ul>
               <li><b>Per stage (default):</b> each stage allocates a lane only while it works through the request's chunks. That's about 1–3 chunks' worth of requests per stage.</li>
-              <li><b>Global, like today's slot_id:</b> a lane is held on every stage for the request's whole trip through the pipeline, so you need roughly stages × requests-per-chunk lanes. On the best 4-galaxy config, global lanes cap goodput near 25k instead of 45k unless the arena grows to about 8M tokens.</li>
+              <li><b>Global, like today's slot_id:</b> a lane is held on every stage for the request's whole trip through the pipeline, so you need stages × requests-per-batch lanes, and its copies can only be sequential. On the best 4-galaxy config a global lane table drops goodput from 45.1k to 13.6k.</li>
               <li>Each stage keeps its own KV tensors, so a per-stage table is feasible. It is a prerequisite for combining the pool with batching.</li>
             </ul>
           </li>
+          <li><b>Lanes per stage.</b> With a per-stage lane table a stage works on one chunk at a time, so it needs one lane per request in that chunk: 1 without batching, up to the chunk units per batch with batching. Double and triple buffering multiply that by 2 and 3. The count is derived from these settings; with batching it can be overridden (and must be with the variable layout, which has no chunk units), and it then caps the requests per batch. Each extra 1M lane comes out of the paged pool, so fewer lanes usually win: at 4 galaxies (no SSD tier) one lane beats three by 2–4%, and eight lanes cost 13–22% with batching.</li>
           <li><b>Pool copies ("Pool copies" control).</b>
             <ul>
-              <li><b>Double-buffered (default):</b> copies overlap compute, and 25% of their time is charged for DRAM sharing. A lane stays held for its own copy-out and for the next occupant's copy-in. The peak is about 2× the computing lanes, briefly.</li>
-              <li><b>Sequential:</b> copy-out, copy-in, then prefill. The full copy time goes on the stage; lanes are held only while computing.</li>
+              <li><b>Sequential (default):</b> copy-out, copy-in, then prefill. The full copy time goes on the stage; lanes are held only while computing.</li>
+              <li><b>Double-buffered:</b> copies overlap compute, and 25% of their time is charged for DRAM sharing. A lane stays held for its own copy-out and for the next occupant's copy-in. The peak is about 2× the computing lanes, briefly. The study's pool feature uses this mode.</li>
               <li><b>Triple-buffered:</b> next batch copying in, current computing, previous copying out, each for a whole chunk period. The peak is 3×.</li>
               <li>Copies take about 1.4 ms per stage for a median 140k-token prefix and about 10 ms for 1M, against a 50–120 ms chunk. On the best configs the three modes differ by about 1%; with fixed 1M lanes, triple buffering costs more memory.</li>
             </ul>
@@ -493,7 +498,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       </li>
       <li><b>SSD KV tier = offloading KV to NVMe drives on the galaxy hosts.</b>
         <ul>
-          <li><b>Mechanism.</b> When the device pool evicts a page, it is written to SSD instead of being dropped. A later hit on it is read back into the request's lane while the request waits in the queue. The SSD tier evicts least-recently-used too. Write-backs and fetches share one bandwidth per galaxy: the lower of the drives' and PCIe's. Index keys are stored once on SSD, not per TP column.</li>
+          <li><b>Static slots.</b> When a slot is reclaimed, its conversation's KV is written to SSD (the new occupant waits for the write-back), and that conversation's next request reads the prefix it shares back before it is admitted. One copy per conversation: nothing is shared between conversations, unlike pool pages. On today-C (4 galaxies, unaligned, round robin), 1 TB per galaxy lifts goodput from 3.3k to 16.4k; the pool with one lane and the same SSD reaches 24.9k.</li>
+          <li><b>Mechanism (pool and paging).</b> When the device pool evicts a page, it is written to SSD instead of being dropped. A later hit on it is read back into the request's lane while the request waits in the queue. The SSD tier evicts least-recently-used too. Write-backs and fetches share one bandwidth per galaxy: the lower of the drives' and PCIe's. Index keys are stored once on SSD, not per TP column.</li>
           <li><b>Defaults:</b> 1 TB and 64 GB/s per galaxy. These are placeholders carried over from the earlier host-DRAM tier, not SSD specs; set the real drive capacity and bandwidth.</li>
           <li><b>What matters.</b> Capacity matters much more than bandwidth. At 8 TB per galaxy the results match an infinite cache; dropping bandwidth from 64 to 16 GB/s costs at most 13%.</li>
           <li><b>Not modelled:</b> SSD write endurance, read/write asymmetry, and per-IO latency. The tier is an ideal page DMA at one bandwidth.</li>
@@ -522,7 +528,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li>With it off, small chunks collapse. Chunk 2048 becomes the best, and it is 2–14% below the de-duplicated best.</li>
         </ul>
       </li>
-      <li><b>Chunk sized to its tokens</b> (on by default). A batched chunk is costed at the tokens it holds, a multiple of the chunk size (fixed layout) or of 32·SP (variable layout). This assumes a compiled trace for every size up to the budget.
+      <li><b>Dynamic batch size</b> (on by default). Decides what a batch that is not full costs, e.g. a single request. On, it runs at the tokens it holds, rounded up to whole chunks (fixed layout) or 32·SP (variable layout), as ops do without tracing. Off, it is padded to the full budget, as a traced build with one fixed shape must be.
         <ul>
           <li>Off, every batched chunk has one static budget-sized shape. A partly filled batch pays for the whole budget in every token-proportional op and in the stage-to-stage send. Routed MoE ops still trim to the real tokens, as they do for a padded chunk tail today.</li>
           <li>With few requests per batch this hurts large budgets: on today's 4-galaxy config with pool and SSD tier, a static 16k shape drops 25.0k → 14.9k, below no batching (21.5k).</li>
@@ -532,10 +538,10 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Prefetch of KV-prefix gathers</b> (off by default). The cached-prefix gather does not depend on the current chunk, so it can overlap the layer's non-collective compute: projections, experts, and the other requests' attention. Only the part beyond that window stays exposed.
         <ul>
           <li>It is worth 0.2–1.3% on AgentX. At 8 galaxies the bottleneck is the single-dense-layer stages, where compute already covers most of the gather.</li>
-          <li>Batches average only 2–3 requests per chunk, so the gathers are small next to the layer.</li>
+          <li>Batches average only 2–3 requests, so the gathers are small next to the layer.</li>
         </ul>
       </li>
-      <li><b>Queue order.</b> First-come-first-served, or shortest-first with 30 s aging.</li>
+      <li><b>Scheduling.</b> Round robin (default, as tt-d-gen): a request takes at most one token budget per turn, then goes to the back of the queue. Run to completion: oldest first, or shortest first with 30 s aging; the study uses run to completion.</li>
       <li><b>Memory per stage.</b> Weights (bf4 experts, bf8 attention, bf16 shared expert and dense MLP; embedding on the first stage, LM head on the last) + a reserve per chip (default 3 GB) + activation buffers for the largest chunk. The remainder is KV. A replica's KV capacity is the minimum over its stages, because every token needs KV in every layer.</li>
     </ul>
 
@@ -543,7 +549,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <ul>
       <li><b>Slot lanes + paged pool:</b> replaces static slots (see KV cache): 4 fixed 1M lanes per stage.</li>
       <li><b>Variable-size lanes (arena):</b> lanes allocated at the request's actual length from a contiguous arena (2-8M tokens) instead of 1M each.</li>
-      <li><b>SSD KV tier:</b> see KV cache. It requires the paged pool or full paging.</li>
+      <li><b>SSD KV tier:</b> see KV cache. In the study it requires the paged pool; the simulator also supports it behind static slots.</li>
       <li><b>Not a feature: bounded dense gather.</b> Earlier versions listed bounding the dense ring-joint gather to [0, kv_len) as a P0 feature. The op already does this (tt-metal #47539), so it is part of today's baseline, and the old whole-lane behaviour is only a sensitivity row.</li>
       <li><b>index_k stored once:</b> the index-key cache is kept on one TP column instead of all four, and gathered when needed. This cuts KV size from 2112 to 1344 B per token per layer.</li>
       <li><b>index_k bf8:</b> the index-key cache in bf8 instead of bf16. It is the runner's default dtype, but the measured runs used bf16, and it needs an accuracy check.</li>
@@ -586,13 +592,13 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <h2 id="m-read">Reading the Explore tab</h2>
     <ul>
       <li><b>Loading.</b> On load, the charts show the precomputed baseline (<span class="mono">today-C</span>). <b>Run sweep</b> simulates your configuration at every concurrency in the grid, in your browser, in about 5-30 s. It also runs the same configuration with an infinite cache, unless you untick that option.</li>
-      <li><b>Tiles.</b> Goodput; goodput with an infinite cache; TTFT p50/p90 and hit rate at the goodput point; the peak useful throughput regardless of TTFT; wasted compute (the share of processed tokens that is re-prefill or padding, the complement of the useful share in "Where processed tokens go"); requests per chunk at the goodput point and at the peak.</li>
+      <li><b>Tiles.</b> Goodput; goodput with an infinite cache; TTFT p50/p90 and hit rate at the goodput point; the peak useful throughput regardless of TTFT; wasted compute (the share of processed tokens that is re-prefill or padding, the complement of the useful share in "Where processed tokens go"); requests per batch at the goodput point and at the peak.</li>
       <li><b>Charts</b> share a log concurrency axis:
         <ul>
           <li>useful tok/s;</li>
           <li>p90 TTFT on a log scale, with the SLO line;</li>
           <li>hit rate;</li>
-          <li>requests per chunk (batch fill). It stays near 1 on a lightly loaded pipeline and climbs only as the bottleneck stage nears saturation. At the same concurrency, a smaller cache shows fuller batches because re-prefill makes each request longer.</li>
+          <li>requests per batch (batch fill). A batch is one pass through the pipeline: without batching it carries one request's chunk, so the value is 1; with batching it holds up to the token budget from several requests. It stays near 1 on a lightly loaded pipeline and climbs only as the bottleneck stage nears saturation. At the same concurrency, a smaller cache shows fuller batches because re-prefill makes each request longer.</li>
         </ul>
         "Pin as comparison" keeps a run as a third line.</li>
       <li><b>Copy link.</b> Copies a URL holding every setting that differs from the defaults (plus SLO, concurrency grid and the infinite-cache option); the address bar also tracks it. Opening the link loads that configuration and runs the sweep.</li>
@@ -695,7 +701,7 @@ function mkWorker() {
 
 // ---------------------------------------------------------------- form <-> cfg
 const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'batchDynShape', 'attn', 'kvDedup', 'prefetchKV', 'policy',
-  'cache', 'laneScope', 'copyMode', 'lanes', 'laneArena', 'arenaTokens', 'unaligned', 'hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'duration', 'seed'];
+  'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'unaligned', 'hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'duration', 'seed'];
 const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'lanes', 'arenaTokens', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'reserveGB', 'decodeTps', 'duration', 'seed']);
 function setForm(cfg) {
   const c = Object.assign({}, SIM.DEFAULTS, cfg);
@@ -718,6 +724,7 @@ function getCfg() {
     c[f] = v;
   }
   if (c.split === 'custom') c.split = $('splitCustom').value.split(',').map((x) => Number(x.trim())).filter((x) => x > 0);
+  if (!c.lanesOverride) c.lanes = SIM.DEFAULTS.lanes; // derived; the field only shows the count
   return c;
 }
 function syncUi() {
@@ -725,11 +732,30 @@ function syncUi() {
   $('splitRow').hidden = $('split').value !== 'custom';
   const pool = $('cache').value === 'pool', paged = pool || $('cache').value === 'paging';
   for (const id of ['lanes', 'laneArena', 'laneScope', 'copyMode']) $(id).disabled = !pool;
-  for (const id of ['hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy']) $(id).disabled = !paged;
+  // the SSD tier works behind every finite cache: pool / paging pages, or whole static slots
+  for (const id of ['hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy']) $(id).disabled = $('cache').value === 'inf';
+  // a global lane is reserved for the whole pipeline trip: buffering its copies gains nothing, so sequential only
+  if (pool && $('laneScope').value === 'global') { $('copyMode').value = 'sequential'; $('copyMode').disabled = true; }
   $('arenaTokens').disabled = !pool || !$('laneArena').checked;
   $('lanes').disabled = !pool || $('laneArena').checked;
+  // every cache can batch; static slots need requests per batch x stages slots (makePlan reports out of memory)
+  $('batch').disabled = false; $('batchHint').hidden = $('cache').value !== 'slots';
   $('budget').disabled = !$('batch').checked; $('attn').disabled = !$('batch').checked; $('batchDynShape').disabled = !$('batch').checked;
   $('unaligned').disabled = $('layout').value === 'var';
+  // pool lanes per stage (as makePlan): derived = copy-mode buffers x requests per batch; the override is for batching
+  // on the pool only, and variable-layout batching (no chunk units) must override
+  const fixedLanes = pool && !$('laneArena').checked, batched = $('batch').checked;
+  const canOverride = fixedLanes && batched, mustOverride = canOverride && $('layout').value === 'var';
+  if (!canOverride) $('lanesOverride').checked = false;
+  if (mustOverride) $('lanesOverride').checked = true;
+  $('lanesOverride').disabled = !canOverride || mustOverride;
+  $('lanes').disabled = !fixedLanes || !$('lanesOverride').checked;
+  if (fixedLanes && !$('lanesOverride').checked) {
+    const chunk = Number($('chunk').value), budget = Number($('budget').value);
+    const buffers = { sequential: 1, double: 2, overlap3: 3 }[$('copyMode').value] || 1;
+    const r = batched ? Math.max(1, Math.floor(Math.max(budget, chunk) / chunk)) : 1;
+    $('lanes').value = String($('laneScope').value === 'stage' ? buffers * r : Number($('stages').value) * r);
+  }
   // with batching on a variable layout the token budget is the chunk size; the chunk field is unused
   const chunkUnused = $('batch').checked && $('layout').value === 'var';
   $('chunk').disabled = chunkUnused; $('chunkHint').hidden = !chunkUnused;
@@ -786,7 +812,7 @@ function applyUrl() {
   const cfg = {}, bad = [];
   for (const f of FIELDS) {
     if (!q.has(f)) continue;
-    const s = q.get(f), el = $(f);
+    const s = f === 'policy' && q.get(f) === 'fcfs' ? 'rtc' : q.get(f), el = $(f); // old name of 'rtc'
     const custom = f === 'split' && /^[\d,]+$/.test(s);
     if (el.tagName === 'SELECT' && !custom && ![...el.options].some((o) => o.value === s)) { bad.push(`${f}=${s}`); continue; }
     if (NUMS.has(f) && !Number.isFinite(Number(s))) { bad.push(`${f}=${s}`); continue; }
@@ -815,7 +841,10 @@ function updatePlan() {
   const fatal = plan.errors.filter((x) => !x.startsWith('no profile'));
   $('cfgErr').hidden = !fatal.length; $('runBtn').disabled = !!fatal.length || $('runBtn').dataset.busy === '1';
   if (fatal.length) {
-    $('cfgErr').innerHTML = `<b>This configuration cannot run:</b> ${esc(fatal.join('; '))}. Adjust galaxies, replicas, mesh or stages (stages × chips per stage must fit in 32 × galaxies / replicas chips), or set the layer split to auto.`;
+    const fix = fatal.some((x) => x.startsWith('out of memory'))
+      ? 'Use a smaller token budget or a larger chunk (fewer requests per batch), fewer stages, or another KV residency.'
+      : 'Adjust galaxies, replicas, mesh or stages (stages × chips per stage must fit in 32 × galaxies / replicas chips), or set the layer split to auto.';
+    $('cfgErr').innerHTML = `<b>This configuration cannot run:</b> ${esc(fatal.join('; '))}. ${fix}`;
     $('planKv').innerHTML = ''; $('planStages').innerHTML = ''; $('planNote').textContent = '';
     return;
   }
@@ -890,7 +919,7 @@ function drawTriple(ids, series, slo) {
   lineChart($(ids[0]), series.map((s) => ({ name: s.name, color: s.color, points: s.pts.map((p) => ({ x: p.conc, y: p.usefulTps })) })), { yFmt: fmtK });
   lineChart($(ids[1]), series.map((s) => ({ name: s.name, color: s.color, points: s.pts.map((p) => ({ x: p.conc, y: p.ttftP90 })) })), { yFmt: fmtS, yLog: true, ref: slo });
   lineChart($(ids[2]), series.map((s) => ({ name: s.name, color: s.color, points: s.pts.map((p) => ({ x: p.conc, y: p.hitRate })) })), { yFmt: (v) => pct(v), yMin: 0, yMax: 1 });
-  // requests per chunk: batch fill, grows only as the bottleneck stage nears saturation
+  // requests per batch (one pipeline pass): batch fill, grows only as the bottleneck stage nears saturation
   if (ids[3]) lineChart($(ids[3]), series.map((s) => ({ name: s.name, color: s.color, points: s.pts.filter((p) => p.avgSegsPerChunk != null).map((p) => ({ x: p.conc, y: p.avgSegsPerChunk })) })), { yFmt: (v) => v.toFixed(1), yMin: 0 });
 }
 
@@ -927,7 +956,7 @@ function render() {
     ['Hit rate there', a ? pct(a.hitRate, 1) : '–', 'prefix-cache hit, token-weighted', a ? `∞-cache ${pct(a.infHitRate, 1)}` : ''],
     ['Peak useful', R && R.peak ? fmtK(R.peak.usefulTps) : '–', 'any TTFT', R && R.peak ? `C = ${R.peak.conc}, p90 ${fmtS(R.peak.ttftP90)} s` : ''],
     ['Wasted compute', sp && sp.proc ? pct((sp.rep + sp.pad) / sp.proc, 1) : '–', bp ? `of processed tokens, at C = ${bp.conc}` + (a ? '' : ' (peak)') : 'of processed tokens', sp && sp.proc ? `re-prefill ${pct(sp.rep / sp.proc, 1)} · padding ${pct(sp.pad / sp.proc, 1)}` : ''],
-    ['Requests per chunk', a ? a.avgSegsPerChunk.toFixed(2) : '–', 'average, at the goodput point', a ? `chunk ${Math.round(a.avgChunkTok)} tok, busy ${pct(a.maxUtil)}` + (R.peak && R.peak !== a ? ` · at peak ${R.peak.avgSegsPerChunk.toFixed(2)}` : '') : ''],
+    ['Requests per batch', a ? a.avgSegsPerChunk.toFixed(2) : '–', 'average, at the goodput point (1 without batching)', a ? `batch ${Math.round(a.avgChunkTok)} tok, busy ${pct(a.maxUtil)}` + (R.peak && R.peak !== a ? ` · at peak ${R.peak.avgSegsPerChunk.toFixed(2)}` : '') : ''],
   ];
   $('tiles').innerHTML = tiles.map(([k, v, s, d]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="k">${s}</div><div class="d">${d}</div></div>`).join('');
   // breakdown

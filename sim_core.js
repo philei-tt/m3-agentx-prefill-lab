@@ -355,30 +355,58 @@
     boundedDense: true,    // dense ring-joint gathers [0, kv_len) (op-bounded since #47539); false = whole lane capacity
     msaLocal: false,       // MSA: SP-local indexer + top-k merge, fetch only selected K/V blocks (no prefix all-gather)
     idxBf16: true, idxDerep: false, // index_k cache dtype / de-replicated over TP (today: bf16 x TP replicas)
-    chunk: 5120, layout: 'fixed', batch: false, budget: 16384, attn: 'seq', policy: 'fcfs',
+    chunk: 5120, layout: 'fixed', batch: false, budget: 16384, attn: 'seq', policy: 'rr',
     // kvDedup: a request that takes several C-units of a batched fixed-layout chunk makes ONE attention call (one
     //   gather of its cached prefix); false = one call and one prefix gather per C-unit (today's kernels process
     //   one chunk at a time). prefetchKV: overlap the KV-prefix gathers with the layer's non-collective compute.
     kvDedup: true, prefetchKV: false,
-    // batchDynShape: a batched chunk is costed at the tokens it holds (a multiple of the chunk / 32*SP granule), i.e.
-    //   traces compiled for every size up to the budget; false = one static budget-sized shape, padded when not full
+    // batchDynShape: a batch that is not full (e.g. a single request) runs at the tokens it holds (whole chunks /
+    //   32*SP granules), as ops do without tracing; false = padded to the full budget, as a traced build with one
+    //   fixed shape must be
     batchDynShape: true,
     cache: 'slots',        // slots | pool | paging | inf
-    lanes: 3, laneScope: 'stage', laneLen: M3.maxCtx, laneArena: false, arenaTokens: 4e6,
+    // pool lanes per stage, derived from r = the most requests a batch (one pipeline pass) holds (1 without
+    //   batching, the chunk units per batch with fixed-layout batching; every request in a batch needs its own lane)
+    //   and b = the buffers of the copy mode (sequential 1, double 2, overlap3 3): per-stage lane table = b x r (a
+    //   stage works on one batch at a time); global lane table = stages x r (a lane is held for the whole trip
+    //   through the pipeline, one batch per stage in flight; sequential copies only, since a lane reserved for the
+    //   whole trip gains nothing from buffering). lanesOverride (batching on
+    //   the pool only) sets `lanes` instead; variable-layout batching has no chunk units, so it must override. Arena
+    //   lanes and the other caches ignore the count and the override.
+    lanes: 3, lanesOverride: false, laneScope: 'stage', laneLen: M3.maxCtx, laneArena: false, arenaTokens: 4e6,
     slotLen: M3.maxCtx, unaligned: false,
     // pool copy-in (cached prefix pool->lane) / copy-out (new KV lane->pool):
-    //   'sequential' = copy-out, copy-in, then prefill: full copy time on the stage, lanes held only while computing
+    //   'sequential' = (default) copy-out, copy-in, then prefill: full copy time on the stage, lanes held only while
+    //                  computing
     //   'double'     = double-buffered: copies overlap compute (copyContention of their time is charged for DRAM
     //                  sharing); a lane is held for its own copy-out after the last chunk plus the next occupant's
     //                  copy-in before its first chunk (peak ~2x the computing lanes, briefly)
     //   'overlap3'   = static triple buffering: next batch copying in, current computing, previous copying out, each
     //                  for a whole chunk period (peak 3x)
-    copyMode: 'double', copyContention: 0.25,
+    copyMode: 'sequential', copyContention: 0.25,
     hostTier: false, hostGBPerGalaxy: 1024, pcieGBsPerGalaxy: 64,
     reserveGB: 3, expertImb: IMB0, maxInflight: 0,
     concurrency: 64, decodeTps: 180, duration: 1800, seed: 1, idleCap: 10, startMin: 0, startMax: 1, maxWarmup: 1e6,
     gapCap: Infinity,      // AgentX forbids capping recorded idle gaps (only the 10 s system-idle cap applies)
+    // policy: 'rr' (default) = round robin, see below; 'rtc' = run to completion (no preemption), oldest first
+    //   ('fcfs', its old name, is still accepted): every chunk continues the oldest started request, new requests
+    //   start only when no started one has tokens left (batched: started requests first, new ones fill the leftover
+    //   room); the study and the configs built from it (study.js withFeatures) use 'rtc';
+    //   'srpt' = also run to completion, with the waiting queue sorted shortest-new-first (srptMaxWait s of aging);
+    //   'rr' = round robin over the started requests (tt-d-gen PrefillQueue/PrefillWriter): a request is admitted
+    //   (slot/lane acquired) at the back of the queue; each turn the front request takes one chunk, or with batching
+    //   as many of the batch's remaining C-units as it can fill (one attention call), and goes to the back if it has
+    //   tokens left (it is never split into two runs within one batch).
     srptMaxWait: 30,
+    // Round robin on the pool (policy 'rr', cache 'pool'). A lane is a per-stage KV slot the attention kernels run on
+    //   (fixed laneLen, or request-sized in the arena). Every turn copies the segment's new KV out to the pool, where
+    //   the partial KV stays pinned until the request finishes, so a lane never holds the only copy and can be handed
+    //   to another request at any turn. The lane count is the same as for the other policies (see `lanes`).
+    //   Copy-in: a request whose lane still holds its context (not handed to another request since its last turn)
+    //     reuses it without a copy-in; on a miss it takes a free lane, else the least recently used one, and copies
+    //     its whole context so far in. Arena lanes always copy in.
+    //   With the pool, and with paging, round robin admits a request only while the pool can hold every in-progress
+    //   request in full (like tt-d-gen, where admission needs a free slot and in-flight slots are never evicted).
   };
 
   function kvBytesPerTokenLayer(cfg, tp) { // whole stage, physical
@@ -453,6 +481,10 @@
     // largest chunk: the budget when batching on a variable layout, whole chunks otherwise
     const Tchunk = cfg.batch ? (cfg.layout === 'var' ? cfg.budget : Math.max(cfg.budget, cfg.chunk)) : cfg.chunk;
     const Tmax = Tchunk;
+    // pool lanes per stage (see DEFAULTS.lanes): buffers x the most requests per batch, or lanesOverride
+    const laneBuffers = cfg.copyMode === 'overlap3' ? 3 : cfg.copyMode === 'double' ? 2 : 1;
+    const reqsPerBatch = !cfg.batch ? 1 : cfg.layout === 'var' ? 0 : Math.max(1, Math.floor(Tchunk / cfg.chunk));
+    const fixedLanes = cfg.cache === 'pool' && !cfg.laneArena;
     // handoff: measured = blocking send + hop latency (fitted, per chunk); async = link-rate transfer, overlapped
     const actXfer = (T) => T * M3.E * BF16 / (P * HW.linkUni * 0.5) * 1e3; // ms, each chip ships its shard
     const blockMs = (T) => (cfg.asyncHandoff ? 0 : Math.max(0, pm.block[0] + pm.block[1] * T / 1000));
@@ -505,18 +537,35 @@
     if (cfg.cache === 'slots') { nSlots = Math.floor(capTok / cfg.slotLen); lanes = nSlots; }
     else if (cfg.cache === 'pool') {
       if (cfg.laneArena) { arena = Math.min(capTok, cfg.arenaTokens); poolTok = capTok - arena; }
-      else { lanes = cfg.lanes; poolTok = capTok - cfg.lanes * cfg.laneLen; }
+      else {
+        const r = Math.max(1, reqsPerBatch);
+        lanes = cfg.lanesOverride ? cfg.lanes : cfg.laneScope === 'stage' ? laneBuffers * r : S * r;
+        poolTok = capTok - lanes * cfg.laneLen;
+      }
       if (poolTok < 0) errors.push('lanes do not fit in memory');
     } else if (cfg.cache === 'paging') poolTok = capTok;
     else poolTok = Infinity;
     if (cfg.cache === 'slots' && nSlots < 1) errors.push('no 1M slot fits in memory');
+    // static slots: a slot is held for the request's whole trip through the pipeline (today's slot_id), so a full
+    // pipeline has (requests per batch) x (stages) requests in flight, each in its own 1M slot. A variable-layout
+    // batch has no chunk units: up to budget / (32*SP) requests
+    if (cfg.cache === 'slots') {
+      const r = !cfg.batch ? 1 : cfg.layout === 'var' ? Math.floor(Tchunk / (32 * sp)) : reqsPerBatch;
+      if (r * S > nSlots) errors.push(`out of memory: ${r} requests per batch x ${S} stages = ${r * S} slots in flight, but only ${nSlots} 1M slots fit`);
+    }
+    // the override only applies to fixed pool lanes (other caches have none and ignore it, as they ignore `lanes`,
+    // so a pool config can be re-run with cache 'inf' as is); without batching the count is derived
+    if (cfg.cache === 'pool' && cfg.laneScope === 'global' && cfg.copyMode !== 'sequential') errors.push('a global lane table holds the lane for the whole pipeline trip, so it allows only sequential copies (one buffer)');
+    if (cfg.lanesOverride && cfg.cache === 'pool' && !cfg.batch) errors.push('overriding the lane count needs batching (without it the count is derived)');
+    if (fixedLanes && cfg.batch && reqsPerBatch === 0 && !cfg.lanesOverride) errors.push('variable-layout batching on the pool needs the lane count set (lanesOverride)');
+    if (cfg.lanesOverride && !(cfg.lanes >= 1)) errors.push('the lane count must be at least 1');
     // every buffer that must hold a whole request has to fit the largest AgentX request (990,016 tokens)
     if (cfg.cache === 'slots' && cfg.slotLen < MAX_REQ) errors.push(`slots must hold the largest request (${MAX_REQ} tokens)`);
     if (cfg.cache === 'pool' && !cfg.laneArena && cfg.laneLen < MAX_REQ) errors.push(`lanes must hold the largest request (${MAX_REQ} tokens)`);
     if (cfg.cache === 'pool' && cfg.laneArena && arena < MAX_REQ) errors.push(`the lane arena must hold the largest request (${MAX_REQ} tokens)`);
     // host copies do not need the TP replicas of index_k (re-broadcast on fetch)
     const kvbHost = kvBytesPerTokenLayer(Object.assign({}, cfg, { idxDerep: true }), tp);
-    const hostTok = cfg.hostTier && (cfg.cache === 'pool' || cfg.cache === 'paging') ? cfg.hostGBPerGalaxy * GB * (cfg.galaxies / cfg.replicas) / (M3.L * kvbHost) : 0;
+    const hostTok = cfg.hostTier && cfg.cache !== 'inf' ? cfg.hostGBPerGalaxy * GB * (cfg.galaxies / cfg.replicas) / (M3.L * kvbHost) : 0;
     const gran = 32 * sp;
     return {
       cfg, sp, tp, P, S, counts, stages, eff, lat, layer, stageOv, embedMs, blockMs, hopMs, errors,
@@ -524,7 +573,8 @@
       // time (ms) to copy `tok` tokens of KV between pool and lane on the stage holding the most layers
       copyMs: (tok) => tok * Math.max(...stages.map((x) => x.n)) * kvbL / P * 2 / (HW.dram * 0.5) * 1e3,
       pcieBps: cfg.pcieGBsPerGalaxy * GB * (cfg.galaxies / cfg.replicas),
-      maxInflight: cfg.maxInflight > 0 ? cfg.maxInflight : 2 * S + 4,
+      // in-flight chunks: round robin on static slots mirrors tt-d-gen's ChunkFifo, max(8, 4 x max_slots)
+      maxInflight: cfg.maxInflight > 0 ? cfg.maxInflight : cfg.policy === 'rr' && cfg.cache === 'slots' ? Math.max(8, 4 * nSlots) : 2 * S + 4,
       tokensPerSec: null,
     };
   }
@@ -625,7 +675,7 @@
     constructor(TR, capBlocks, hostBlocks) {
       this.TR = TR; this.cap = capBlocks; this.hcap = hostBlocks;
       this.n = 0; this.tier = new Uint8Array(1 << 16); this.t = new Float64Array(1 << 16); this.pk = new Int32Array(1 << 16);
-      this.len = new Int32Array(1 << 16); this.dep = new Int32Array(1 << 16);
+      this.len = new Int32Array(1 << 16); this.dep = new Int32Array(1 << 16); this.pin = new Int32Array(1 << 16);
       this.used = 0; this.hused = 0; this.heap = new LruHeap(); this.hheap = new LruHeap(); this.path = new Int32Array(1024);
       this.evictedBlocks = 0;
     }
@@ -635,7 +685,7 @@
       if (this.n > this.tier.length) {
         let L = this.tier.length; while (L < this.n) L *= 2;
         const g = (A, C) => { const B = new C(L); B.set(A); return B; };
-        this.tier = g(this.tier, Uint8Array); this.t = g(this.t, Float64Array); this.pk = g(this.pk, Int32Array); this.len = g(this.len, Int32Array); this.dep = g(this.dep, Int32Array);
+        this.tier = g(this.tier, Uint8Array); this.t = g(this.t, Float64Array); this.pk = g(this.pk, Int32Array); this.len = g(this.len, Int32Array); this.dep = g(this.dep, Int32Array); this.pin = g(this.pin, Int32Array);
       }
       for (let i = 0; i < np; i++) {
         const q = p0 + i; const par = TR.pc_parent[q];
@@ -670,13 +720,22 @@
         else if (this.tier[k] === 2) { this.t[k] = now; this.hheap.push(now, this.dep[k], k); }
       }
     }
+    // pin the device-resident pieces from the root that overlap the first `blocks` blocks of the path (the cached
+    // prefix an in-progress request keeps reading); pinned pieces are skipped by evict() until unpinned.
+    // Returns the pinned keys; this.pinB = blocks of the prefix they cover.
+    pinPrefix(n, blocks) {
+      const keys = []; let acc = 0;
+      for (let i = n - 1; i >= 0 && acc < blocks; i--) { const k = this.path[i]; if (this.tier[k] !== 1) break; this.pin[k]++; keys.push(k); acc += this.len[k]; }
+      this.pinB = Math.min(acc, blocks); return keys;
+    }
+    unpin(keys) { for (const k of keys) if (--this.pin[k] === 0 && this.tier[k] === 1) this.heap.push(this.t[k], this.dep[k], k); }
     // space held by KV that is being written but not yet inserted (paging: pages written in place)
     reserve(blocks) { this.used += blocks; this.evict(); }
     unreserve(blocks) { this.used -= blocks; }
     evict() {
       while (this.used > this.cap && this.heap.n > 0) {
         const k = this.heap.pop(); const t = this.heap.ot;
-        if (this.tier[k] !== 1 || this.t[k] !== t) continue;
+        if (this.tier[k] !== 1 || this.t[k] !== t || this.pin[k] > 0) continue; // pinned: re-pushed by unpin()
         this.used -= this.len[k]; this.evictedBlocks += this.len[k];
         if (this.hcap > 0) { this.tier[k] = 2; this.hused += this.len[k]; this.hheap.push(t, this.dep[k], k); if (this.onDemote) this.onDemote(this.len[k]); }
         else this.tier[k] = 0;
@@ -696,9 +755,12 @@
   }
 
   // Static slots: a slot holds one stream's latest request; LRU over idle slots; busy slots cannot be evicted.
+  // onEvict(streamKey, blocks) is called with the evicted stream's KV (the SSD tier writes it back) and returns when
+  // that write-back ends; evictEnd holds it for the new occupant, which cannot overwrite the slot before then.
   class SlotCache {
-    constructor(N) { this.N = N; this.owner = new Int32Array(N).fill(-1); this.last = new Float64Array(N); this.busy = new Uint8Array(N); this.of = new Map(); this.evictions = 0; }
+    constructor(N) { this.N = N; this.owner = new Int32Array(N).fill(-1); this.last = new Float64Array(N); this.busy = new Uint8Array(N); this.blocks = new Float64Array(N); this.of = new Map(); this.evictions = 0; }
     acquire(streamKey, now) { // -> {slot, warm} or null
+      this.evictEnd = 0;
       let s = this.of.get(streamKey);
       if (s !== undefined) { if (this.busy[s]) return null; this.busy[s] = 1; return { slot: s, warm: true }; }
       let pick = -1, lru = Infinity;
@@ -708,17 +770,17 @@
         if (this.last[i] < lru) { lru = this.last[i]; pick = i; }
       }
       if (pick < 0) return null;
-      if (this.owner[pick] >= 0) { this.of.delete(this.owner[pick]); this.evictions++; }
+      if (this.owner[pick] >= 0) { this.of.delete(this.owner[pick]); this.evictions++; if (this.onEvict) this.evictEnd = this.onEvict(this.owner[pick], this.blocks[pick]); }
       this.owner[pick] = streamKey; this.of.set(streamKey, pick); this.busy[pick] = 1;
       return { slot: pick, warm: false };
     }
-    release(s, now) { this.busy[s] = 0; this.last[s] = now; }
+    release(s, now, blocks) { this.busy[s] = 0; this.last[s] = now; this.blocks[s] = blocks; }
   }
 
   // ------------------------------------------------------------------------------------------------------
   // The replay simulation
   // ------------------------------------------------------------------------------------------------------
-  const EV_READY = 1, EV_DONE = 2, EV_END = 3, EV_PUMP = 4, EV_LANE = 5, EV_FETCHED = 6;
+  const EV_READY = 1, EV_DONE = 2, EV_END = 3, EV_PUMP = 4, EV_LANE = 5, EV_FETCHED = 6, EV_SEG = 7;
 
   function simulate(TR, cal, cfgIn, opts) {
     opts = opts || {};
@@ -728,6 +790,11 @@
     const rnd = mulberry32(cfg.seed * 2654435761 >>> 0);
     const S = plan.S, B = 64;
     const ev = new EvHeap();
+    const rr = cfg.policy === 'rr';
+    const rrPool = rr && cfg.cache === 'pool'; // a lane per turn, the partial KV copied out to the pool every turn
+    // in-progress requests whose KV lives in the pool (round robin on the pool, or paging): their cached prefix is
+    // pinned and their new KV reserved, and admission is bounded by the pool
+    const pinHits = rrPool || (rr && cfg.cache === 'paging');
     let now = 0, t0 = null, tEnd = Infinity, primersLeft = 0, warmDone = false;
     let inflightReqs = 0; // queued + prefill + decode (system idle check)
     // replicas
@@ -735,19 +802,43 @@
     for (let r = 0; r < cfg.replicas; r++) {
       reps.push({
         id: r, free: new Float64Array(S), busy: new Float64Array(S), queue: [], active: [], exits: [], pumpAt: -1,
-        trees: 0, lanesUsed: 0, arenaUsed: 0,
+        trees: 0, lanesUsed: 0, arenaUsed: 0, progTok: 0, nProg: 0,
+        // round robin on fixed lanes: which request's context each lane holds, segments using it, last use
+        laneTab: rrPool && !cfg.laneArena ? Array.from({ length: plan.lanes }, () => ({ owner: null, busy: 0, t: -1 })) : null,
         pool: cfg.cache === 'slots' ? null : new PoolCache(TR, plan.poolTok / B, plan.hostTok / B),
         slots: cfg.cache === 'slots' ? new SlotCache(plan.nSlots) : null, pcieFree: 0,
       });
     }
     // device -> host demotions (write-back) occupy the same PCIe link as host -> device fetches
+    const pcieS = (blocks) => blocks * B * M3.L * plan.kvbHost / plan.pcieBps;
     for (const rp of reps) if (rp.pool && plan.hostTok > 0) {
-      rp.pool.onDemote = (blocks) => { rp.pcieFree = Math.max(rp.pcieFree, now) + blocks * B * M3.L * plan.kvbHost / plan.pcieBps; };
+      rp.pool.onDemote = (blocks) => { rp.pcieFree = Math.max(rp.pcieFree, now) + pcieS(blocks); };
+    }
+    // SSD tier behind static slots: an evicted slot's KV (its stream's latest request) is written to SSD, one copy per
+    // stream (no prefix sharing), LRU over hostTok; the stream's next request reads back the prefix it shares with it
+    for (const rp of reps) if (rp.slots && plan.hostTok > 0) {
+      rp.ssd = new Map(); rp.ssdUsed = 0; // streamKey -> blocks, in LRU order
+      rp.slots.onEvict = (key, blocks) => {
+        if (!(blocks > 0)) return 0;
+        rp.pcieFree = Math.max(rp.pcieFree, now) + pcieS(blocks);
+        rp.ssd.set(key, blocks); rp.ssdUsed += blocks;
+        for (const [k, b] of rp.ssd) { if (rp.ssdUsed * B <= plan.hostTok) break; rp.ssd.delete(k); rp.ssdUsed -= b; }
+        return rp.pcieFree;
+      };
+    }
+    const slotKey = (q) => q.tree.key * 4096 + (TR.req_stream[q.r] - q.tree.s0);
+    // read a stream's KV back from the SSD tier (the prefix the request shares with it); returns the fetch's end
+    function ssdFetch(q, rep, key) {
+      const stored = rep.ssd.get(key); rep.ssd.delete(key); rep.ssdUsed -= stored;
+      const blocks = Math.min(stored, TR.req_lcp_prev[q.r]);
+      q.ssdBlocks = blocks;
+      if (warmDone) st.hostTok += blocks * B;
+      const t = Math.max(now, rep.pcieFree) + pcieS(blocks); rep.pcieFree = t; return t;
     }
     // stats
     const st = { done: 0, useful: 0, newTok: 0, processed: 0, hitTok: 0, inTok: 0, infHitTok: 0, hostTok: 0, reprefill: 0, alignLoss: 0,
       ttft: [], chunks: 0, segs: 0, laneWait: 0, reqs: 0, primers: 0, warmupS: 0, idleWarps: 0, primerTok: 0,
-      gated: 0, gateWait: 0, legacyStarts: 0, skippedTraces: 0 };
+      gated: 0, gateWait: 0, legacyStarts: 0, skippedTraces: 0, rrSegs: 0, rrReuse: 0, rrCopyIn: 0 };
     let nextTrace = 0; const nsKey = { v: 0 };
     const scratch = new Float64Array(S);
 
@@ -829,7 +920,7 @@
       const q = mkReq(tree, r, true); tree.live++; ev.push(0, { e: EV_READY, q });
     }
     function mkReq(tree, r, isPrimer) {
-      return { r, tree, primer: isPrimer, tReady: 0, tStart: -1, tDone: 0, hit: 0, host: 0, rem: 0, pos: 0, lane: -1, slot: -1, started: false, fetchedAt: 0 };
+      return { r, tree, primer: isPrimer, tReady: 0, tStart: -1, tDone: 0, hit: 0, host: 0, rem: 0, pos: 0, lane: -1, slot: -1, started: false, fetchedAt: 0, laneIdx: -1 };
     }
     function dispatch(tree, r, t) {
       const q = mkReq(tree, r, false); tree.live++; ev.push(t, { e: EV_READY, q });
@@ -892,6 +983,10 @@
           ev.push(t, { e: EV_FETCHED, q }); return;
         }
       }
+      if (rep.ssd && !q.primer) { // static slots: the stream's KV is on SSD, not in a slot -> read it back before admission
+        const key = slotKey(q);
+        if (!rep.slots.of.has(key) && rep.ssd.has(key)) { const t = ssdFetch(q, rep, key); q.fetchedAt = t; ev.push(t, { e: EV_FETCHED, q }); return; }
+      }
       enqueue(q);
     }
     function enqueue(q) {
@@ -909,17 +1004,26 @@
     function tryStart(q, rep) { // acquire lane/slot, compute hit; false if blocked
       const tree = q.tree, r = q.r;
       if (rep.slots) {
-        const streamKey = tree.key * 4096 + (TR.req_stream[r] - tree.s0);
+        const streamKey = slotKey(q);
         const a = rep.slots.acquire(streamKey, now); if (!a) return false;
         q.slot = a.slot; q.laneCap = cfg.slotLen;
-        const lp = a.warm ? TR.req_lcp_prev[r] : 0;
+        if (rep.slots.evictEnd > (q.readyAt || 0)) q.readyAt = rep.slots.evictEnd; // previous occupant still writing back
+        // SSD tier: read back at READY, or now if the slot was evicted while the request was queued
+        if (!a.warm && !q.ssdBlocks && rep.ssd && rep.ssd.has(streamKey)) q.readyAt = Math.max(q.readyAt || 0, ssdFetch(q, rep, streamKey));
+        const lp = a.warm ? TR.req_lcp_prev[r] : q.ssdBlocks || 0;
         q.hitTok = hitTokens(q, lp);
       } else {
-        if (plan.lanes !== Infinity && rep.lanesUsed >= plan.lanes) return false;
         const need = TR.req_blocks[r] * B;
-        if (cfg.laneArena && cfg.cache === 'pool') { if (rep.arenaUsed + need > plan.arena) return false; rep.arenaUsed += need; q.arena = need; }
-        if (plan.lanes !== Infinity) rep.lanesUsed++;
-        q.lane = 1;
+        if (pinHits) { // the pool must hold every in-progress request in full (pinned prefix + new KV)
+          if (rep.nProg > 0 && rep.progTok + need > plan.poolTok) return false;
+          rep.progTok += need; rep.nProg++; q.prog = need;
+        }
+        if (rrPool) { /* lanes are taken per turn (laneGet) */ } else {
+          if (plan.lanes !== Infinity && rep.lanesUsed >= plan.lanes) return false;
+          if (cfg.laneArena && cfg.cache === 'pool') { if (rep.arenaUsed + need > plan.arena) return false; rep.arenaUsed += need; q.arena = need; }
+          if (plan.lanes !== Infinity) rep.lanesUsed++;
+          q.lane = 1;
+        }
         // dense ring-joint scans the whole lane: fixed lanes are laneLen; arena lanes / paged kernels are request-sized
         q.laneCap = cfg.cache === 'pool' && !cfg.laneArena ? cfg.laneLen : need;
         // re-check the hit: the READY-time refresh does not pin, so pages may have been evicted (lost) or demoted to
@@ -933,6 +1037,7 @@
           if (warmDone) st.hostTok += extra * B;
         }
         q.hitTok = hitTokens(q, hitB);
+        if (pinHits) { q.pins = pool.pinPrefix(n, q.hitTok / B); q.pinTok = Math.min(pool.pinB * B, q.hitTok); }
         if (cfg.cache === 'paging' && plan.poolTok !== Infinity) { q.resv = (TR.req_blocks[r] * B - q.hitTok) / B; pool.reserve(q.resv); }
       }
       q.started = true; q.tStart = now;
@@ -974,6 +1079,32 @@
         q.first = false; q.pos += n; q.rem -= n; T += npad;
         return true;
       };
+      if (rr) {
+        // admit every waiting request that gets a slot/lane (oldest first; static slots skip a stream whose slot is busy) to
+        // the back of the round-robin queue (rep.active), then serve it from the front. A request that is not done
+        // goes to the back, behind everything waiting now. Batched, each popped request takes as many of the
+        // remaining C-units as it can fill, as one attention call, so it is never split into two runs in one batch.
+        if (rep.queue.length) {
+          const keep = []; let blocked = false;
+          for (const q of rep.queue) {
+            if (!blocked && tryStart(q, rep)) rep.active.push(q);
+            else { keep.push(q); if (!rep.slots) blocked = true; }
+          }
+          rep.queue = keep;
+        }
+        const again = [];
+        while (rep.active.length && room()) {
+          const q = rep.active[0];
+          if (rrPool && !laneGet(q, rep)) break; // no lane free: a lane release re-pumps
+          rep.active.shift();
+          take(q, budget - T);
+          if (rrPool) Object.assign(segs[segs.length - 1], q.seg);
+          if (q.rem > 0) again.push(q);
+          if (!cfg.batch) break;
+        }
+        for (const q of again) rep.active.push(q);
+        return segs.length ? { segs, T } : null;
+      }
       // 1) continue active requests (they hold lanes), in start order
       for (let i = 0; i < cands.length && room(); i++) {
         if (cands[i].rem > 0) take(cands[i], budget - T);
@@ -993,6 +1124,32 @@
       }
       rep.active = rep.active.filter((q) => q.rem > 0);
       return segs.length ? { segs, T } : null;
+    }
+    // round robin on the pool: a lane for one turn -> q.seg {lane, arena, miss}; false if none is free. The request's
+    // own lane is reused while it still holds its context (also while its previous segment is still copying out);
+    // otherwise a free lane, preferring one that holds nothing, else the least recently used. miss = copy the
+    // whole context in.
+    function laneGet(q, rep) {
+      if (cfg.laneArena) {
+        const a = TR.req_blocks[q.r] * B; if (rep.arenaUsed + a > plan.arena) return false;
+        rep.arenaUsed += a; q.seg = { lane: -1, arena: a, miss: true }; return true;
+      }
+      const L = rep.laneTab;
+      let pick = q.laneIdx >= 0 && L[q.laneIdx].owner === q ? q.laneIdx : -1;
+      const miss = pick < 0;
+      if (pick < 0) {
+        for (let i = 0; i < L.length; i++) {
+          if (L[i].busy) continue;
+          if (!L[i].owner) { pick = i; break; }
+          if (pick < 0 || L[i].t < L[pick].t) pick = i;
+        }
+        if (pick < 0) return false;
+        if (L[pick].owner) L[pick].owner.laneIdx = -1;
+        L[pick].owner = q; q.laneIdx = pick;
+      }
+      L[pick].busy++;
+      q.seg = { lane: pick, arena: 0, miss };
+      return true;
     }
     function pump(rep) {
       while (true) {
@@ -1023,6 +1180,14 @@
       if (copies) {
         let copyTok = 0;
         for (const s of segs) {
+          // round robin: copy the segment's new KV out, and the whole context so far in unless the lane holds it
+          if (rrPool) {
+            const ci = s.miss ? s.k : 0;
+            copyTok += ci + s.n; s.copyS = plan.copyMs(ci + s.n) / 1e3;
+            if (warmDone && !s.first) { st.rrSegs++; if (!s.miss) st.rrReuse++; }
+            if (warmDone) st.rrCopyIn += ci;
+            continue;
+          }
           if (s.first) { copyTok += s.q.hitTok; s.q.copyInS = plan.copyMs(s.q.hitTok) / 1e3; }
           if (s.last) { const nt = TR.req_blocks[s.q.r] * B - s.q.hitTok; copyTok += nt; s.q.copyOutS = plan.copyMs(nt) / 1e3; }
         }
@@ -1047,8 +1212,17 @@
         arr = end + hop;
       }
       heapPushNum(rep.exits, end);
+      if (opts.onChunk) opts.onChunk(now, segs); // test hook: the segments of every chunk, in issue order
       if (warmDone && end >= t0 && end <= tEnd) { st.chunks++; st.segs += segs.length; st.processed += T; }
       for (const s of segs) {
+        if (rrPool) { // every segment frees its lane (held for its copies, as below); the last one also inserts the KV
+          let hold = 0;
+          if (copies && cfg.copyMode === 'double') hold = s.copyS || 0;
+          else if (copies && cfg.copyMode === 'overlap3') hold = 2 * (scratch[0] / 1e3 + blk);
+          ev.push((cfg.laneScope === 'stage' ? end0 : end) + hold, { e: EV_SEG, q: s.q, rep, upto: s.k + s.n, last: s.last, arena: s.arena, lane: s.lane });
+          if (s.last) ev.push(end, { e: EV_DONE, q: s.q });
+          continue;
+        }
         if (s.last) {
           ev.push(end, { e: EV_DONE, q: s.q });
           // lane release: per-stage lanes when stage 0 finishes the last chunk, global lanes at prefill completion,
@@ -1076,12 +1250,31 @@
       const pool = rep.pool;
       if (q.resv) { pool.unreserve(q.resv); q.resv = 0; }
       const n = pool.walk(q.tree.ns, TR.req_leaf[q.r] - TR.tr_pc0[q.tree.trace]); pool.touch(n, now);
+      if (q.pins) { pool.unpin(q.pins); q.pins = null; }
+      if (q.prog) { rep.progTok -= q.prog; rep.nProg--; q.prog = 0; }
     }
     function onLaneFree(q, rep) { releaseLane(q, rep); insertKV(q, rep); }
+    // round robin on the pool: a segment's lane is free (it still holds the request's context until handed to another
+    // request); its new KV is now in the pool (reserved, i.e. pinned, until the whole request is inserted), beyond the
+    // part of the cached prefix that is pinned in place
+    function onSegFree(p) {
+      const q = p.q, rep = p.rep;
+      if (p.lane >= 0) {
+        const l = rep.laneTab[p.lane]; l.busy--; l.t = now;
+        if (p.last && l.owner === q) { l.owner = null; q.laneIdx = -1; }
+      }
+      if (p.arena) rep.arenaUsed -= p.arena;
+      if (p.last) insertKV(q, rep);
+      else if (!q.inserted && rep.pool && plan.poolTok !== Infinity) {
+        const tgt = Math.max(0, p.upto - (q.pinTok || 0)) / B;
+        if (tgt > (q.resv || 0)) { rep.pool.reserve(tgt - (q.resv || 0)); q.resv = tgt; }
+      }
+      pump(rep);
+    }
     function onDone(q) { // prefill complete (TTFT)
       const tree = q.tree, rep = tree.rep, r = q.r;
       q.tDone = now;
-      if (rep.slots) { rep.slots.release(q.slot, now); pump(rep); }
+      if (rep.slots) { rep.slots.release(q.slot, now, TR.req_blocks[r]); pump(rep); }
       else if (cfg.laneScope !== 'stage') insertKV(q, rep); // global lanes: KV visible at completion, lane freed by EV_LANE
       const inTok = TR.req_blocks[r] * B;
       if (q.primer) { st.primerTok += inTok - q.hitTok; primersLeft--; if (primersLeft === 0 && !warmDone) startProfiling(now); ev.push(now, { e: EV_END, q }); return; }
@@ -1160,6 +1353,7 @@
         case EV_END: onEnd(p.q); break;
         case EV_PUMP: if (p.rep.pumpAt === t) p.rep.pumpAt = -1; pump(p.rep); break;
         case EV_LANE: onLaneFree(p.q, p.rep); break;
+        case EV_SEG: onSegFree(p); break;
       }
     }
     // ---------- results
@@ -1181,6 +1375,9 @@
       gatedAtEnd: trees.reduce((a, tr) => { const u = new Set(); if (tr) for (const w of tr.waiters.values()) for (const g of w) u.add(g); return a + u.size; }, 0),
       warmupTimeout: !!st.warmupTimeout, eventCap: !!st.eventCap, events: evCount, duration: D,
       slotEvictions: reps.reduce((a, r) => a + (r.slots ? r.slots.evictions : 0), 0),
+      // round robin on the pool: share of continuation turns that found their context still in their lane, and the
+      // copy-in rate (tokens copied pool -> lane per second)
+      rrLaneReuse: st.rrSegs ? st.rrReuse / st.rrSegs : NaN, rrCopyInTps: st.rrCopyIn / D,
       reqLog: st.reqLog,
     };
   }
