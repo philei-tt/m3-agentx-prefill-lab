@@ -84,7 +84,12 @@ assert.strictEqual(lanesOf(Object.assign({ chunk: 2048 }, pool, { laneScope: 'gl
 assert.strictEqual(lanesOf(Object.assign({}, batched, { laneScope: 'global', copyMode: 'sequential' })), 16 * 8);
 assert.strictEqual(lanesOf(Object.assign({ chunk: 2048 }, pool, { lanes: 7 })), 2, '`lanes` is ignored without the override');
 assert.ok(SIM.makePlan(Object.assign({ chunk: 2048 }, pool, { lanesOverride: true }), cal).errors.some((e) => e.includes('overriding')), 'override without batching');
-assert.ok(SIM.makePlan({ cache: 'paging', batch: true, lanesOverride: true }, cal).errors.some((e) => e.includes('overriding')), 'override without the pool');
+// other caches have no lanes and ignore the override, so a batched pool config re-runs with cache 'inf' as is (the
+// page's and the study's infinite-cache comparison)
+for (const cache of ['inf', 'paging']) {
+  const p = SIM.makePlan(Object.assign({}, batched, { lanesOverride: true, lanes: 4, cache, hostTier: false }), cal);
+  assert.ok(!p.errors.length && p.lanes === Infinity, `override on ${cache}: ${p.errors}`);
+}
 // a variable-layout batch has no chunk units: the lane count (the most requests per batch) must be given
 const varBatched = Object.assign({}, batched, { layout: 'var' });
 assert.ok(SIM.makePlan(varBatched, cal).errors.some((e) => e.includes('lanesOverride')), 'var-layout batching without a lane count');

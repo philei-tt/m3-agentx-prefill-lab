@@ -369,7 +369,8 @@
     //   mode (sequential 1, double 2, overlap3 3): per-stage lane table = b x r (a stage works on one chunk at a
     //   time); global lane table = (stages + b - 1) x r (a lane is held for the whole trip through the pipeline, one
     //   chunk per stage in flight, plus the copy buffers). lanesOverride (batching on the pool only) sets `lanes`
-    //   instead; variable-layout batching has no chunk units, so it must override. Arena lanes ignore the count.
+    //   instead; variable-layout batching has no chunk units, so it must override. Arena lanes and the other caches
+    //   ignore the count and the override.
     lanes: 3, lanesOverride: false, laneScope: 'stage', laneLen: M3.maxCtx, laneArena: false, arenaTokens: 4e6,
     slotLen: M3.maxCtx, unaligned: false,
     // pool copy-in (cached prefix pool->lane) / copy-out (new KV lane->pool):
@@ -544,7 +545,9 @@
     if (cfg.cache === 'slots' && nSlots < 1) errors.push('no 1M slot fits in memory');
     // static slots run one request per chunk; every other cache (pool, paging, infinite) can batch
     if (cfg.batch && cfg.cache === 'slots') errors.push('batching is not supported with static slots');
-    if (cfg.lanesOverride && !(cfg.batch && cfg.cache === 'pool')) errors.push('overriding the lane count needs batching with the pool cache');
+    // the override only applies to fixed pool lanes (other caches have none and ignore it, as they ignore `lanes`,
+    // so a pool config can be re-run with cache 'inf' as is); without batching the count is derived
+    if (cfg.lanesOverride && cfg.cache === 'pool' && !cfg.batch) errors.push('overriding the lane count needs batching (without it the count is derived)');
     if (fixedLanes && cfg.batch && reqsPerChunk === 0 && !cfg.lanesOverride) errors.push('variable-layout batching on the pool needs the lane count set (lanesOverride)');
     if (cfg.lanesOverride && !(cfg.lanes >= 1)) errors.push('the lane count must be at least 1');
     // every buffer that must hold a whole request has to fit the largest AgentX request (990,016 tokens)
