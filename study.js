@@ -31,8 +31,9 @@ const FEATURES = [
 ];
 
 function scenarios() {
-  const base4 = { galaxies: 4, stages: 16, mesh: [2, 4], split: 'auto', chunk: 2048, cache: 'slots' };
-  const base8 = { galaxies: 8, stages: 32, mesh: [2, 4], split: 'auto', chunk: 2048, cache: 'slots' };
+  // run to completion: what results/study.json was computed with (the simulator's default is now round robin)
+  const base4 = { galaxies: 4, stages: 16, mesh: [2, 4], split: 'auto', chunk: 2048, cache: 'slots', policy: 'rtc' };
+  const base8 = { galaxies: 8, stages: 32, mesh: [2, 4], split: 'auto', chunk: 2048, cache: 'slots', policy: 'rtc' };
   return [
     { key: 'g4_k0', label: '4 galaxies, today\'s kernels', base: Object.assign({ opEff: 0 }, base4) },
     { key: 'g4_k1', label: '4 galaxies, roofline kernels', base: Object.assign({ opEff: 1 }, base4) },
@@ -42,7 +43,9 @@ function scenarios() {
 }
 
 function withFeatures(base, keys) {
-  const cfg = Object.assign({}, base);
+  // the study ran with run to completion: keep it unless a feature sets a policy (results/study.json stores bases
+  // without one)
+  const cfg = Object.assign({ policy: 'rtc' }, base);
   for (const k of keys) Object.assign(cfg, FEATURES.find((f) => f.key === k).cfg);
   return laneCount(cfg);
 }

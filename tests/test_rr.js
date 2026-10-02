@@ -51,7 +51,7 @@ function maxOpen(chunks) {
 
 // 1. unbatched 'rtc' runs every request to completion; round robin gives one chunk per turn and rotates
 for (const cache of ['slots', 'inf']) {
-  const f = trace({ cache }), r = trace({ cache, policy: 'rr' });
+  const f = trace({ cache, policy: 'rtc' }), r = trace({ cache, policy: 'rr' });
   assert.strictEqual(interleaved(f.chunks), 0, `rtc/${cache} interleaves requests`);
   assert.ok(interleaved(r.chunks) > 0, `rr/${cache} never interleaves`);
   assert.ok(r.chunks.every((ch) => ch.length === 1 && ch[0][1] <= 2048), `rr/${cache}: one chunk per turn`);
@@ -118,11 +118,15 @@ for (const cfg of [Object.assign({ chunk: 2048 }, pool), Object.assign({}, batch
   assert.ok(m.r.rrLaneReuse > 0 && m.r.rrLaneReuse < 1 && m.r.rrCopyInTps > 0);
 }
 
-// 4. the default policy is unchanged by the round-robin code (same results as without the option set)
+// 4. round robin is the default; 'fcfs' is the old name of 'rtc'; the study keeps run to completion
 {
-  const a = SIM.simulate(TR, cal, { concurrency: 64, duration: 300, chunk: 2048 });
-  const b = SIM.simulate(TR, cal, { concurrency: 64, duration: 300, chunk: 2048, policy: 'rtc' });
+  assert.strictEqual(SIM.DEFAULTS.policy, 'rr');
+  const a = SIM.simulate(TR, cal, { concurrency: 64, duration: 300, chunk: 2048, policy: 'rtc' });
+  const b = SIM.simulate(TR, cal, { concurrency: 64, duration: 300, chunk: 2048, policy: 'fcfs' });
   assert.strictEqual(a.usefulTps, b.usefulTps); assert.strictEqual(a.events, b.events);
+  const { withFeatures } = require('../study.js');
+  assert.strictEqual(withFeatures({ cache: 'slots' }, ['pool']).policy, 'rtc');
+  assert.strictEqual(withFeatures({ cache: 'slots' }, ['srpt']).policy, 'srpt');
 }
 
 console.log('test_rr: all checks passed');

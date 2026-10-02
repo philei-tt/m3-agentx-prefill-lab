@@ -218,8 +218,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row check"><input id="kvDedup" type="checkbox"><label for="kvDedup">One attention call per request per chunk (prefix gathered once)</label></div>
     <div class="hint">Off: with a fixed layout, each chunk-unit of a request makes its own call and re-gathers the cached prefix.</div>
     <div class="row check"><input id="prefetchKV" type="checkbox"><label for="prefetchKV">Prefetch KV-prefix gathers (overlap with compute)</label></div>
-    <div class="row"><label for="policy">Scheduling</label><select id="policy"><option value="rtc">run to completion, oldest first</option><option value="srpt">run to completion, shortest first (30 s aging)</option><option value="rr">round robin</option></select></div>
-    <div class="hint">Round robin (tt-d-gen): one chunk per turn (batched: as many chunk units as it can fill), then to the back. On the pool, a lane (per-stage KV slot, see KV cache) is taken per turn and the new KV is always copied out; a request whose lane still holds its context skips the copy-in.</div>
+    <div class="row"><label for="policy">Scheduling</label><select id="policy"><option value="rr">round robin</option><option value="rtc">run to completion, oldest first</option><option value="srpt">run to completion, shortest first (30 s aging)</option></select></div>
+    <div class="hint">Round robin (tt-d-gen): a request enqueues at most one token budget (one chunk without batching) per turn, then goes to the back of the queue, so a request with a long sequence cannot starve shorter ones.<br>Run to completion: a request keeps enqueuing token budgets until its whole sequence is processed, which can starve shorter requests waiting in the queue.</div>
   </fieldset>
   <fieldset>
     <legend>Traffic &amp; SLO</legend>
