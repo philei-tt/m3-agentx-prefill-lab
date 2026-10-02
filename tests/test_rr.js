@@ -71,7 +71,7 @@ for (const cache of ['slots', 'inf']) {
 // 3. round robin on pool lanes
 const pool = { cache: 'pool', laneScope: 'stage', copyMode: 'double', policy: 'rr' };
 const batched = Object.assign({ batch: true, chunk: 1024, budget: 8192, layout: 'fixed' }, pool);
-// 3a. lane count per stage (every policy): buffers of the copy mode x the most requests per chunk (1 unbatched, the
+// 3a. lane count per stage (every policy): buffers of the copy mode x the most requests per batch (1 unbatched, the
 //     chunk units per batch with fixed-layout batching); lanesOverride sets it, only with batching on the pool
 const lanesOf = (cfg) => SIM.makePlan(cfg, cal).lanes;
 for (const [copyMode, buf] of [['sequential', 1], ['double', 2], ['overlap3', 3]]) {
@@ -79,7 +79,7 @@ for (const [copyMode, buf] of [['sequential', 1], ['double', 2], ['overlap3', 3]
   assert.strictEqual(lanesOf(Object.assign({}, batched, { copyMode })), 8 * buf, `batched ${copyMode}`);
 }
 assert.strictEqual(lanesOf(Object.assign({}, batched, { lanesOverride: true, lanes: 3 })), 3);
-// a global lane table holds the lane for the whole trip: (stages + buffers - 1) x requests per chunk
+// a global lane table holds the lane for the whole trip: (stages + buffers - 1) x requests per batch
 assert.strictEqual(lanesOf(Object.assign({ chunk: 2048 }, pool, { laneScope: 'global' })), 16 + 1);
 assert.strictEqual(lanesOf(Object.assign({}, batched, { laneScope: 'global', copyMode: 'sequential' })), 16 * 8);
 assert.strictEqual(lanesOf(Object.assign({ chunk: 2048 }, pool, { lanes: 7 })), 2, '`lanes` is ignored without the override');
