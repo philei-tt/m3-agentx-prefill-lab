@@ -17,7 +17,7 @@ async function main() {
   const study = JSON.parse(fs.readFileSync(STUDY));
   const pool = new Pool(Number(get('--workers', 38)));
   const groups = [];
-  const today = { galaxies: 4, stages: 16, mesh: [2, 4], chunk: 2048, split: 'auto', cache: 'pool', lanes: 4, hostTier: true, layout: 'fixed' };
+  const today = { galaxies: 4, stages: 16, mesh: [2, 4], chunk: 2048, split: 'auto', cache: 'pool', lanes: 4, hostTier: true, layout: 'fixed', unaligned: true };
   groups.push({ name: 'today 4gx 16x[2,4] C=2048 + pool + host', base: today, noBatch: today });
   for (const [key, R] of Object.entries(study.scenarios)) {
     const g = R.grid[0].extra;
