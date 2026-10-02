@@ -498,7 +498,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       </li>
       <li><b>SSD KV tier = offloading KV to NVMe drives on the galaxy hosts.</b>
         <ul>
-          <li><b>Mechanism.</b> When the device pool evicts a page, it is written to SSD instead of being dropped. A later hit on it is read back into the request's lane while the request waits in the queue. The SSD tier evicts least-recently-used too. Write-backs and fetches share one bandwidth per galaxy: the lower of the drives' and PCIe's. Index keys are stored once on SSD, not per TP column.</li>
+          <li><b>Static slots.</b> When a slot is reclaimed, its conversation's KV is written to SSD (the new occupant waits for the write-back), and that conversation's next request reads the prefix it shares back before it is admitted. One copy per conversation: nothing is shared between conversations, unlike pool pages. On today-C (4 galaxies, unaligned), 1 TB per galaxy lifts goodput from 3.1k to 16.0k; the pool with one lane and the same SSD reaches 23.8k.</li>
+          <li><b>Mechanism (pool and paging).</b> When the device pool evicts a page, it is written to SSD instead of being dropped. A later hit on it is read back into the request's lane while the request waits in the queue. The SSD tier evicts least-recently-used too. Write-backs and fetches share one bandwidth per galaxy: the lower of the drives' and PCIe's. Index keys are stored once on SSD, not per TP column.</li>
           <li><b>Defaults:</b> 1 TB and 64 GB/s per galaxy. These are placeholders carried over from the earlier host-DRAM tier, not SSD specs; set the real drive capacity and bandwidth.</li>
           <li><b>What matters.</b> Capacity matters much more than bandwidth. At 8 TB per galaxy the results match an infinite cache; dropping bandwidth from 64 to 16 GB/s costs at most 13%.</li>
           <li><b>Not modelled:</b> SSD write endurance, read/write asymmetry, and per-IO latency. The tier is an ideal page DMA at one bandwidth.</li>
@@ -548,7 +549,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <ul>
       <li><b>Slot lanes + paged pool:</b> replaces static slots (see KV cache): 4 fixed 1M lanes per stage.</li>
       <li><b>Variable-size lanes (arena):</b> lanes allocated at the request's actual length from a contiguous arena (2-8M tokens) instead of 1M each.</li>
-      <li><b>SSD KV tier:</b> see KV cache. It requires the paged pool or full paging.</li>
+      <li><b>SSD KV tier:</b> see KV cache. In the study it requires the paged pool; the simulator also supports it behind static slots.</li>
       <li><b>Not a feature: bounded dense gather.</b> Earlier versions listed bounding the dense ring-joint gather to [0, kv_len) as a P0 feature. The op already does this (tt-metal #47539), so it is part of today's baseline, and the old whole-lane behaviour is only a sensitivity row.</li>
       <li><b>index_k stored once:</b> the index-key cache is kept on one TP column instead of all four, and gathered when needed. This cuts KV size from 2112 to 1344 B per token per layer.</li>
       <li><b>index_k bf8:</b> the index-key cache in bf8 instead of bf16. It is the runner's default dtype, but the measured runs used bf16, and it needs an accuracy check.</li>
@@ -731,7 +732,8 @@ function syncUi() {
   $('splitRow').hidden = $('split').value !== 'custom';
   const pool = $('cache').value === 'pool', paged = pool || $('cache').value === 'paging';
   for (const id of ['lanes', 'laneArena', 'laneScope', 'copyMode']) $(id).disabled = !pool;
-  for (const id of ['hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy']) $(id).disabled = !paged;
+  // the SSD tier works behind every finite cache: pool / paging pages, or whole static slots
+  for (const id of ['hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy']) $(id).disabled = $('cache').value === 'inf';
   $('arenaTokens').disabled = !pool || !$('laneArena').checked;
   $('lanes').disabled = !pool || $('laneArena').checked;
   // static slots run one request per chunk; every other cache can batch

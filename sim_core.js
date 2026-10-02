@@ -557,7 +557,7 @@
     if (cfg.cache === 'pool' && cfg.laneArena && arena < MAX_REQ) errors.push(`the lane arena must hold the largest request (${MAX_REQ} tokens)`);
     // host copies do not need the TP replicas of index_k (re-broadcast on fetch)
     const kvbHost = kvBytesPerTokenLayer(Object.assign({}, cfg, { idxDerep: true }), tp);
-    const hostTok = cfg.hostTier && (cfg.cache === 'pool' || cfg.cache === 'paging') ? cfg.hostGBPerGalaxy * GB * (cfg.galaxies / cfg.replicas) / (M3.L * kvbHost) : 0;
+    const hostTok = cfg.hostTier && cfg.cache !== 'inf' ? cfg.hostGBPerGalaxy * GB * (cfg.galaxies / cfg.replicas) / (M3.L * kvbHost) : 0;
     const gran = 32 * sp;
     return {
       cfg, sp, tp, P, S, counts, stages, eff, lat, layer, stageOv, embedMs, blockMs, hopMs, errors,
@@ -747,9 +747,12 @@
   }
 
   // Static slots: a slot holds one stream's latest request; LRU over idle slots; busy slots cannot be evicted.
+  // onEvict(streamKey, blocks) is called with the evicted stream's KV (the SSD tier writes it back) and returns when
+  // that write-back ends; evictEnd holds it for the new occupant, which cannot overwrite the slot before then.
   class SlotCache {
-    constructor(N) { this.N = N; this.owner = new Int32Array(N).fill(-1); this.last = new Float64Array(N); this.busy = new Uint8Array(N); this.of = new Map(); this.evictions = 0; }
+    constructor(N) { this.N = N; this.owner = new Int32Array(N).fill(-1); this.last = new Float64Array(N); this.busy = new Uint8Array(N); this.blocks = new Float64Array(N); this.of = new Map(); this.evictions = 0; }
     acquire(streamKey, now) { // -> {slot, warm} or null
+      this.evictEnd = 0;
       let s = this.of.get(streamKey);
       if (s !== undefined) { if (this.busy[s]) return null; this.busy[s] = 1; return { slot: s, warm: true }; }
       let pick = -1, lru = Infinity;
@@ -759,11 +762,11 @@
         if (this.last[i] < lru) { lru = this.last[i]; pick = i; }
       }
       if (pick < 0) return null;
-      if (this.owner[pick] >= 0) { this.of.delete(this.owner[pick]); this.evictions++; }
+      if (this.owner[pick] >= 0) { this.of.delete(this.owner[pick]); this.evictions++; if (this.onEvict) this.evictEnd = this.onEvict(this.owner[pick], this.blocks[pick]); }
       this.owner[pick] = streamKey; this.of.set(streamKey, pick); this.busy[pick] = 1;
       return { slot: pick, warm: false };
     }
-    release(s, now) { this.busy[s] = 0; this.last[s] = now; }
+    release(s, now, blocks) { this.busy[s] = 0; this.last[s] = now; this.blocks[s] = blocks; }
   }
 
   // ------------------------------------------------------------------------------------------------------
@@ -799,8 +802,30 @@
       });
     }
     // device -> host demotions (write-back) occupy the same PCIe link as host -> device fetches
+    const pcieS = (blocks) => blocks * B * M3.L * plan.kvbHost / plan.pcieBps;
     for (const rp of reps) if (rp.pool && plan.hostTok > 0) {
-      rp.pool.onDemote = (blocks) => { rp.pcieFree = Math.max(rp.pcieFree, now) + blocks * B * M3.L * plan.kvbHost / plan.pcieBps; };
+      rp.pool.onDemote = (blocks) => { rp.pcieFree = Math.max(rp.pcieFree, now) + pcieS(blocks); };
+    }
+    // SSD tier behind static slots: an evicted slot's KV (its stream's latest request) is written to SSD, one copy per
+    // stream (no prefix sharing), LRU over hostTok; the stream's next request reads back the prefix it shares with it
+    for (const rp of reps) if (rp.slots && plan.hostTok > 0) {
+      rp.ssd = new Map(); rp.ssdUsed = 0; // streamKey -> blocks, in LRU order
+      rp.slots.onEvict = (key, blocks) => {
+        if (!(blocks > 0)) return 0;
+        rp.pcieFree = Math.max(rp.pcieFree, now) + pcieS(blocks);
+        rp.ssd.set(key, blocks); rp.ssdUsed += blocks;
+        for (const [k, b] of rp.ssd) { if (rp.ssdUsed * B <= plan.hostTok) break; rp.ssd.delete(k); rp.ssdUsed -= b; }
+        return rp.pcieFree;
+      };
+    }
+    const slotKey = (q) => q.tree.key * 4096 + (TR.req_stream[q.r] - q.tree.s0);
+    // read a stream's KV back from the SSD tier (the prefix the request shares with it); returns the fetch's end
+    function ssdFetch(q, rep, key) {
+      const stored = rep.ssd.get(key); rep.ssd.delete(key); rep.ssdUsed -= stored;
+      const blocks = Math.min(stored, TR.req_lcp_prev[q.r]);
+      q.ssdBlocks = blocks;
+      if (warmDone) st.hostTok += blocks * B;
+      const t = Math.max(now, rep.pcieFree) + pcieS(blocks); rep.pcieFree = t; return t;
     }
     // stats
     const st = { done: 0, useful: 0, newTok: 0, processed: 0, hitTok: 0, inTok: 0, infHitTok: 0, hostTok: 0, reprefill: 0, alignLoss: 0,
@@ -950,6 +975,10 @@
           ev.push(t, { e: EV_FETCHED, q }); return;
         }
       }
+      if (rep.ssd && !q.primer) { // static slots: the stream's KV is on SSD, not in a slot -> read it back before admission
+        const key = slotKey(q);
+        if (!rep.slots.of.has(key) && rep.ssd.has(key)) { const t = ssdFetch(q, rep, key); q.fetchedAt = t; ev.push(t, { e: EV_FETCHED, q }); return; }
+      }
       enqueue(q);
     }
     function enqueue(q) {
@@ -967,10 +996,13 @@
     function tryStart(q, rep) { // acquire lane/slot, compute hit; false if blocked
       const tree = q.tree, r = q.r;
       if (rep.slots) {
-        const streamKey = tree.key * 4096 + (TR.req_stream[r] - tree.s0);
+        const streamKey = slotKey(q);
         const a = rep.slots.acquire(streamKey, now); if (!a) return false;
         q.slot = a.slot; q.laneCap = cfg.slotLen;
-        const lp = a.warm ? TR.req_lcp_prev[r] : 0;
+        if (rep.slots.evictEnd > (q.readyAt || 0)) q.readyAt = rep.slots.evictEnd; // previous occupant still writing back
+        // SSD tier: read back at READY, or now if the slot was evicted while the request was queued
+        if (!a.warm && !q.ssdBlocks && rep.ssd && rep.ssd.has(streamKey)) q.readyAt = Math.max(q.readyAt || 0, ssdFetch(q, rep, streamKey));
+        const lp = a.warm ? TR.req_lcp_prev[r] : q.ssdBlocks || 0;
         q.hitTok = hitTokens(q, lp);
       } else {
         const need = TR.req_blocks[r] * B;
@@ -1234,7 +1266,7 @@
     function onDone(q) { // prefill complete (TTFT)
       const tree = q.tree, rep = tree.rep, r = q.r;
       q.tDone = now;
-      if (rep.slots) { rep.slots.release(q.slot, now); pump(rep); }
+      if (rep.slots) { rep.slots.release(q.slot, now, TR.req_blocks[r]); pump(rep); }
       else if (cfg.laneScope !== 'stage') insertKV(q, rep); // global lanes: KV visible at completion, lane freed by EV_LANE
       const inTok = TR.req_blocks[r] * B;
       if (q.primer) { st.primerTok += inTok - q.hitTok; primersLeft--; if (primersLeft === 0 && !warmDone) startProfiling(now); ev.push(now, { e: EV_END, q }); return; }

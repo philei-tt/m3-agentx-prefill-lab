@@ -52,4 +52,14 @@ assert.strictEqual(a.done, b.done); assert.ok(Math.abs(a.usefulTps - b.usefulTps
 const r = SIM.simulate(TR, cal, Object.assign({ cache: 'inf', batch: true, budget: 16384, layout: 'fixed' }, base, { concurrency: 64 }));
 assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
 
+// 7. replay: an SSD tier behind static slots keeps evicted slots' KV, so reads happen and the hit rate improves; the
+//    infinite cache has no tier
+{
+  const cfg = Object.assign({ cache: 'slots', chunk: 2048, unaligned: true }, base, { concurrency: 64 });
+  const a = SIM.simulate(TR, cal, cfg), b = SIM.simulate(TR, cal, Object.assign({ hostTier: true }, cfg));
+  assert.ok(SIM.makePlan(Object.assign({ hostTier: true }, cfg), cal).hostTok > 0 && b.hostTok > 0, 'no SSD reads behind slots');
+  assert.ok(b.hitRate > a.hitRate, `slots + SSD hit ${b.hitRate} <= ${a.hitRate}`);
+  assert.strictEqual(SIM.makePlan(Object.assign({ hostTier: true }, cfg, { cache: 'inf' }), cal).hostTok, 0);
+}
+
 console.log('test_model: all checks passed');
