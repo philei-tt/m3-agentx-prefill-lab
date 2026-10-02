@@ -42,7 +42,7 @@ A point where no request finished (TTFT undefined) never passes. Useful tokens p
 *Useful* tokens are the tokens an infinite prefix cache would still have to prefill (`in - 64·lcp_best`). Re-prefilled tokens
 (evicted, misaligned, never materialised) and padding count as processed but not useful. Each result also reports the same
 configuration with an infinite cache, TTFT p50/p90, the hit rate against the ∞-cache hit rate, and the split of processed
-tokens into useful, re-prefill and padding.
+tokens into useful, re-prefill and padding. At the goodput point it also reports hourly volume (`hourly()` in `sim_core.js`): input tokens per hour of the requests completed, split into new (prefilled, re-prefill included) and cached (prefix hit), and requests completed per hour.
 
 ## Files
 
@@ -203,6 +203,23 @@ Earlier studies are kept on exabox under `/data/philei/m3_traffic_sim/results/`,
 | 4 galaxies, roofline kernels | 4.8k | 78.3k | **82.6k** (16×[4,2], 2M arena, budget 16k) | 209k |
 | 8 galaxies, today's kernels | 11.1k | 94.8k | **104k** (32×[4,2], 2M arena, budget 8k) | 140k |
 | 8 galaxies, roofline kernels | 15.0k | 158k | **161k** (32×[4,2], 4 lanes, budget 8k) | 367k |
+
+Hourly volume at the goodput point (the simulated concurrency where each configuration reaches its goodput, p90 TTFT ≤ 10 s): input tokens of the requests completed per hour, split into new tokens the pipeline prefilled (re-prefill included) and cached prefix hits, and requests completed per hour.
+
+| scenario | configuration | C | input tok/h | new tok/h | cached tok/h | hit | requests/h |
+|---|---|---|---|---|---|---|---|
+| 4 galaxies, today's kernels | today | 40 | 469.6M | 59.9M | 409.8M | 87.3% | 3.1k |
+| 4 galaxies, today's kernels | greedy full stack | 416 | 4.06B | 172.2M | 3.89B | 95.8% | 32.3k |
+| 4 galaxies, today's kernels | best grid config | 472 | 4.45B | 216.2M | 4.24B | 95.1% | 36.1k |
+| 4 galaxies, roofline kernels | today | 56 | 594.3M | 146.5M | 447.8M | 75.4% | 4.2k |
+| 4 galaxies, roofline kernels | greedy full stack | 840 | 8.19B | 686.5M | 7.51B | 91.6% | 64.2k |
+| 4 galaxies, roofline kernels | best grid config | 840 | 8.83B | 638.7M | 8.19B | 92.8% | 68.3k |
+| 8 galaxies, today's kernels | today | 104 | 1.06B | 200.3M | 864.4M | 81.2% | 9.1k |
+| 8 galaxies, today's kernels | greedy full stack | 1056 | 9.92B | 457.5M | 9.46B | 95.4% | 77.4k |
+| 8 galaxies, today's kernels | best grid config | 1096 | 10.89B | 513.4M | 10.37B | 95.3% | 85.2k |
+| 8 galaxies, roofline kernels | today | 128 | 1.42B | 342.7M | 1.07B | 75.8% | 12.3k |
+| 8 galaxies, roofline kernels | greedy full stack | 1688 | 16.62B | 1.10B | 15.51B | 93.4% | 130.4k |
+| 8 galaxies, roofline kernels | best grid config | 1688 | 17.05B | 1.11B | 15.95B | 93.5% | 133.5k |
 
 Each cell below is "G #step / LOO":
 * **G** is the gain at the greedy step where the feature was added (the step number is the build order);
