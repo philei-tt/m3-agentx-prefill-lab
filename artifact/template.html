@@ -199,9 +199,9 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="hint">Off: with a fixed layout, each chunk-unit of a request makes its own call and re-gathers the cached prefix.</div>
     <div class="row check"><input id="prefetchKV" type="checkbox"><label for="prefetchKV">Prefetch KV-prefix gathers (overlap with compute)</label></div>
     <div class="row"><label for="policy">Scheduling</label><select id="policy"><option value="rtc">run to completion, oldest first</option><option value="srpt">run to completion, shortest first (30 s aging)</option><option value="rr">round robin</option></select></div>
-    <div class="row check"><input id="rrLanesAuto" type="checkbox"><label for="rrLanesAuto">Auto RR lanes (stages; batched: chunk units per batch)</label></div>
+    <div class="row check"><input id="rrLanesAuto" type="checkbox"><label for="rrLanesAuto">Auto RR lanes (stages; fixed-layout batches: chunk units per batch)</label></div>
     <div class="row"><label for="rrLanes">RR lanes / stage</label><input id="rrLanes" type="number" min="1" max="64" step="1"></div>
-    <div class="hint">Round robin (tt-d-gen): one chunk per turn (batched: as many chunk units as it can fill), then to the back. On the pool, a lane (per-stage KV slot) is taken per turn and the new KV is always copied out; a request whose lane still holds its context skips the copy-in.</div>
+    <div class="hint">Round robin (tt-d-gen): one chunk per turn (batched: as many chunk units as it can fill), then to the back. On the pool, a lane (per-stage KV slot) is taken per turn and the new KV is always copied out; a request whose lane still holds its context skips the copy-in. Each request in a batch holds a lane, so the lane count caps the requests per batch; with variable-layout batching it must be set.</div>
   </fieldset>
   <fieldset>
     <legend>KV cache</legend>
@@ -741,12 +741,16 @@ function syncUi() {
   $('unaligned').disabled = $('layout').value === 'var';
   // round robin on fixed pool lanes sets the lane count itself (rrLanes, 0 = auto)
   const rr = $('policy').value === 'rr', rrLanes = rr && pool && !$('laneArena').checked;
+  // a variable-layout batch has no chunk units, so the lane count (the most requests per batch) must be given
+  const noAuto = rrLanes && $('batch').checked && $('layout').value === 'var';
+  if (noAuto) $('rrLanesAuto').checked = false;
   const auto = $('rrLanesAuto').checked;
-  $('rrLanesAuto').disabled = !rrLanes; $('rrLanes').disabled = !rrLanes || auto;
+  $('rrLanesAuto').disabled = !rrLanes || noAuto; $('rrLanes').disabled = !rrLanes || auto;
+  if (rrLanes && !(Number($('rrLanes').value) > 0)) $('rrLanes').value = '4';
   if (rrLanes) $('lanes').disabled = true;
   if (auto) { // show the inferred count (as makePlan): stages, or chunk units per batch with batching
     const chunk = Number($('chunk').value), budget = Number($('budget').value), batched = $('batch').checked;
-    const T = batched ? ($('layout').value === 'var' ? budget : Math.max(budget, chunk)) : chunk;
+    const T = batched ? Math.max(budget, chunk) : chunk;
     $('rrLanes').value = String(batched ? Math.max(1, Math.floor(T / chunk)) : Number($('stages').value));
   }
   // with batching on a variable layout the token budget is the chunk size; the chunk field is unused

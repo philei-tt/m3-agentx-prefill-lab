@@ -473,9 +473,13 @@
     // largest chunk: the budget when batching on a variable layout, whole chunks otherwise
     const Tchunk = cfg.batch ? (cfg.layout === 'var' ? cfg.budget : Math.max(cfg.budget, cfg.chunk)) : cfg.chunk;
     const Tmax = Tchunk;
-    // round robin on fixed pool lanes: rrLanes, or auto = stages (no batching) / chunk units per batch (batching)
-    const rrLaneN = cfg.policy === 'rr' && cfg.cache === 'pool' && !cfg.laneArena
-      ? (cfg.rrLanes > 0 ? cfg.rrLanes : cfg.batch ? Math.max(1, Math.floor(Tchunk / cfg.chunk)) : S) : 0;
+    // round robin on fixed pool lanes: rrLanes, or auto = stages (no batching) / chunk units per batch (fixed-layout
+    // batching). Every request in a batch holds a lane, so the lane count is the most requests per batch; a
+    // variable-layout batch has no chunk units (a request can take as little as 32*SP tokens), so there the count
+    // must be given
+    const rrFixedLanes = cfg.policy === 'rr' && cfg.cache === 'pool' && !cfg.laneArena;
+    const rrNoAuto = rrFixedLanes && cfg.batch && cfg.layout === 'var' && !(cfg.rrLanes > 0);
+    const rrLaneN = rrFixedLanes ? (cfg.rrLanes > 0 ? cfg.rrLanes : cfg.batch ? Math.max(1, Math.floor(Tchunk / cfg.chunk)) : S) : 0;
     // handoff: measured = blocking send + hop latency (fitted, per chunk); async = link-rate transfer, overlapped
     const actXfer = (T) => T * M3.E * BF16 / (P * HW.linkUni * 0.5) * 1e3; // ms, each chip ships its shard
     const blockMs = (T) => (cfg.asyncHandoff ? 0 : Math.max(0, pm.block[0] + pm.block[1] * T / 1000));
@@ -535,6 +539,7 @@
     if (cfg.cache === 'slots' && nSlots < 1) errors.push('no 1M slot fits in memory');
     // static slots run one request per chunk; every other cache (pool, paging, infinite) can batch
     if (cfg.batch && cfg.cache === 'slots') errors.push('batching is not supported with static slots');
+    if (rrNoAuto) errors.push('round robin with variable-layout batching on the pool needs rrLanes (the most requests per batch)');
     // every buffer that must hold a whole request has to fit the largest AgentX request (990,016 tokens)
     if (cfg.cache === 'slots' && cfg.slotLen < MAX_REQ) errors.push(`slots must hold the largest request (${MAX_REQ} tokens)`);
     if (cfg.cache === 'pool' && !cfg.laneArena && cfg.laneLen < MAX_REQ) errors.push(`lanes must hold the largest request (${MAX_REQ} tokens)`);

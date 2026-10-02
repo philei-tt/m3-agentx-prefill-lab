@@ -75,6 +75,11 @@ const batched = Object.assign({ batch: true, chunk: 1024, budget: 8192, layout: 
 assert.strictEqual(SIM.makePlan(Object.assign({ chunk: 2048 }, pool), cal).lanes, 16);
 assert.strictEqual(SIM.makePlan(batched, cal).lanes, 8);
 assert.strictEqual(SIM.makePlan(Object.assign({}, batched, { rrLanes: 3 }), cal).lanes, 3);
+// a variable-layout batch has no chunk units: the lane count (the most requests per batch) must be given
+const varBatched = Object.assign({}, batched, { layout: 'var' });
+assert.ok(SIM.makePlan(varBatched, cal).errors.some((e) => e.includes('rrLanes')), 'var-layout batching without rrLanes');
+assert.ok(!SIM.makePlan(Object.assign({}, varBatched, { rrLanes: 5 }), cal).errors.length);
+assert.ok(trace(Object.assign({}, varBatched, { rrLanes: 5 })).chunks.every((ch) => ch.length <= 5), 'var layout: more requests per batch than lanes');
 assert.strictEqual(SIM.makePlan(Object.assign({ lanes: 5 }, pool, { policy: 'rtc' }), cal).lanes, 5, 'other policies keep `lanes`');
 // 3b. the lane count bounds the requests per batch, not the requests in progress (the partial KV is in the pool);
 //     each request of a batch has its own lane
