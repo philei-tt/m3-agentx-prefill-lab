@@ -393,13 +393,12 @@
     //   to another request at any turn.
     //   rrLanes: lanes per stage; 0 = auto: the number of stages without batching (one request per stage in flight),
     //     the chunk units per batch with batching (the most requests a batch can hold); it replaces `lanes` under rr.
-    //   rrCopyIn: 'miss' = a request whose lane still holds its context (not handed to another request since its
-    //     last turn) reuses it without a copy-in; on a miss it takes a free lane, else the least recently used one,
-    //     and copies its whole context so far in; 'always' = copy the whole context in on every turn.
-    //     Arena lanes always copy in.
+    //   Copy-in: a request whose lane still holds its context (not handed to another request since its last turn)
+    //     reuses it without a copy-in; on a miss it takes a free lane, else the least recently used one, and copies
+    //     its whole context so far in. Arena lanes always copy in.
     //   With the pool, and with paging, round robin admits a request only while the pool can hold every in-progress
-    //   request in full, and rrMaxActive caps their number (0 = no cap beyond the pool).
-    rrLanes: 0, rrCopyIn: 'miss', rrMaxActive: 0,
+    //   request in full (like tt-d-gen, where admission needs a free slot and in-flight slots are never evicted).
+    rrLanes: 0,
   };
 
   function kvBytesPerTokenLayer(cfg, tp) { // whole stage, physical
@@ -765,7 +764,7 @@
     const rr = cfg.policy === 'rr';
     const rrPool = rr && cfg.cache === 'pool'; // a lane per turn, the partial KV copied out to the pool every turn
     // in-progress requests whose KV lives in the pool (round robin on the pool, or paging): their cached prefix is
-    // pinned and their new KV reserved, and admission is bounded by the pool (and rrMaxActive)
+    // pinned and their new KV reserved, and admission is bounded by the pool
     const pinHits = rrPool || (rr && cfg.cache === 'paging');
     let now = 0, t0 = null, tEnd = Infinity, primersLeft = 0, warmDone = false;
     let inflightReqs = 0; // queued + prefill + decode (system idle check)
@@ -959,7 +958,6 @@
         const need = TR.req_blocks[r] * B;
         if (pinHits) { // the pool must hold every in-progress request in full (pinned prefix + new KV)
           if (rep.nProg > 0 && rep.progTok + need > plan.poolTok) return false;
-          if (cfg.rrMaxActive > 0 && rep.nProg >= cfg.rrMaxActive) return false;
           rep.progTok += need; rep.nProg++; q.prog = need;
         }
         if (rrPool) { /* lanes are taken per turn (laneGet) */ } else {
@@ -1080,7 +1078,7 @@
       }
       const L = rep.laneTab;
       let pick = q.laneIdx >= 0 && L[q.laneIdx].owner === q ? q.laneIdx : -1;
-      const miss = pick < 0 || cfg.rrCopyIn === 'always';
+      const miss = pick < 0;
       if (pick < 0) {
         for (let i = 0; i < L.length; i++) {
           if (L[i].busy) continue;

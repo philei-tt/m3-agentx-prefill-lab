@@ -84,10 +84,10 @@ assert.strictEqual(SIM.makePlan(Object.assign({ lanes: 5 }, pool, { policy: 'rtc
   assert.ok(maxOpen(chunks) > 3, 'in-progress requests capped by lanes');
   assert.ok(once(chunks) && fair(chunks));
 }
-// 3c. copy-in: 'miss' skips it only when the lane still holds the request's context (the request used it last);
-//     'always' copies on every turn; a request's first turn always copies its cached prefix in
+// 3c. copy-in is skipped only when the lane still holds the request's context (the request used it last); a
+//     request's first turn always copies its cached prefix in
 for (const cfg of [Object.assign({ chunk: 2048 }, pool), Object.assign({}, batched, { rrLanes: 4 })]) {
-  const m = trace(Object.assign({}, cfg, { concurrency: 160 })), a = trace(Object.assign({}, cfg, { concurrency: 160, rrCopyIn: 'always' }));
+  const m = trace(Object.assign({}, cfg, { concurrency: 160 }));
   const holder = new Map(), laneOf = new Map(); let reused = 0, missed = 0;
   for (const ch of m.chunks) for (const [q, , first, , miss, lane] of ch) {
     if (first) assert.ok(miss, 'first turn without a copy-in');
@@ -95,16 +95,13 @@ for (const cfg of [Object.assign({ chunk: 2048 }, pool), Object.assign({}, batch
     holder.set(lane, q); laneOf.set(q, lane);
   }
   assert.ok(reused > 0 && missed > 0, `lane reuse ${reused}, misses ${missed}`);
-  assert.ok(a.chunks.every((ch) => ch.every((x) => x[4])), "'always' skipped a copy-in");
-  assert.ok(m.r.rrCopyInTps < a.r.rrCopyInTps && a.r.rrLaneReuse === 0);
+  assert.ok(m.r.rrLaneReuse > 0 && m.r.rrLaneReuse < 1 && m.r.rrCopyInTps > 0);
 }
-// 3d. rrMaxActive caps the requests in progress
-assert.ok(maxOpen(trace(Object.assign({}, batched, { rrMaxActive: 5 })).chunks) <= 5, 'rrMaxActive not enforced');
 
 // 4. the default policy is unchanged by the round-robin code (same results as without the option set)
 {
   const a = SIM.simulate(TR, cal, { concurrency: 64, duration: 300, chunk: 2048 });
-  const b = SIM.simulate(TR, cal, { concurrency: 64, duration: 300, chunk: 2048, policy: 'rtc', rrLanes: 4, rrCopyIn: 'always' });
+  const b = SIM.simulate(TR, cal, { concurrency: 64, duration: 300, chunk: 2048, policy: 'rtc', rrLanes: 4 });
   assert.strictEqual(a.usefulTps, b.usefulTps); assert.strictEqual(a.events, b.events);
 }
 
