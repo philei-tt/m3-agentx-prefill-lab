@@ -360,8 +360,9 @@
     //   gather of its cached prefix); false = one call and one prefix gather per C-unit (today's kernels process
     //   one chunk at a time). prefetchKV: overlap the KV-prefix gathers with the layer's non-collective compute.
     kvDedup: true, prefetchKV: false,
-    // batchDynShape: a batched chunk is costed at the tokens it holds (a multiple of the chunk / 32*SP granule), i.e.
-    //   traces compiled for every size up to the budget; false = one static budget-sized shape, padded when not full
+    // batchDynShape: a batch that is not full (e.g. a single request) runs at the tokens it holds (whole chunks /
+    //   32*SP granules), as ops do without tracing; false = padded to the full budget, as a traced build with one
+    //   fixed shape must be
     batchDynShape: true,
     cache: 'slots',        // slots | pool | paging | inf
     // pool lanes per stage, derived from r = the most requests a chunk holds (1 without batching, the chunk units per

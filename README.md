@@ -235,12 +235,12 @@ Takeaways:
 3. **Batching: ×1.14–1.33.** Batches hold few requests at the goodput point.
    * On today's 4-gx config + pool + SSD tier they average 1.27 requests; the average chunk is 7.5k of the 16k budget.
    * Most of the gain comes from one request taking several chunk-units at once (big cold prefills in fewer, larger chunks), not from mixing users.
-   * **Chunk sizing (`batchDynShape`, on by default).** The budget is a cap: a chunk is costed at the tokens it holds (a multiple of the chunk size), i.e. a trace compiled for every size. Off = one static budget-sized shape; routed MoE ops still trim to the real tokens (`tools/batch_shape_ab.js`):
+   * **Dynamic batch size (`batchDynShape`, on by default).** A batch that is not full (e.g. a single request) runs at the tokens it holds, rounded up to whole chunks, as ops do without tracing. Off = padded to the full budget, as a traced build with one fixed shape must be; routed MoE ops still trim to the real tokens (`tools/batch_shape_ab.js`):
      * Today's 4-gx config + pool + host, budget 4k / 8k / 16k / 32k: sized 25.0k / 25.4k / 25.0k / 22.6k vs static 24.8k / 24.6k / 14.9k / 8.3k. No batching is 21.5k.
        * A static 16k or 32k shape collapses below no batching (65–82% padding): batches there hold only 1.2 requests.
      * Best stacks: static 16k costs 0–6% (4 gx today 45.2k → 42.3k; 8 gx 1%), and static 32k costs 1–21%.
        * These batches are fuller (2–3 requests), and cold prefills fill the budget.
-     * A static shape near the typical fill (8k), or a few buckets (4k/8k/16k), gets within 3–4% of per-size traces.
+     * A static shape near the typical fill (8k), or a few buckets (4k/8k/16k), gets within 3–4% of dynamic sizes.
    * With pool but no SSD tier, batching adds only 5% (13.1k → 13.8k): the goodput point is set by cache misses (39% of prefilled tokens are re-prefill), not compute.
    * Paging vs pool: +13% without the SSD tier (14.8k vs 13.1k; paging frees the 4M lane tokens), identical with it (21.6k vs 21.5k). Pool/paging + SSD tier already reach the ∞-cache goodput of this compute config (21.6k), so further gains must come from compute and TTFT. Sequential per-request attention is as good as fused, so the proposed plan (batch the MoE, attention per request) is the right one, and fused attention is not worth building. Best budget: 16k.
 4. **Bounded dense gather is already done** (tt-metal #47539). Without it (the old whole-lane gather), the best 4-gx config with 4 fixed 1M lanes would drop 45.3k → 31.1k. Configs with arena lanes are unaffected.

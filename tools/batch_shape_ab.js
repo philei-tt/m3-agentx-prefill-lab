@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Batched chunks sized to their tokens (batchDynShape, traces per size) vs one static budget-sized shape.
+// Dynamic batch size (batchDynShape: a batch runs at the tokens it holds) vs padding every batch to the budget (traced).
 //   A) today's 4-gx config (16x[2,4], chunk 2048) + pool + host tier
 //   B) each scenario's best stack and topology from results/study.json, fixed chunk 256 and variable layout
 // Usage: JOB=<slurm job> ./on_node.sh node tools/batch_shape_ab.js [--workers 38]
