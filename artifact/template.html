@@ -211,7 +211,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row"><label for="budget">Token budget</label><select id="budget"><option>4096</option><option>5120</option><option>8192</option><option>16384</option><option>32768</option></select></div>
     <div class="row check"><input id="lanesOverride" type="checkbox"><label for="lanesOverride">Override lanes per stage (batching + hybrid pool only)</label></div>
     <div class="row"><label for="lanes">Lanes per stage</label><input id="lanes" type="number" min="1" max="32" step="1"></div>
-    <div class="hint">Default: requests per batch × copy buffers (sequential 1, double 2, triple 3); with a global lane table, (stages + buffers − 1) × requests per batch. Variable-layout batching must override.</div>
+    <div class="hint">Default: requests per batch × copy buffers (sequential 1, double 2, triple 3); with a global lane table, stages × requests per batch (sequential copies only). Variable-layout batching must override.</div>
     <div class="row check"><input id="batchDynShape" type="checkbox"><label for="batchDynShape">Dynamic batch size (no padding to the budget)</label></div>
     <div class="hint">On: a partly filled batch runs at its actual size (untraced). Off: it is padded to the full budget, as tracing requires.</div>
     <div class="row"><label for="attn">Attention</label><select id="attn"><option value="seq">sequential per request</option><option value="fused">fused multi-user</option></select></div>
@@ -734,6 +734,8 @@ function syncUi() {
   for (const id of ['lanes', 'laneArena', 'laneScope', 'copyMode']) $(id).disabled = !pool;
   // the SSD tier works behind every finite cache: pool / paging pages, or whole static slots
   for (const id of ['hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy']) $(id).disabled = $('cache').value === 'inf';
+  // a global lane is reserved for the whole pipeline trip: buffering its copies gains nothing, so sequential only
+  if (pool && $('laneScope').value === 'global') { $('copyMode').value = 'sequential'; $('copyMode').disabled = true; }
   $('arenaTokens').disabled = !pool || !$('laneArena').checked;
   $('lanes').disabled = !pool || $('laneArena').checked;
   // every cache can batch; static slots need requests per batch x stages slots (makePlan reports out of memory)
@@ -752,7 +754,7 @@ function syncUi() {
     const chunk = Number($('chunk').value), budget = Number($('budget').value);
     const buffers = { sequential: 1, double: 2, overlap3: 3 }[$('copyMode').value] || 1;
     const r = batched ? Math.max(1, Math.floor(Math.max(budget, chunk) / chunk)) : 1;
-    $('lanes').value = String($('laneScope').value === 'stage' ? buffers * r : (Number($('stages').value) + buffers - 1) * r);
+    $('lanes').value = String($('laneScope').value === 'stage' ? buffers * r : Number($('stages').value) * r);
   }
   // with batching on a variable layout the token budget is the chunk size; the chunk field is unused
   const chunkUnused = $('batch').checked && $('layout').value === 'var';

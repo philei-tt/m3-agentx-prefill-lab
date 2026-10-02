@@ -368,8 +368,9 @@
     // pool lanes per stage, derived from r = the most requests a batch (one pipeline pass) holds (1 without
     //   batching, the chunk units per batch with fixed-layout batching; every request in a batch needs its own lane)
     //   and b = the buffers of the copy mode (sequential 1, double 2, overlap3 3): per-stage lane table = b x r (a
-    //   stage works on one batch at a time); global lane table = (stages + b - 1) x r (a lane is held for the whole
-    //   trip through the pipeline, one batch per stage in flight, plus the copy buffers). lanesOverride (batching on
+    //   stage works on one batch at a time); global lane table = stages x r (a lane is held for the whole trip
+    //   through the pipeline, one batch per stage in flight; sequential copies only, since a lane reserved for the
+    //   whole trip gains nothing from buffering). lanesOverride (batching on
     //   the pool only) sets `lanes` instead; variable-layout batching has no chunk units, so it must override. Arena
     //   lanes and the other caches ignore the count and the override.
     lanes: 3, lanesOverride: false, laneScope: 'stage', laneLen: M3.maxCtx, laneArena: false, arenaTokens: 4e6,
@@ -538,7 +539,7 @@
       if (cfg.laneArena) { arena = Math.min(capTok, cfg.arenaTokens); poolTok = capTok - arena; }
       else {
         const r = Math.max(1, reqsPerBatch);
-        lanes = cfg.lanesOverride ? cfg.lanes : cfg.laneScope === 'stage' ? laneBuffers * r : (S + laneBuffers - 1) * r;
+        lanes = cfg.lanesOverride ? cfg.lanes : cfg.laneScope === 'stage' ? laneBuffers * r : S * r;
         poolTok = capTok - lanes * cfg.laneLen;
       }
       if (poolTok < 0) errors.push('lanes do not fit in memory');
@@ -554,6 +555,7 @@
     }
     // the override only applies to fixed pool lanes (other caches have none and ignore it, as they ignore `lanes`,
     // so a pool config can be re-run with cache 'inf' as is); without batching the count is derived
+    if (cfg.cache === 'pool' && cfg.laneScope === 'global' && cfg.copyMode !== 'sequential') errors.push('a global lane table holds the lane for the whole pipeline trip, so it allows only sequential copies (one buffer)');
     if (cfg.lanesOverride && cfg.cache === 'pool' && !cfg.batch) errors.push('overriding the lane count needs batching (without it the count is derived)');
     if (fixedLanes && cfg.batch && reqsPerBatch === 0 && !cfg.lanesOverride) errors.push('variable-layout batching on the pool needs the lane count set (lanesOverride)');
     if (cfg.lanesOverride && !(cfg.lanes >= 1)) errors.push('the lane count must be at least 1');

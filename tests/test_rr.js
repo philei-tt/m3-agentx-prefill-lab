@@ -79,9 +79,10 @@ for (const [copyMode, buf] of [['sequential', 1], ['double', 2], ['overlap3', 3]
   assert.strictEqual(lanesOf(Object.assign({}, batched, { copyMode })), 8 * buf, `batched ${copyMode}`);
 }
 assert.strictEqual(lanesOf(Object.assign({}, batched, { lanesOverride: true, lanes: 3 })), 3);
-// a global lane table holds the lane for the whole trip: (stages + buffers - 1) x requests per batch
-assert.strictEqual(lanesOf(Object.assign({ chunk: 2048 }, pool, { laneScope: 'global' })), 16 + 1);
+// a global lane table holds the lane for the whole trip: stages x requests per batch, sequential copies only
+assert.strictEqual(lanesOf(Object.assign({ chunk: 2048 }, pool, { laneScope: 'global', copyMode: 'sequential' })), 16);
 assert.strictEqual(lanesOf(Object.assign({}, batched, { laneScope: 'global', copyMode: 'sequential' })), 16 * 8);
+for (const copyMode of ['double', 'overlap3']) assert.ok(SIM.makePlan(Object.assign({ chunk: 2048 }, pool, { laneScope: 'global', copyMode }), cal).errors.some((e) => e.includes('global lane table')), copyMode);
 assert.strictEqual(lanesOf(Object.assign({ chunk: 2048 }, pool, { lanes: 7 })), 2, '`lanes` is ignored without the override');
 assert.ok(SIM.makePlan(Object.assign({ chunk: 2048 }, pool, { lanesOverride: true }), cal).errors.some((e) => e.includes('overriding')), 'override without batching');
 // other caches have no lanes and ignore the override, so a batched pool config re-runs with cache 'inf' as is (the

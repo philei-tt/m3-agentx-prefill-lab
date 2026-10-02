@@ -141,7 +141,8 @@ async function main() {
       ['[4,4] torus stages', sc.base.galaxies === 4 ? { mesh: [4, 4], stages: 8, replicas: 1 } : { mesh: [4, 4], stages: 16, replicas: 1 }],
     ];
     if (good.includes('pool')) sens.push(
-      ['global lane table', { laneScope: 'global' }],
+      // a global lane table allows only sequential copies (results/study.json has this row with double-buffered ones)
+      ['global lane table', { laneScope: 'global', copyMode: 'sequential' }],
       ['copies sequential', { copyMode: 'sequential' }], ['copies triple-buffered', { copyMode: 'overlap3' }],
       good.includes('arena') ? ['4 fixed 1M lanes', { laneArena: false, lanes: 4 }] : ['2M lane arena', { laneArena: true, arenaTokens: 2e6 }],
     );
