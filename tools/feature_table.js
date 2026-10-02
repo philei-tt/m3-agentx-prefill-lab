@@ -13,6 +13,17 @@ for (const s of SC) {
   const lanes = e.arenaTokens ? `${e.arenaTokens / 1e6}M arena` : `${e.lanes} lanes`;
   console.log(`| ${S.label} | ${k(S.greedy[0].goodput)} | ${k(S.full.goodput)} | **${k(g.goodput)}** (${e.stages}×[${e.mesh}]${e.replicas > 1 ? '×' + e.replicas : ''}, ${lanes}, ${e.budget ? 'budget ' + e.budget / 1024 + 'k' : 'chunk ' + e.chunk}) | ${inf ? k(inf.goodput) : '–'} |`);
 }
+// hourly volume at the goodput point (the concurrency where each configuration reaches its goodput)
+const { hourly } = require('../sim_core.js');
+const big = (x) => (x >= 1e9 ? (x / 1e9).toFixed(2) + 'B' : x >= 1e6 ? (x / 1e6).toFixed(1) + 'M' : (x / 1e3).toFixed(1) + 'k');
+console.log('\n| scenario | configuration | C | input tok/h | new tok/h | cached tok/h | hit | requests/h |\n|---|---|---|---|---|---|---|---|');
+for (const s of SC) {
+  const S = R.scenarios[s];
+  for (const [nm, a] of [['today', S.greedy[0].at], ['greedy full stack', S.full.at], ['best grid config', S.grid[0].at]]) {
+    const h = hourly(a);
+    console.log(h ? `| ${S.label} | ${nm} | ${a.conc} | ${big(h.inTok)} | ${big(h.newTok)} | ${big(h.cachedTok)} | ${(100 * a.hitRate).toFixed(1)}% | ${big(h.req)} |` : `| ${S.label} | ${nm} | – | no point meets the SLO | | | | |`);
+  }
+}
 // order and tier from the reference scenario (8 galaxies, today's kernels), same rule as the artifact
 const RANK = R.scenarios.g8_k0 ? 'g8_k0' : SC[0];
 const rows = FEATURES.map((f) => {

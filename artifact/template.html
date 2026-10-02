@@ -308,6 +308,11 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <div class="panel"><h3>Sensitivity of the best configuration</h3><div class="tablewrap" id="sensTable" style="margin-top:8px"></div></div>
     </div>
     <div class="panel">
+      <h3>Hourly volume at the goodput point</h3>
+      <p class="muted small" style="margin:4px 0 8px">At the concurrency where each configuration reaches its goodput (p90 TTFT ≤ SLO): input tokens of the requests completed per hour, split into new tokens the pipeline prefilled (re-prefill included) and cached prefix hits, and requests completed per hour.</p>
+      <div class="tablewrap" id="hourTable"></div>
+    </div>
+    <div class="panel">
       <h3>Baseline vs best, this scenario</h3>
       <div class="legend" id="cmpLegend"></div>
       <div class="charts"><div class="chart" id="cmpU"><h4>Useful tok/s</h4></div><div class="chart" id="cmpT"><h4>p90 TTFT (s, log)</h4></div><div class="chart" id="cmpH"><h4>Hit rate</h4></div><div class="chart" id="cmpR"><h4>Requests per batch</h4></div></div>
@@ -593,7 +598,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <h2 id="m-read">Reading the Explore tab</h2>
     <ul>
       <li><b>Loading.</b> On load, the charts show the precomputed baseline (<span class="mono">today-C</span>). <b>Run sweep</b> simulates your configuration at every concurrency in the grid, in your browser, in about 5-30 s. It also runs the same configuration with an infinite cache, unless you untick that option.</li>
-      <li><b>Tiles.</b> Goodput; goodput with an infinite cache; TTFT p50/p90 and hit rate at the goodput point; the peak useful throughput regardless of TTFT; wasted compute (the share of processed tokens that is re-prefill or padding, the complement of the useful share in "Where processed tokens go"); requests per batch at the goodput point and at the peak.</li>
+      <li><b>Tiles.</b> Goodput; goodput with an infinite cache; TTFT p50/p90 and hit rate at the goodput point; input tokens per hour at the goodput point (the input of the requests completed there, split into new tokens the pipeline prefilled, re-prefill included, and cached prefix hits) and requests completed per hour; the peak useful throughput regardless of TTFT; wasted compute (the share of processed tokens that is re-prefill or padding, the complement of the useful share in "Where processed tokens go"); requests per batch at the goodput point and at the peak.</li>
       <li><b>Charts</b> share a log concurrency axis:
         <ul>
           <li>useful tok/s;</li>
@@ -644,6 +649,8 @@ const SIM = self.M3SIM;
 const $ = (id) => document.getElementById(id);
 const fmtK = (x) => (x == null || !isFinite(x) ? '–' : x >= 1e4 ? (x / 1000).toFixed(1) + 'k' : x >= 1000 ? (x / 1000).toFixed(2) + 'k' : Math.round(x).toString());
 const fmtS = (x) => (x == null || !isFinite(x) ? '–' : x >= 100 ? x.toFixed(0) : x >= 10 ? x.toFixed(1) : x.toFixed(2));
+// large counts (tokens or requests per hour): 1.23B, 45.6M, 789k
+const fmtBig = (x) => (x == null || !isFinite(x) ? '–' : x >= 1e9 ? (x / 1e9).toFixed(2) + 'B' : x >= 1e6 ? (x / 1e6).toFixed(1) + 'M' : fmtK(x));
 const pct = (x, d = 0) => (x == null || !isFinite(x) ? '–' : (100 * x).toFixed(d) + '%');
 const cssv = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -676,7 +683,7 @@ const GLUE = `
 let TR = null, CAL = null;
 function slim(r, c) {
   if (r.error) return { conc: c, error: r.error };
-  return { conc: c, usefulTps: r.usefulTps, processedTps: r.processedTps, newTps: r.newTps, ttftP50: r.ttftP50, ttftP90: r.ttftP90, ttftP99: r.ttftP99,
+  return { conc: c, usefulTps: r.usefulTps, processedTps: r.processedTps, newTps: r.newTps, inTps: r.inTps, hitTps: r.hitTps, reqPerS: r.reqPerS, ttftP50: r.ttftP50, ttftP90: r.ttftP90, ttftP99: r.ttftP99,
     hitRate: r.hitRate, infHitRate: r.infHitRate, reprefillFrac: r.reprefillFrac, padFrac: r.padFrac, maxUtil: r.maxUtil, avgChunkTok: r.avgChunkTok,
     avgSegsPerChunk: r.avgSegsPerChunk, done: r.done, warmupS: r.warmupS };
 }
@@ -954,11 +961,14 @@ function render() {
   const stale = run && run.slo && slo > 4 * run.slo;
   // processed-token split at the goodput point (else the peak), shared by the Wasted tile and the breakdown bar
   const bp = a || (R && R.peak), sp = bp && tokSplit(bp);
+  const h = a && SIM.hourly(a);
   const tiles = [
     ['Goodput', R ? (R.atEdge ? '≥ ' : '') + fmtK(R.goodput) : '–', slo >= NO_SLO ? 'useful tok/s, no TTFT limit (= peak)' : 'useful tok/s @ p90 ≤ ' + slo + ' s', stale ? `run swept for a ${sloTxt(run.slo)} SLO: run again for this one` : R && R.atEdge ? 'still under the SLO at the highest concurrency simulated' : P ?`pinned ${fmtK(P.goodput)} (${R && P.goodput ? (R.goodput / P.goodput).toFixed(2) + 'x' : '–'})` : ''],
     ['With infinite cache', I ? (I.atEdge ? '≥ ' : '') + fmtK(I.goodput) : '–', 'same config, nothing evicted', R && I && I.goodput ? `real = ${I.atEdge ? '≤ ' : ''}${pct(R.goodput / I.goodput)} of ∞` : ''],
     ['TTFT at goodput point', a ? `${fmtS(a.ttftP50)}<small> / ${fmtS(a.ttftP90)} s</small>` : '–', 'p50 / p90', a ? `C = ${a.conc} lanes` : ''],
     ['Hit rate there', a ? pct(a.hitRate, 1) : '–', 'prefix-cache hit, token-weighted', a ? `∞-cache ${pct(a.infHitRate, 1)}` : ''],
+    ['Input tokens per hour', h ? fmtBig(h.inTok) : '–', 'at the goodput point, cached + new', h ? `new ${fmtBig(h.newTok)} (${pct(h.newTok / h.inTok, 1)}) · cached ${fmtBig(h.cachedTok)}` : ''],
+    ['Requests per hour', h ? fmtBig(h.req) : '–', 'completed, at the goodput point', h ? `${fmtK(h.inTok / h.req)} input tok per request` : ''],
     ['Peak useful', R && R.peak ? fmtK(R.peak.usefulTps) : '–', 'any TTFT', R && R.peak ? `C = ${R.peak.conc}, p90 ${fmtS(R.peak.ttftP90)} s` : ''],
     ['Wasted compute', sp && sp.proc ? pct((sp.rep + sp.pad) / sp.proc, 1) : '–', bp ? `of processed tokens, at C = ${bp.conc}` + (a ? '' : ' (peak)') : 'of processed tokens', sp && sp.proc ? `re-prefill ${pct(sp.rep / sp.proc, 1)} · padding ${pct(sp.pad / sp.proc, 1)}` : ''],
     ['Requests per batch', a ? a.avgSegsPerChunk.toFixed(2) : '–', 'average, at the goodput point (1 without batching)', a ? `batch ${Math.round(a.avgChunkTok)} tok, busy ${pct(a.maxUtil)}` + (R.peak && R.peak !== a ? ` · at peak ${R.peak.avgSegsPerChunk.toFixed(2)}` : '') : ''],
@@ -975,8 +985,8 @@ function render() {
   } else { $('bdBar').innerHTML = ''; $('bdLegend').innerHTML = ''; $('bdNote').textContent = ''; }
   // points table
   const rows = [];
-  for (const [nm, arr] of [['config', run ? run.real : []], ['∞ cache', run ? run.inf : []]]) for (const p of arr) rows.push(`<tr><td>${nm}</td><td class="n">${p.conc}</td><td class="n">${fmtK(p.usefulTps)}</td><td class="n">${fmtK(p.processedTps)}</td><td class="n">${fmtS(p.ttftP50)}</td><td class="n">${fmtS(p.ttftP90)}</td><td class="n">${pct(p.hitRate, 1)}</td><td class="n">${pct(p.reprefillFrac)}</td><td class="n">${pct(p.padFrac)}</td><td class="n">${pct(p.maxUtil)}</td><td class="n">${Math.round(p.avgChunkTok)}</td><td class="n">${p.avgSegsPerChunk != null ? p.avgSegsPerChunk.toFixed(2) : '–'}</td></tr>`);
-  $('ptsTable').innerHTML = rows.length ? `<table><thead><tr><th>run</th><th class="n">C</th><th class="n">useful</th><th class="n">processed</th><th class="n">TTFT p50</th><th class="n">p90</th><th class="n">hit</th><th class="n">re-prefill</th><th class="n">pad</th><th class="n">util</th><th class="n">chunk</th><th class="n">req/chunk</th></tr></thead><tbody>${rows.join('')}</tbody></table>` : '<p class="hint">No run yet.</p>';
+  for (const [nm, arr] of [['config', run ? run.real : []], ['∞ cache', run ? run.inf : []]]) for (const p of arr) { const hp = SIM.hourly(p); rows.push(`<tr><td>${nm}</td><td class="n">${p.conc}</td><td class="n">${fmtK(p.usefulTps)}</td><td class="n">${fmtK(p.processedTps)}</td><td class="n">${fmtS(p.ttftP50)}</td><td class="n">${fmtS(p.ttftP90)}</td><td class="n">${pct(p.hitRate, 1)}</td><td class="n">${fmtBig(hp.inTok)}</td><td class="n">${fmtBig(hp.newTok)}</td><td class="n">${fmtBig(hp.req)}</td><td class="n">${pct(p.reprefillFrac)}</td><td class="n">${pct(p.padFrac)}</td><td class="n">${pct(p.maxUtil)}</td><td class="n">${Math.round(p.avgChunkTok)}</td><td class="n">${p.avgSegsPerChunk != null ? p.avgSegsPerChunk.toFixed(2) : '–'}</td></tr>`); }
+  $('ptsTable').innerHTML = rows.length ? `<table><thead><tr><th>run</th><th class="n">C</th><th class="n">useful</th><th class="n">processed</th><th class="n">TTFT p50</th><th class="n">p90</th><th class="n">hit</th><th class="n">input/h</th><th class="n">new/h</th><th class="n">req/h</th><th class="n">re-prefill</th><th class="n">pad</th><th class="n">util</th><th class="n">chunk</th><th class="n">req/chunk</th></tr></thead><tbody>${rows.join('')}</tbody></table>` : '<p class="hint">No run yet.</p>';
 }
 function startRun() {
   if (!trafficBuf) decodeTraffic();
@@ -1085,6 +1095,8 @@ function renderRoadmap() {
   $('gridTable').innerHTML = `<table><thead><tr><th>topology</th><th class="n">budget / chunk</th><th class="n">lanes</th><th class="n">goodput</th><th class="n">p90</th><th class="n">hit</th><th></th></tr></thead><tbody>${S.grid.slice(0, 8).map((g, i) => `<tr><td class="mono">${topo(g.extra)}</td><td class="n">${g.extra.budget || g.extra.chunk}</td><td class="n">${g.extra.arenaTokens ? (g.extra.arenaTokens / 1e6) + 'M arena' : g.extra.lanes || '–'}</td><td class="n">${fmtK(g.goodput)}</td><td class="n">${g.at ? fmtS(g.at.ttftP90) : '–'}</td><td class="n">${g.at ? pct(g.at.hitRate) : '–'}</td><td>${i === 0 ? '<button type="button" id="loadBest">Load</button>' : ''}</td></tr>`).join('')}</tbody></table><p class="hint" style="margin-top:6px">[4,2] = TP=2 stage; today's KV allocation assumes one KV head per chip (TP=4), so it needs a KV-head sharding change.</p>`;
   const lb = $('loadBest'); if (lb) lb.addEventListener('click', () => { const i = PRESETS.findIndex((p) => p.name === 'best-' + curSc); if (i >= 0) { $('preset').value = String(i); $('preset').dispatchEvent(new Event('change')); location.hash = 'explore'; } });
   $('sensTable').innerHTML = `<table><thead><tr><th>variant</th><th class="n">goodput</th><th class="n">vs best</th></tr></thead><tbody>${S.sens.map((s) => `<tr><td>${esc(s.name === 'SLO-free peak' ? 'peak useful (no SLO)' : s.name)}</td><td class="n">${fmtK(s.name === 'SLO-free peak' ? s.peak : s.goodput)}</td><td class="n">${s.name === 'SLO-free peak' ? '' : '×' + (s.goodput / Math.max(1, S.grid[0].goodput)).toFixed(2)}</td></tr>`).join('')}</tbody></table>`;
+  const hourRows = [['Baseline (today)', S.greedy[0].at], ['Greedy full stack', S.full && S.full.at], ['Best configuration', S.grid[0].at]];
+  $('hourTable').innerHTML = `<table><thead><tr><th>configuration</th><th class="n">C</th><th class="n">p90</th><th class="n">input tok/h</th><th class="n">new tok/h</th><th class="n">cached tok/h</th><th class="n">hit</th><th class="n">requests/h</th></tr></thead><tbody>${hourRows.map(([nm, a]) => { const h = SIM.hourly(a); return h ? `<tr><td>${nm}</td><td class="n">${a.conc}</td><td class="n">${fmtS(a.ttftP90)}</td><td class="n">${fmtBig(h.inTok)}</td><td class="n">${fmtBig(h.newTok)}</td><td class="n">${fmtBig(h.cachedTok)}</td><td class="n">${pct(a.hitRate, 1)}</td><td class="n">${fmtBig(h.req)}</td></tr>` : `<tr><td>${nm}</td><td colspan="7" class="muted">no point meets the SLO</td></tr>`; }).join('')}</tbody></table>`;
   const C = colors();
   const ser = [{ name: 'baseline (today)', color: C.pin, pts: S.curves.base }, { name: 'best configuration', color: C.cfg, pts: S.curves.best }];
   $('cmpLegend').innerHTML = ser.map((s) => `<span><i style="background:${s.color}"></i>${s.name}</span>`).join('');
