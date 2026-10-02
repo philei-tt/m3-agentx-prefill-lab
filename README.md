@@ -141,7 +141,7 @@ Each layer is decomposed into the ops the implementation runs.
 
 **`opEff` knob.** It moves each op geometrically from its measured efficiency to a target (70% matmul, 80% DRAM/link, overlapped expert weight reads) and lowers the latency floors. 0 means today's kernels; 1 means roofline kernels.
 
-**Batching.** Batching needs the hybrid pool + lanes cache (`cache: 'pool'`); static slots and full paging run one request per chunk, and `makePlan` rejects batching with them. The infinite cache is exempt, being the reference every result is compared against. In the study, `batch` requires `pool`. `results/study.json` predates this rule: its leave-one-out for the pool still kept batching on slots. Several requests share one chunk: MoE and projections run on the padded total, and attention runs per request (`seq`) or once per chunk (`fused`), with a 110-core wave-quantization factor. Variable layout pads each segment to 32·SP tokens and adds an all-to-all KV write per layer.
+**Batching.** Batching works with every cache except static slots, which run one request per chunk; `makePlan` rejects batching with slots. In the study, whose base config uses slots, `batch` therefore requires `pool`. `results/study.json` predates this rule: its leave-one-out for the pool still kept batching on slots. Several requests share one chunk: MoE and projections run on the padded total, and attention runs per request (`seq`) or once per chunk (`fused`), with a 110-core wave-quantization factor. Variable layout pads each segment to 32·SP tokens and adds an all-to-all KV write per layer.
 
 **Memory per stage.**
 * weights: bf4 experts, bf8 attention, bf16 shared/dense MLP, embedding on stage 0, LM head on the last stage;

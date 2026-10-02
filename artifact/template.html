@@ -733,8 +733,8 @@ function syncUi() {
   for (const id of ['hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy']) $(id).disabled = !paged;
   $('arenaTokens').disabled = !pool || !$('laneArena').checked;
   $('lanes').disabled = !pool || $('laneArena').checked;
-  // several requests per chunk need the pool + lanes cache (the infinite cache is the reference, so it is allowed)
-  const canBatch = pool || $('cache').value === 'inf';
+  // static slots run one request per chunk; every other cache can batch
+  const canBatch = $('cache').value !== 'slots';
   if (!canBatch) $('batch').checked = false;
   $('batch').disabled = !canBatch;
   $('budget').disabled = !$('batch').checked; $('attn').disabled = !$('batch').checked; $('batchDynShape').disabled = !$('batch').checked;

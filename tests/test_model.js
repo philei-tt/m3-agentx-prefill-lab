@@ -38,9 +38,9 @@ assert.strictEqual(e0.moe.qkv, cal.effs['2x4'].moe.qkv);
 // 4. buffers that must hold a whole request are rejected when too small
 assert.ok(plan({ cache: 'pool', laneArena: true, arenaTokens: 5e5 }).errors.some((e) => e.includes('arena')));
 assert.ok(plan({ cache: 'slots', slotLen: 262144 }).errors.some((e) => e.includes('slots')));
-// batching needs the pool + lanes cache (the infinite cache is exempt as the reference)
-for (const cache of ['slots', 'paging']) assert.ok(plan({ cache, batch: true }).errors.some((e) => e.includes('batching')), cache);
-for (const cache of ['pool', 'inf']) assert.ok(!plan({ cache, batch: true }).errors.some((e) => e.includes('batching')), cache);
+// batching works with every cache except static slots
+assert.ok(plan({ cache: 'slots', batch: true }).errors.some((e) => e.includes('batching')));
+for (const cache of ['pool', 'paging', 'inf']) assert.ok(!plan({ cache, batch: true }).errors.some((e) => e.includes('batching')), cache);
 
 // 5. replay: paging with an unbounded pool behaves exactly like the infinite cache
 const base = { concurrency: 24, duration: 600, chunk: 2048 };

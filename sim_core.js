@@ -533,9 +533,8 @@
     } else if (cfg.cache === 'paging') poolTok = capTok;
     else poolTok = Infinity;
     if (cfg.cache === 'slots' && nSlots < 1) errors.push('no 1M slot fits in memory');
-    // several requests per chunk need the hybrid pool + lanes cache (static slots and full paging run one request
-    // per chunk); the infinite cache is exempt, being the reference every result is compared against
-    if (cfg.batch && (cfg.cache === 'slots' || cfg.cache === 'paging')) errors.push('batching needs the pool + lanes cache');
+    // static slots run one request per chunk; every other cache (pool, paging, infinite) can batch
+    if (cfg.batch && cfg.cache === 'slots') errors.push('batching is not supported with static slots');
     // every buffer that must hold a whole request has to fit the largest AgentX request (990,016 tokens)
     if (cfg.cache === 'slots' && cfg.slotLen < MAX_REQ) errors.push(`slots must hold the largest request (${MAX_REQ} tokens)`);
     if (cfg.cache === 'pool' && !cfg.laneArena && cfg.laneLen < MAX_REQ) errors.push(`lanes must hold the largest request (${MAX_REQ} tokens)`);
