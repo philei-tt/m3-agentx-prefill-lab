@@ -14,8 +14,9 @@ const CONCS = [8, 16, 24, 32, 48, 64, 96, 128, 160, 192, 256, 320, 384, 448, 512
 
 const FEATURES = [
   { key: 'unaligned', name: 'Unaligned (block-granular) resume', cfg: { unaligned: true } },
-  // copyMode pinned to 'double', the default when results/study.json was computed (the default is now 'sequential')
-  { key: 'pool', name: 'Slot lanes + paged KV pool (4 x 1M lanes per stage, copy-in/out)', cfg: { cache: 'pool', lanes: 4, laneArena: false, laneScope: 'stage', copyMode: 'double' } },
+  // copyMode pinned to 'double', the default when results/study.json was computed (the default is now 'sequential').
+  // lanes 4 applies only with batching (lanesOverride, see withFeatures); without it the lane count is derived
+  { key: 'pool', name: 'Slot lanes + paged KV pool (1M lanes per stage, copy-in/out)', cfg: { cache: 'pool', lanes: 4, laneArena: false, laneScope: 'stage', copyMode: 'double' } },
   { key: 'arena', name: 'Variable-size lanes (contiguous arena, 4M tokens)', cfg: { laneArena: true, arenaTokens: 4e6 }, requires: ['pool'] },
   { key: 'host', name: 'SSD KV tier (1 TB/galaxy, 64 GB/s)', cfg: { hostTier: true }, requires: ['pool'] },
   { key: 'idxdedup', name: 'index_k cache not replicated over TP (store once)', cfg: { idxDerep: true } },
@@ -42,8 +43,10 @@ function scenarios() {
 function withFeatures(base, keys) {
   const cfg = Object.assign({}, base);
   for (const k of keys) Object.assign(cfg, FEATURES.find((f) => f.key === k).cfg);
-  return cfg;
+  return laneCount(cfg);
 }
+// the lane count (`lanes`) can only be set with batching on the pool; otherwise it is derived (one request per chunk)
+function laneCount(cfg) { cfg.lanesOverride = !!cfg.batch && cfg.cache === 'pool'; return cfg; }
 const allowed = (keys, f) => (f.requires || []).every((r) => keys.includes(r));
 
 async function main() {
@@ -55,7 +58,7 @@ async function main() {
   const concs = quick ? CONCS.filter((_, i) => i % 3 === 0) : CONCS;
   const cache = new Map();
   const evalKeys = async (sc, keys, extra) => {
-    const cfg = Object.assign(withFeatures(sc.base, keys), extra || {});
+    const cfg = laneCount(Object.assign(withFeatures(sc.base, keys), extra || {}));
     const id = JSON.stringify(cfg);
     if (!cache.has(id)) cache.set(id, pool.evalCfg(id, cfg, concs, SLO).then((r) => Object.assign(r, summarize(r.points, SLO))));
     return cache.get(id);
@@ -147,4 +150,4 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { FEATURES, scenarios, withFeatures, CONCS, SLO };
+module.exports = { FEATURES, scenarios, withFeatures, laneCount, CONCS, SLO };

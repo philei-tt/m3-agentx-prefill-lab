@@ -9,13 +9,13 @@ const base = { galaxies: 4, stages: 16, mesh: [2, 4], chunk: 2048, split: 'auto'
 const B = { batch: true, budget: 16384 };
 const variants = [
   ['slots (today)', { cache: 'slots' }],
-  ['pool 4 lanes', { cache: 'pool', lanes: 4 }],
-  ['pool 4 lanes + batch 16k', { cache: 'pool', lanes: 4, ...B }],
-  ['pool 8 lanes + batch 16k', { cache: 'pool', lanes: 8, ...B }],
+  ['pool', { cache: 'pool' }],
+  ['pool 4 lanes + batch 16k', { cache: 'pool', lanes: 4, lanesOverride: true, ...B }],
+  ['pool 8 lanes + batch 16k', { cache: 'pool', lanes: 8, lanesOverride: true, ...B }],
   ['paging', { cache: 'paging' }],
   ['paging + batch 16k', { cache: 'paging', ...B }],
-  ['pool 4 lanes + host', { cache: 'pool', lanes: 4, hostTier: true }],
-  ['pool 4 lanes + host + batch 16k', { cache: 'pool', lanes: 4, hostTier: true, ...B }],
+  ['pool + host', { cache: 'pool', hostTier: true }],
+  ['pool 4 lanes + host + batch 16k', { cache: 'pool', lanes: 4, lanesOverride: true, hostTier: true, ...B }],
   ['paging + host', { cache: 'paging', hostTier: true }],
   ['paging + host + batch 16k', { cache: 'paging', hostTier: true, ...B }],
   ['inf cache', { cache: 'inf' }],

@@ -71,27 +71,37 @@ for (const cache of ['slots', 'inf']) {
 // 3. round robin on pool lanes
 const pool = { cache: 'pool', laneScope: 'stage', copyMode: 'double', policy: 'rr' };
 const batched = Object.assign({ batch: true, chunk: 1024, budget: 8192, layout: 'fixed' }, pool);
-// 3a. lane count: auto = stages without batching, chunk units per batch with batching; rrLanes sets it
-assert.strictEqual(SIM.makePlan(Object.assign({ chunk: 2048 }, pool), cal).lanes, 16);
-assert.strictEqual(SIM.makePlan(batched, cal).lanes, 8);
-assert.strictEqual(SIM.makePlan(Object.assign({}, batched, { rrLanes: 3 }), cal).lanes, 3);
+// 3a. lane count per stage (every policy): buffers of the copy mode x the most requests per chunk (1 unbatched, the
+//     chunk units per batch with fixed-layout batching); lanesOverride sets it, only with batching on the pool
+const lanesOf = (cfg) => SIM.makePlan(cfg, cal).lanes;
+for (const [copyMode, buf] of [['sequential', 1], ['double', 2], ['overlap3', 3]]) {
+  for (const policy of ['rr', 'rtc']) assert.strictEqual(lanesOf(Object.assign({ chunk: 2048 }, pool, { copyMode, policy })), buf, `${copyMode} ${policy}`);
+  assert.strictEqual(lanesOf(Object.assign({}, batched, { copyMode })), 8 * buf, `batched ${copyMode}`);
+}
+assert.strictEqual(lanesOf(Object.assign({}, batched, { lanesOverride: true, lanes: 3 })), 3);
+// a global lane table holds the lane for the whole trip: (stages + buffers - 1) x requests per chunk
+assert.strictEqual(lanesOf(Object.assign({ chunk: 2048 }, pool, { laneScope: 'global' })), 16 + 1);
+assert.strictEqual(lanesOf(Object.assign({}, batched, { laneScope: 'global', copyMode: 'sequential' })), 16 * 8);
+assert.strictEqual(lanesOf(Object.assign({ chunk: 2048 }, pool, { lanes: 7 })), 2, '`lanes` is ignored without the override');
+assert.ok(SIM.makePlan(Object.assign({ chunk: 2048 }, pool, { lanesOverride: true }), cal).errors.some((e) => e.includes('overriding')), 'override without batching');
+assert.ok(SIM.makePlan({ cache: 'paging', batch: true, lanesOverride: true }, cal).errors.some((e) => e.includes('overriding')), 'override without the pool');
 // a variable-layout batch has no chunk units: the lane count (the most requests per batch) must be given
 const varBatched = Object.assign({}, batched, { layout: 'var' });
-assert.ok(SIM.makePlan(varBatched, cal).errors.some((e) => e.includes('rrLanes')), 'var-layout batching without rrLanes');
-assert.ok(!SIM.makePlan(Object.assign({}, varBatched, { rrLanes: 5 }), cal).errors.length);
-assert.ok(trace(Object.assign({}, varBatched, { rrLanes: 5 })).chunks.every((ch) => ch.length <= 5), 'var layout: more requests per batch than lanes');
-assert.strictEqual(SIM.makePlan(Object.assign({ lanes: 5 }, pool, { policy: 'rtc' }), cal).lanes, 5, 'other policies keep `lanes`');
+assert.ok(SIM.makePlan(varBatched, cal).errors.some((e) => e.includes('lanesOverride')), 'var-layout batching without a lane count');
+const var5 = Object.assign({}, varBatched, { lanesOverride: true, lanes: 5 });
+assert.ok(!SIM.makePlan(var5, cal).errors.length);
+assert.ok(trace(var5).chunks.every((ch) => ch.length <= 5), 'var layout: more requests per batch than lanes');
 // 3b. the lane count bounds the requests per batch, not the requests in progress (the partial KV is in the pool);
 //     each request of a batch has its own lane
 {
-  const { chunks } = trace(Object.assign({}, batched, { rrLanes: 3 }));
+  const { chunks } = trace(Object.assign({}, batched, { lanesOverride: true, lanes: 3 }));
   assert.ok(chunks.every((ch) => ch.length <= 3 && new Set(ch.map((x) => x[5])).size === ch.length), 'lanes per batch');
   assert.ok(maxOpen(chunks) > 3, 'in-progress requests capped by lanes');
   assert.ok(once(chunks) && fair(chunks));
 }
 // 3c. copy-in is skipped only when the lane still holds the request's context (the request used it last); a
 //     request's first turn always copies its cached prefix in
-for (const cfg of [Object.assign({ chunk: 2048 }, pool), Object.assign({}, batched, { rrLanes: 4 })]) {
+for (const cfg of [Object.assign({ chunk: 2048 }, pool), Object.assign({}, batched, { lanesOverride: true, lanes: 4 })]) {
   const m = trace(Object.assign({}, cfg, { concurrency: 160 }));
   const holder = new Map(), laneOf = new Map(); let reused = 0, missed = 0;
   for (const ch of m.chunks) for (const [q, , first, , miss, lane] of ch) {
@@ -106,7 +116,7 @@ for (const cfg of [Object.assign({ chunk: 2048 }, pool), Object.assign({}, batch
 // 4. the default policy is unchanged by the round-robin code (same results as without the option set)
 {
   const a = SIM.simulate(TR, cal, { concurrency: 64, duration: 300, chunk: 2048 });
-  const b = SIM.simulate(TR, cal, { concurrency: 64, duration: 300, chunk: 2048, policy: 'rtc', rrLanes: 4 });
+  const b = SIM.simulate(TR, cal, { concurrency: 64, duration: 300, chunk: 2048, policy: 'rtc' });
   assert.strictEqual(a.usefulTps, b.usefulTps); assert.strictEqual(a.events, b.events);
 }
 

@@ -364,7 +364,13 @@
     //   traces compiled for every size up to the budget; false = one static budget-sized shape, padded when not full
     batchDynShape: true,
     cache: 'slots',        // slots | pool | paging | inf
-    lanes: 3, laneScope: 'stage', laneLen: M3.maxCtx, laneArena: false, arenaTokens: 4e6,
+    // pool lanes per stage, derived from r = the most requests a chunk holds (1 without batching, the chunk units per
+    //   batch with fixed-layout batching; every request in a chunk needs its own lane) and b = the buffers of the copy
+    //   mode (sequential 1, double 2, overlap3 3): per-stage lane table = b x r (a stage works on one chunk at a
+    //   time); global lane table = (stages + b - 1) x r (a lane is held for the whole trip through the pipeline, one
+    //   chunk per stage in flight, plus the copy buffers). lanesOverride (batching on the pool only) sets `lanes`
+    //   instead; variable-layout batching has no chunk units, so it must override. Arena lanes ignore the count.
+    lanes: 3, lanesOverride: false, laneScope: 'stage', laneLen: M3.maxCtx, laneArena: false, arenaTokens: 4e6,
     slotLen: M3.maxCtx, unaligned: false,
     // pool copy-in (cached prefix pool->lane) / copy-out (new KV lane->pool):
     //   'sequential' = (default) copy-out, copy-in, then prefill: full copy time on the stage, lanes held only while
@@ -391,15 +397,12 @@
     // Round robin on the pool (policy 'rr', cache 'pool'). A lane is a per-stage KV slot the attention kernels run on
     //   (fixed laneLen, or request-sized in the arena). Every turn copies the segment's new KV out to the pool, where
     //   the partial KV stays pinned until the request finishes, so a lane never holds the only copy and can be handed
-    //   to another request at any turn.
-    //   rrLanes: lanes per stage; 0 = auto: the number of stages without batching (one request per stage in flight),
-    //     the chunk units per batch with batching (the most requests a batch can hold); it replaces `lanes` under rr.
+    //   to another request at any turn. The lane count is the same as for the other policies (see `lanes`).
     //   Copy-in: a request whose lane still holds its context (not handed to another request since its last turn)
     //     reuses it without a copy-in; on a miss it takes a free lane, else the least recently used one, and copies
     //     its whole context so far in. Arena lanes always copy in.
     //   With the pool, and with paging, round robin admits a request only while the pool can hold every in-progress
     //   request in full (like tt-d-gen, where admission needs a free slot and in-flight slots are never evicted).
-    rrLanes: 0,
   };
 
   function kvBytesPerTokenLayer(cfg, tp) { // whole stage, physical
@@ -474,13 +477,10 @@
     // largest chunk: the budget when batching on a variable layout, whole chunks otherwise
     const Tchunk = cfg.batch ? (cfg.layout === 'var' ? cfg.budget : Math.max(cfg.budget, cfg.chunk)) : cfg.chunk;
     const Tmax = Tchunk;
-    // round robin on fixed pool lanes: rrLanes, or auto = stages (no batching) / chunk units per batch (fixed-layout
-    // batching). Every request in a batch holds a lane, so the lane count is the most requests per batch; a
-    // variable-layout batch has no chunk units (a request can take as little as 32*SP tokens), so there the count
-    // must be given
-    const rrFixedLanes = cfg.policy === 'rr' && cfg.cache === 'pool' && !cfg.laneArena;
-    const rrNoAuto = rrFixedLanes && cfg.batch && cfg.layout === 'var' && !(cfg.rrLanes > 0);
-    const rrLaneN = rrFixedLanes ? (cfg.rrLanes > 0 ? cfg.rrLanes : cfg.batch ? Math.max(1, Math.floor(Tchunk / cfg.chunk)) : S) : 0;
+    // pool lanes per stage (see DEFAULTS.lanes): buffers x the most requests per chunk, or lanesOverride
+    const laneBuffers = cfg.copyMode === 'overlap3' ? 3 : cfg.copyMode === 'double' ? 2 : 1;
+    const reqsPerChunk = !cfg.batch ? 1 : cfg.layout === 'var' ? 0 : Math.max(1, Math.floor(Tchunk / cfg.chunk));
+    const fixedLanes = cfg.cache === 'pool' && !cfg.laneArena;
     // handoff: measured = blocking send + hop latency (fitted, per chunk); async = link-rate transfer, overlapped
     const actXfer = (T) => T * M3.E * BF16 / (P * HW.linkUni * 0.5) * 1e3; // ms, each chip ships its shard
     const blockMs = (T) => (cfg.asyncHandoff ? 0 : Math.max(0, pm.block[0] + pm.block[1] * T / 1000));
@@ -533,14 +533,20 @@
     if (cfg.cache === 'slots') { nSlots = Math.floor(capTok / cfg.slotLen); lanes = nSlots; }
     else if (cfg.cache === 'pool') {
       if (cfg.laneArena) { arena = Math.min(capTok, cfg.arenaTokens); poolTok = capTok - arena; }
-      else { lanes = rrLaneN || cfg.lanes; poolTok = capTok - lanes * cfg.laneLen; }
+      else {
+        const r = Math.max(1, reqsPerChunk);
+        lanes = cfg.lanesOverride ? cfg.lanes : cfg.laneScope === 'stage' ? laneBuffers * r : (S + laneBuffers - 1) * r;
+        poolTok = capTok - lanes * cfg.laneLen;
+      }
       if (poolTok < 0) errors.push('lanes do not fit in memory');
     } else if (cfg.cache === 'paging') poolTok = capTok;
     else poolTok = Infinity;
     if (cfg.cache === 'slots' && nSlots < 1) errors.push('no 1M slot fits in memory');
     // static slots run one request per chunk; every other cache (pool, paging, infinite) can batch
     if (cfg.batch && cfg.cache === 'slots') errors.push('batching is not supported with static slots');
-    if (rrNoAuto) errors.push('round robin with variable-layout batching on the pool needs rrLanes (the most requests per batch)');
+    if (cfg.lanesOverride && !(cfg.batch && cfg.cache === 'pool')) errors.push('overriding the lane count needs batching with the pool cache');
+    if (fixedLanes && cfg.batch && reqsPerChunk === 0 && !cfg.lanesOverride) errors.push('variable-layout batching on the pool needs the lane count set (lanesOverride)');
+    if (cfg.lanesOverride && !(cfg.lanes >= 1)) errors.push('the lane count must be at least 1');
     // every buffer that must hold a whole request has to fit the largest AgentX request (990,016 tokens)
     if (cfg.cache === 'slots' && cfg.slotLen < MAX_REQ) errors.push(`slots must hold the largest request (${MAX_REQ} tokens)`);
     if (cfg.cache === 'pool' && !cfg.laneArena && cfg.laneLen < MAX_REQ) errors.push(`lanes must hold the largest request (${MAX_REQ} tokens)`);

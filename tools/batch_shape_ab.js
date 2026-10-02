@@ -6,7 +6,7 @@
 'use strict';
 const fs = require('fs');
 const { Pool, summarize } = require('../lib/pool.js');
-const { withFeatures, CONCS, SLO } = require('../study.js');
+const { withFeatures, laneCount, CONCS, SLO } = require('../study.js');
 const { STUDY } = require('../lib/paths.js');
 
 const BUDGETS = [4096, 8192, 16384, 32768];
@@ -27,7 +27,7 @@ async function main() {
     groups.push({ name: `${key} best stack, fixed C=256`, base: Object.assign({}, b, { layout: 'fixed', chunk: 256 }), noBatch: Object.assign({}, b, { layout: 'fixed', chunk: 2048 }) });
     groups.push({ name: `${key} best stack, var layout`, base: Object.assign({}, b, { layout: 'var', chunk: 5120 }) });
   }
-  const run = (id, cfg) => pool.evalCfg(id, cfg, CONCS, SLO).then((r) => summarize(r.points, SLO));
+  const run = (id, cfg) => pool.evalCfg(id, laneCount(cfg), CONCS, SLO).then((r) => summarize(r.points, SLO));
   const res = await Promise.all(groups.map(async (G) => {
     const rows = await Promise.all(BUDGETS.flatMap((B) => [true, false].map((dyn) =>
       run(`${G.name} ${B} ${dyn}`, Object.assign({}, G.base, { batch: true, budget: B, batchDynShape: dyn })).then((s) => ({ B, dyn, s })))));
