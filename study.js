@@ -14,11 +14,12 @@ const CONCS = [8, 16, 24, 32, 48, 64, 96, 128, 160, 192, 256, 320, 384, 448, 512
 
 const FEATURES = [
   { key: 'unaligned', name: 'Unaligned (block-granular) resume', cfg: { unaligned: true } },
-  // copyMode pinned to 'double', the default when results/study.json was computed (the default is now 'sequential').
-  // lanes 4 applies only with batching (lanesOverride, see withFeatures); without it the lane count is derived
-  { key: 'pool', name: 'Slot lanes + paged KV pool (1M lanes per stage, copy-in/out)', cfg: { cache: 'pool', lanes: 4, laneArena: false, laneScope: 'stage', copyMode: 'double' } },
+  // lanes 4 applies only with batching (lanesOverride, see laneCount); without it the lane count is derived (1 lane
+  // per stage with the default sequential copies)
+  { key: 'pool', name: 'Slot lanes + paged KV pool (1M lanes per stage, copy-in/out)', cfg: { cache: 'pool', lanes: 4, laneArena: false, laneScope: 'stage' } },
   { key: 'arena', name: 'Variable-size lanes (contiguous arena, 4M tokens)', cfg: { laneArena: true, arenaTokens: 4e6 }, requires: ['pool'] },
-  { key: 'host', name: 'SSD KV tier (1 TB/galaxy, 64 GB/s)', cfg: { hostTier: true }, requires: ['pool'] },
+  // behind static slots too: an evicted slot is written to SSD and read back when its stream returns
+  { key: 'host', name: 'SSD KV tier (1 TB/galaxy, 64 GB/s)', cfg: { hostTier: true } },
   { key: 'idxdedup', name: 'index_k cache not replicated over TP (store once)', cfg: { idxDerep: true } },
   { key: 'idxbf8', name: 'index_k cache bf8 instead of bf16', cfg: { idxBf16: false } },
   { key: 'var', name: 'Variable chunk / flexible SP layout (a2a KV write)', cfg: { layout: 'var' } },
@@ -27,13 +28,13 @@ const FEATURES = [
   { key: 'fused', name: 'Fused multi-user attention', cfg: { attn: 'fused' }, requires: ['batch', 'pool'] },
   { key: 'async', name: 'Async stage handoff (overlap D2D)', cfg: { asyncHandoff: true } },
   { key: 'msa', name: 'MSA SP-local indexer (no K/V/index prefix all-gather)', cfg: { msaLocal: true } },
-  { key: 'srpt', name: 'Shortest-first scheduling (30 s aging)', cfg: { policy: 'srpt' } },
+  // the base schedules round robin (the simulator's default, as tt-d-gen); this switches to shortest-first run to completion
+  { key: 'srpt', name: 'Shortest-first run to completion (30 s aging)', cfg: { policy: 'srpt' } },
 ];
 
 function scenarios() {
-  // run to completion: what results/study.json was computed with (the simulator's default is now round robin)
-  const base4 = { galaxies: 4, stages: 16, mesh: [2, 4], split: 'auto', chunk: 2048, cache: 'slots', policy: 'rtc' };
-  const base8 = { galaxies: 8, stages: 32, mesh: [2, 4], split: 'auto', chunk: 2048, cache: 'slots', policy: 'rtc' };
+  const base4 = { galaxies: 4, stages: 16, mesh: [2, 4], split: 'auto', chunk: 2048, cache: 'slots' };
+  const base8 = { galaxies: 8, stages: 32, mesh: [2, 4], split: 'auto', chunk: 2048, cache: 'slots' };
   return [
     { key: 'g4_k0', label: '4 galaxies, today\'s kernels', base: Object.assign({ opEff: 0 }, base4) },
     { key: 'g4_k1', label: '4 galaxies, roofline kernels', base: Object.assign({ opEff: 1 }, base4) },
@@ -43,9 +44,7 @@ function scenarios() {
 }
 
 function withFeatures(base, keys) {
-  // the study ran with run to completion: keep it unless a feature sets a policy (results/study.json stores bases
-  // without one)
-  const cfg = Object.assign({ policy: 'rtc' }, base);
+  const cfg = Object.assign({}, base);
   for (const k of keys) Object.assign(cfg, FEATURES.find((f) => f.key === k).cfg);
   return laneCount(cfg);
 }
@@ -141,9 +140,8 @@ async function main() {
       ['[4,4] torus stages', sc.base.galaxies === 4 ? { mesh: [4, 4], stages: 8, replicas: 1 } : { mesh: [4, 4], stages: 16, replicas: 1 }],
     ];
     if (good.includes('pool')) sens.push(
-      // a global lane table allows only sequential copies (results/study.json has this row with double-buffered ones)
-      ['global lane table', { laneScope: 'global', copyMode: 'sequential' }],
-      ['copies sequential', { copyMode: 'sequential' }], ['copies triple-buffered', { copyMode: 'overlap3' }],
+      ['global lane table', { laneScope: 'global' }], // sequential copies only (the default)
+      ['copies double-buffered', { copyMode: 'double' }], ['copies triple-buffered', { copyMode: 'overlap3' }],
       good.includes('arena') ? ['4 fixed 1M lanes', { laneArena: false, lanes: 4 }] : ['2M lane arena', { laneArena: true, arenaTokens: 2e6 }],
     );
     R.sens = await Promise.all(sens.map(([name, d]) => evalKeys(sc, good, Object.assign({}, bestExtra, d)).then((r) => ({ name, goodput: r.goodput, peak: r.peak ? r.peak.usefulTps : 0, at: r.at }))));

@@ -480,7 +480,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li><b>Lane table ("Lane table" control).</b>
             <ul>
               <li><b>Per stage (default):</b> each stage allocates a lane only while it works through the request's chunks. That's about 1–3 chunks' worth of requests per stage.</li>
-              <li><b>Global, like today's slot_id:</b> a lane is held on every stage for the request's whole trip through the pipeline, so you need roughly stages × requests-per-chunk lanes. On the best 4-galaxy config, global lanes cap goodput near 25k instead of 45k unless the arena grows to about 8M tokens.</li>
+              <li><b>Global, like today's slot_id:</b> a lane is held on every stage for the request's whole trip through the pipeline, so you need stages × requests-per-batch lanes, and its copies can only be sequential. On the best 4-galaxy config a global lane table drops goodput from 45.1k to 13.6k.</li>
               <li>Each stage keeps its own KV tensors, so a per-stage table is feasible. It is a prerequisite for combining the pool with batching.</li>
             </ul>
           </li>
@@ -498,7 +498,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       </li>
       <li><b>SSD KV tier = offloading KV to NVMe drives on the galaxy hosts.</b>
         <ul>
-          <li><b>Static slots.</b> When a slot is reclaimed, its conversation's KV is written to SSD (the new occupant waits for the write-back), and that conversation's next request reads the prefix it shares back before it is admitted. One copy per conversation: nothing is shared between conversations, unlike pool pages. On today-C (4 galaxies, unaligned), 1 TB per galaxy lifts goodput from 3.1k to 16.0k; the pool with one lane and the same SSD reaches 23.8k.</li>
+          <li><b>Static slots.</b> When a slot is reclaimed, its conversation's KV is written to SSD (the new occupant waits for the write-back), and that conversation's next request reads the prefix it shares back before it is admitted. One copy per conversation: nothing is shared between conversations, unlike pool pages. On today-C (4 galaxies, unaligned, round robin), 1 TB per galaxy lifts goodput from 3.3k to 16.4k; the pool with one lane and the same SSD reaches 24.9k.</li>
           <li><b>Mechanism (pool and paging).</b> When the device pool evicts a page, it is written to SSD instead of being dropped. A later hit on it is read back into the request's lane while the request waits in the queue. The SSD tier evicts least-recently-used too. Write-backs and fetches share one bandwidth per galaxy: the lower of the drives' and PCIe's. Index keys are stored once on SSD, not per TP column.</li>
           <li><b>Defaults:</b> 1 TB and 64 GB/s per galaxy. These are placeholders carried over from the earlier host-DRAM tier, not SSD specs; set the real drive capacity and bandwidth.</li>
           <li><b>What matters.</b> Capacity matters much more than bandwidth. At 8 TB per galaxy the results match an infinite cache; dropping bandwidth from 64 to 16 GB/s costs at most 13%.</li>

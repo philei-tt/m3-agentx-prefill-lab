@@ -17,7 +17,7 @@ module.exports = {
     notes: 'Prerequisite for the SSD KV tier. The lane count limits how many requests can share a batched chunk.',
   },
   host: {
-    what: 'A second KV tier on NVMe SSDs in the galaxy hosts, behind the device pool. Pages the device evicts are written to SSD instead of dropped. When a request hits an SSD-resident prefix, those pages are read back into its lane while the request waits in the queue.',
+    what: 'A second KV tier on NVMe SSDs in the galaxy hosts, behind the device pool or the static slots. With the pool, pages the device evicts are written to SSD instead of dropped; with static slots, a reclaimed slot is written to SSD and read back when its conversation returns (one copy per conversation, no prefix sharing). When a request hits an SSD-resident prefix, those pages are read back into its lane while the request waits in the queue.',
     why: 'M3 KV is about 127 KB per token today (73 KB with the index-cache fixes). 4 galaxies hold about 21M tokens on device, but the live working set of AgentX near the throughput limit is several times larger, so the device pool alone still evicts conversations that come back minutes later. Each TB of SSD per galaxy adds about 32M tokens (56M with the index fixes). A hit costs a read: a 150k-token prefix is about 19 GB, about 75 ms at 4 × 64 GB/s or about 0.3 s at 4 × 16 GB/s, done while the request is queued. In the simulation capacity matters a lot (0.5 → 2 TB per galaxy: 36.8k → 54.5k goodput at 4 galaxies with today\'s kernels; 8 TB matches an infinite cache) and bandwidth much less (64 → 16 GB/s per galaxy costs at most 13%).',
     todo: [
       'SSD page store with its own LRU and an index from block hash to file offset.',
@@ -26,7 +26,7 @@ module.exports = {
       'Measure the real drive capacity and sustained read/write bandwidth per galaxy host; the model uses one symmetric bandwidth (placeholder 1 TB, 64 GB/s per galaxy).',
       'Watch write endurance: evictions are written continuously under load.',
     ],
-    notes: 'Requires the paged pool. Capacity is what matters; check how the AgentX rules treat SSD-backed KV (they cap host DRAM per system).',
+    notes: 'Works behind the pool or static slots. Capacity is what matters; check how the AgentX rules treat SSD-backed KV (they cap host DRAM per system).',
   },
   idxdedup: {
     what: 'The index-key cache used by the MSA indexer (one 128-wide key per token per layer, bf16) is stored on all 4 TP columns. That is 1024 of the 2112 bytes per token per layer: 48% of all KV memory. Store it once per SP row and gather it inside the indexer. The dense layers also allocate a zero-filled index cache, which can be dropped.',
@@ -115,7 +115,7 @@ module.exports = {
     notes: 'Not recommended: sequential per-request attention is as good. That confirms the "batch the MoE, attention per request" plan.',
   },
   srpt: {
-    what: 'Order the queue by new tokens (shortest first), with 30 s aging so long requests are not starved.',
+    what: 'Replace round robin (the base, as tt-d-gen) with run to completion, the queue ordered by new tokens (shortest first) with 30 s aging so long requests are not starved.',
     why: 'Short requests stop waiting behind 50k-token prefills, so p90 TTFT drops and more load fits under the SLO: ×1.00-1.08.',
     todo: ['Scheduler-only change.'],
     notes: 'Cheap; its gain grows near saturation.',
