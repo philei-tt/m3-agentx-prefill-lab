@@ -367,13 +367,14 @@
     lanes: 3, laneScope: 'stage', laneLen: M3.maxCtx, laneArena: false, arenaTokens: 4e6,
     slotLen: M3.maxCtx, unaligned: false,
     // pool copy-in (cached prefix pool->lane) / copy-out (new KV lane->pool):
-    //   'sequential' = copy-out, copy-in, then prefill: full copy time on the stage, lanes held only while computing
+    //   'sequential' = (default) copy-out, copy-in, then prefill: full copy time on the stage, lanes held only while
+    //                  computing
     //   'double'     = double-buffered: copies overlap compute (copyContention of their time is charged for DRAM
     //                  sharing); a lane is held for its own copy-out after the last chunk plus the next occupant's
     //                  copy-in before its first chunk (peak ~2x the computing lanes, briefly)
     //   'overlap3'   = static triple buffering: next batch copying in, current computing, previous copying out, each
     //                  for a whole chunk period (peak 3x)
-    copyMode: 'double', copyContention: 0.25,
+    copyMode: 'sequential', copyContention: 0.25,
     hostTier: false, hostGBPerGalaxy: 1024, pcieGBsPerGalaxy: 64,
     reserveGB: 3, expertImb: IMB0, maxInflight: 0,
     concurrency: 64, decodeTps: 180, duration: 1800, seed: 1, idleCap: 10, startMin: 0, startMax: 1, maxWarmup: 1e6,

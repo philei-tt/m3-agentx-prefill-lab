@@ -189,7 +189,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <legend>KV cache</legend>
     <div class="row"><label for="cache">Residency</label><select id="cache"><option value="slots">static 1M slots</option><option value="pool">slot lanes + paged pool</option><option value="paging">full paging (ideal)</option><option value="inf">infinite cache</option></select></div>
     <div class="row"><label for="laneScope">Lane table</label><select id="laneScope"><option value="stage">per stage</option><option value="global">global (today's slot_id)</option></select></div>
-    <div class="row"><label for="copyMode">Pool copies</label><select id="copyMode"><option value="double">double-buffered</option><option value="sequential">sequential</option><option value="overlap3">triple-buffered</option></select></div>
+    <div class="row"><label for="copyMode">Pool copies</label><select id="copyMode"><option value="sequential">sequential</option><option value="double">double-buffered</option><option value="overlap3">triple-buffered</option></select></div>
     <div class="row"><label for="lanes">Lanes per stage</label><input id="lanes" type="number" min="1" max="32" step="1"></div>
     <div class="row check"><input id="laneArena" type="checkbox"><label for="laneArena">Variable-size lanes (arena)</label></div>
     <div class="row"><label for="arenaTokens">Arena (M tokens)</label><select id="arenaTokens"><option value="2000000">2</option><option value="4000000">4</option><option value="8000000">8</option></select></div>
@@ -486,8 +486,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           </li>
           <li><b>Pool copies ("Pool copies" control).</b>
             <ul>
-              <li><b>Double-buffered (default):</b> copies overlap compute, and 25% of their time is charged for DRAM sharing. A lane stays held for its own copy-out and for the next occupant's copy-in. The peak is about 2× the computing lanes, briefly.</li>
-              <li><b>Sequential:</b> copy-out, copy-in, then prefill. The full copy time goes on the stage; lanes are held only while computing.</li>
+              <li><b>Sequential (default):</b> copy-out, copy-in, then prefill. The full copy time goes on the stage; lanes are held only while computing.</li>
+              <li><b>Double-buffered:</b> copies overlap compute, and 25% of their time is charged for DRAM sharing. A lane stays held for its own copy-out and for the next occupant's copy-in. The peak is about 2× the computing lanes, briefly. The study's pool feature uses this mode.</li>
               <li><b>Triple-buffered:</b> next batch copying in, current computing, previous copying out, each for a whole chunk period. The peak is 3×.</li>
               <li>Copies take about 1.4 ms per stage for a median 140k-token prefix and about 10 ms for 1M, against a 50–120 ms chunk. On the best configs the three modes differ by about 1%; with fixed 1M lanes, triple buffering costs more memory.</li>
             </ul>
