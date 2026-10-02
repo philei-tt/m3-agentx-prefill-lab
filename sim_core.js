@@ -544,8 +544,13 @@
     } else if (cfg.cache === 'paging') poolTok = capTok;
     else poolTok = Infinity;
     if (cfg.cache === 'slots' && nSlots < 1) errors.push('no 1M slot fits in memory');
-    // static slots run one request per chunk; every other cache (pool, paging, infinite) can batch
-    if (cfg.batch && cfg.cache === 'slots') errors.push('batching is not supported with static slots');
+    // static slots: a slot is held for the request's whole trip through the pipeline (today's slot_id), so a full
+    // pipeline has (requests per batch) x (stages) requests in flight, each in its own 1M slot. A variable-layout
+    // batch has no chunk units: up to budget / (32*SP) requests
+    if (cfg.cache === 'slots') {
+      const r = !cfg.batch ? 1 : cfg.layout === 'var' ? Math.floor(Tchunk / (32 * sp)) : reqsPerBatch;
+      if (r * S > nSlots) errors.push(`out of memory: ${r} requests per batch x ${S} stages = ${r * S} slots in flight, but only ${nSlots} 1M slots fit`);
+    }
     // the override only applies to fixed pool lanes (other caches have none and ignore it, as they ignore `lanes`,
     // so a pool config can be re-run with cache 'inf' as is); without batching the count is derived
     if (cfg.lanesOverride && cfg.cache === 'pool' && !cfg.batch) errors.push('overriding the lane count needs batching (without it the count is derived)');

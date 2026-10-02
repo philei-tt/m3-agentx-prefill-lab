@@ -38,9 +38,13 @@ assert.strictEqual(e0.moe.qkv, cal.effs['2x4'].moe.qkv);
 // 4. buffers that must hold a whole request are rejected when too small
 assert.ok(plan({ cache: 'pool', laneArena: true, arenaTokens: 5e5 }).errors.some((e) => e.includes('arena')));
 assert.ok(plan({ cache: 'slots', slotLen: 262144 }).errors.some((e) => e.includes('slots')));
-// batching works with every cache except static slots
-assert.ok(plan({ cache: 'slots', batch: true }).errors.some((e) => e.includes('batching')));
-for (const cache of ['pool', 'paging', 'inf']) assert.ok(!plan({ cache, batch: true }).errors.some((e) => e.includes('batching')), cache);
+// batching works with every cache; static slots run out of memory when requests per batch x stages > slots
+const oom = (cfg) => plan(cfg).errors.some((e) => e.startsWith('out of memory'));
+assert.ok(oom({ cache: 'slots', batch: true, budget: 8192 }), '4 per batch x 16 stages > 20 slots');
+assert.ok(!oom({ cache: 'slots' }) && !oom({ cache: 'slots', galaxies: 8, stages: 32 }), 'unbatched slots fit');
+assert.ok(!oom({ cache: 'slots', batch: true, budget: 8192, stages: 4, mesh: [8, 4] }), '4 per batch x 4 stages <= 22 slots');
+assert.ok(oom({ cache: 'slots', batch: true, budget: 8192, layout: 'var', stages: 4, mesh: [8, 4] }), 'var layout: budget / 32SP per batch');
+for (const cache of ['pool', 'paging', 'inf']) assert.ok(!plan({ cache, batch: true }).errors.length, cache);
 
 // 5. replay: paging with an unbounded pool behaves exactly like the infinite cache
 const base = { concurrency: 24, duration: 600, chunk: 2048 };

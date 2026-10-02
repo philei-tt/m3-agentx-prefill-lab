@@ -22,6 +22,7 @@ const FEATURES = [
   { key: 'idxdedup', name: 'index_k cache not replicated over TP (store once)', cfg: { idxDerep: true } },
   { key: 'idxbf8', name: 'index_k cache bf8 instead of bf16', cfg: { idxBf16: false } },
   { key: 'var', name: 'Variable chunk / flexible SP layout (a2a KV write)', cfg: { layout: 'var' } },
+  // on the static-slot base, batching runs out of memory (8 requests per batch x 16 stages > 20 slots), so it needs pool
   { key: 'batch', name: 'Multi-request batching (16k token budget)', cfg: { batch: true, budget: 16384 }, requires: ['pool'] },
   { key: 'fused', name: 'Fused multi-user attention', cfg: { attn: 'fused' }, requires: ['batch', 'pool'] },
   { key: 'async', name: 'Async stage handoff (overlap D2D)', cfg: { asyncHandoff: true } },

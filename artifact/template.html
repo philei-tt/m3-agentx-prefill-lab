@@ -207,13 +207,13 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row"><label for="chunk">Chunk size</label><select id="chunk"><option>128</option><option>256</option><option>512</option><option>1024</option><option>2048</option><option>4096</option><option>5120</option><option>8192</option></select></div>
     <div class="hint" id="chunkHint" hidden>Not used: with batching on a variable layout, the token budget below is the chunk size.</div>
     <div class="row check"><input id="batch" type="checkbox"><label for="batch">Batch several requests per pipeline pass</label></div>
-    <div class="hint" id="batchHint" hidden>Not available with static 1M slots, which run one request per chunk. Choose another KV residency above to batch.</div>
+    <div class="hint" id="batchHint" hidden>With static 1M slots a request holds its slot for the whole pipeline trip, so requests per batch × stages must fit in the slots; otherwise the plan reports out of memory.</div>
     <div class="row"><label for="budget">Token budget</label><select id="budget"><option>4096</option><option>5120</option><option>8192</option><option>16384</option><option>32768</option></select></div>
     <div class="row check"><input id="lanesOverride" type="checkbox"><label for="lanesOverride">Override lanes per stage (batching + hybrid pool only)</label></div>
     <div class="row"><label for="lanes">Lanes per stage</label><input id="lanes" type="number" min="1" max="32" step="1"></div>
-    <div class="hint">Derived unless overridden: one lane per request a batch can hold (1 without batching, the chunk units per batch with batching) × the buffers of the copy mode (sequential 1, double 2, triple 3). A global lane table holds a lane for the whole pipeline trip, so it needs (stages + buffers − 1) × that. Variable-layout batching has no chunk units, so it must override; the count then caps the requests per batch.</div>
+    <div class="hint">Default: requests per batch × copy buffers (sequential 1, double 2, triple 3); with a global lane table, (stages + buffers − 1) × requests per batch. Variable-layout batching must override.</div>
     <div class="row check"><input id="batchDynShape" type="checkbox"><label for="batchDynShape">Dynamic batch size (no padding to the budget)</label></div>
-    <div class="hint">For a batch that is not full, e.g. a single request. On (default): ops run at the batch's actual token count, as they do without tracing. Off: the batch is padded to the full budget, as a traced build with one fixed shape must be; the padding is paid in every op that scales with tokens and in the stage-to-stage send (the routed MoE ops still skip it).</div>
+    <div class="hint">On: a partly filled batch runs at its actual size (untraced). Off: it is padded to the full budget, as tracing requires.</div>
     <div class="row"><label for="attn">Attention</label><select id="attn"><option value="seq">sequential per request</option><option value="fused">fused multi-user</option></select></div>
     <div class="row check"><input id="kvDedup" type="checkbox"><label for="kvDedup">One attention call per request per chunk (prefix gathered once)</label></div>
     <div class="hint">Off: with a fixed layout, each chunk-unit of a request makes its own call and re-gathers the cached prefix.</div>
@@ -736,10 +736,8 @@ function syncUi() {
   for (const id of ['hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy']) $(id).disabled = $('cache').value === 'inf';
   $('arenaTokens').disabled = !pool || !$('laneArena').checked;
   $('lanes').disabled = !pool || $('laneArena').checked;
-  // static slots run one request per chunk; every other cache can batch
-  const canBatch = $('cache').value !== 'slots';
-  if (!canBatch) $('batch').checked = false;
-  $('batch').disabled = !canBatch; $('batchHint').hidden = canBatch;
+  // every cache can batch; static slots need requests per batch x stages slots (makePlan reports out of memory)
+  $('batch').disabled = false; $('batchHint').hidden = $('cache').value !== 'slots';
   $('budget').disabled = !$('batch').checked; $('attn').disabled = !$('batch').checked; $('batchDynShape').disabled = !$('batch').checked;
   $('unaligned').disabled = $('layout').value === 'var';
   // pool lanes per stage (as makePlan): derived = copy-mode buffers x requests per batch; the override is for batching
@@ -841,7 +839,10 @@ function updatePlan() {
   const fatal = plan.errors.filter((x) => !x.startsWith('no profile'));
   $('cfgErr').hidden = !fatal.length; $('runBtn').disabled = !!fatal.length || $('runBtn').dataset.busy === '1';
   if (fatal.length) {
-    $('cfgErr').innerHTML = `<b>This configuration cannot run:</b> ${esc(fatal.join('; '))}. Adjust galaxies, replicas, mesh or stages (stages × chips per stage must fit in 32 × galaxies / replicas chips), or set the layer split to auto.`;
+    const fix = fatal.some((x) => x.startsWith('out of memory'))
+      ? 'Use a smaller token budget or a larger chunk (fewer requests per batch), fewer stages, or another KV residency.'
+      : 'Adjust galaxies, replicas, mesh or stages (stages × chips per stage must fit in 32 × galaxies / replicas chips), or set the layer split to auto.';
+    $('cfgErr').innerHTML = `<b>This configuration cannot run:</b> ${esc(fatal.join('; '))}. ${fix}`;
     $('planKv').innerHTML = ''; $('planStages').innerHTML = ''; $('planNote').textContent = '';
     return;
   }
