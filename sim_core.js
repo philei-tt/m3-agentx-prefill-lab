@@ -374,7 +374,9 @@
     //   the pool only) sets `lanes` instead; variable-layout batching has no chunk units, so it must override. Arena
     //   lanes and the other caches ignore the count and the override.
     lanes: 3, lanesOverride: false, laneScope: 'stage', laneLen: M3.maxCtx, laneArena: false, arenaTokens: 4e6,
-    slotLen: M3.maxCtx, unaligned: false,
+    // resume at any 32-token boundary (tt-metal #57636, merged), so the cached prefix is used whole; false rounds it
+    // down to a chunk multiple, the pre-#57636 behaviour (CLI only: --set unaligned=false)
+    slotLen: M3.maxCtx, unaligned: true,
     // pool copy-in (cached prefix pool->lane) / copy-out (new KV lane->pool):
     //   'sequential' = (default) copy-out, copy-in, then prefill: full copy time on the stage, lanes held only while
     //                  computing

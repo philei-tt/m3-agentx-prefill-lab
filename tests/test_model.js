@@ -66,10 +66,19 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   assert.strictEqual(SIM.makePlan(Object.assign({ hostTier: true }, cfg, { cache: 'inf' }), cal).hostTok, 0);
 }
 
-// 8. hourly volume: input = new + cached, and the fallback for older study points (derived from newTps and hitRate)
+// 8. unaligned resume (tt-metal #57636) is the default: no cached tokens are lost to chunk rounding unless
+//    unaligned=false asks for the old behaviour
+{
+  assert.strictEqual(SIM.DEFAULTS.unaligned, true);
+  const cfg = Object.assign({ cache: 'slots', chunk: 2048 }, base);
+  const u = SIM.simulate(TR, cal, cfg), a = SIM.simulate(TR, cal, Object.assign({ unaligned: false }, cfg));
+  assert.ok(u.alignLossFrac === 0 && a.alignLossFrac > 0, `align loss ${u.alignLossFrac} / ${a.alignLossFrac}`);
+}
+
+// 9. hourly volume: input = new + cached, and the fallback for older study points (derived from newTps and hitRate)
 //    gives the same numbers as the simulator's own inTps / hitTps
 {
-  const r = SIM.simulate(TR, cal, Object.assign({ cache: 'slots', chunk: 2048, unaligned: true }, base, { concurrency: 64 }));
+  const r = SIM.simulate(TR, cal, Object.assign({ cache: 'slots', chunk: 2048 }, base, { concurrency: 64 }));
   const h = SIM.hourly(r), { inTps, hitTps, ...old } = r, g = SIM.hourly(old);
   assert.ok(Math.abs(r.inTps - r.newTps - r.hitTps) < 1e-6 * r.inTps && Math.abs(h.req - 3600 * r.reqPerS) < 1e-9);
   for (const k of ['inTok', 'newTok', 'cachedTok', 'req']) assert.ok(Math.abs(h[k] - g[k]) < 1e-6 * h[k], `hourly fallback ${k}`);
