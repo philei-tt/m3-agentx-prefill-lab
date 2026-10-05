@@ -66,4 +66,13 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   assert.strictEqual(SIM.makePlan(Object.assign({ hostTier: true }, cfg, { cache: 'inf' }), cal).hostTok, 0);
 }
 
+// 8. unaligned resume (tt-metal #57636) is the default: no cached tokens are lost to chunk rounding unless
+//    unaligned=false asks for the old behaviour
+{
+  assert.strictEqual(SIM.DEFAULTS.unaligned, true);
+  const cfg = Object.assign({ cache: 'slots', chunk: 2048 }, base);
+  const u = SIM.simulate(TR, cal, cfg), a = SIM.simulate(TR, cal, Object.assign({ unaligned: false }, cfg));
+  assert.ok(u.alignLossFrac === 0 && a.alignLossFrac > 0, `align loss ${u.alignLossFrac} / ${a.alignLossFrac}`);
+}
+
 console.log('test_model: all checks passed');
