@@ -27,7 +27,7 @@ const study = JSON.parse(fs.readFileSync(studyF));
 const SCOPE = require('./lib/scope.js');
 
 // ---- trim the study for the page
-const slim = (a) => (a ? { conc: a.conc, usefulTps: a.usefulTps, processedTps: a.processedTps, ttftP50: a.ttftP50, ttftP90: a.ttftP90, hitRate: a.hitRate, infHitRate: a.infHitRate, reprefillFrac: a.reprefillFrac, padFrac: a.padFrac, maxUtil: a.maxUtil, avgChunkTok: a.avgChunkTok, avgSegsPerChunk: a.avgSegsPerChunk } : null);
+const slim = (a) => (a ? { conc: a.conc, usefulTps: a.usefulTps, processedTps: a.processedTps, newTps: a.newTps, inTps: a.inTps, hitTps: a.hitTps, reqPerS: a.reqPerS, ttftP50: a.ttftP50, ttftP90: a.ttftP90, hitRate: a.hitRate, infHitRate: a.infHitRate, reprefillFrac: a.reprefillFrac, padFrac: a.padFrac, maxUtil: a.maxUtil, avgChunkTok: a.avgChunkTok, avgSegsPerChunk: a.avgSegsPerChunk } : null);
 const DETAILS = require('./feature_details.js');
 // studies run before the host-DRAM tier was renamed to the SSD tier store the old sensitivity names
 const SENS_RENAME = { 'host 0.5 TB/gx': 'SSD 0.5 TB/gx', 'host 2 TB/gx': 'SSD 2 TB/gx', 'PCIe 16 GB/s/gx': 'SSD 16 GB/s/gx', 'PCIe 256 GB/s/gx': 'SSD 256 GB/s/gx' };

@@ -92,6 +92,8 @@ button:disabled { opacity: 0.55; cursor: progress; }
 .legend i { display: inline-block; width: 12px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
 .bar { display: flex; height: 16px; border-radius: 4px; overflow: hidden; gap: 2px; background: var(--surface); }
 .bar > span { display: block; height: 100%; }
+.viewat { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 2px 0 10px; font-size: 13px; color: var(--ink-2); }
+.viewat select { width: auto; max-width: 100%; }
 .status { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--ink-2); }
 .prog { flex: 1; height: 4px; background: var(--surface-2); border-radius: 2px; overflow: hidden; }
 .prog > span { display: block; height: 100%; background: var(--accent); width: 0; transition: width .2s; }
@@ -246,6 +248,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <div class="status"><span id="statusTxt">Loading traffic…</span><div class="prog" style="width:120px"><span id="progBar"></span></div></div>
     </div>
     <div class="callout bad" id="cfgErr" hidden></div>
+    <div class="viewat"><label for="viewAt">Metrics at</label><select id="viewAt"></select><label for="viewConc">or any C =</label><input id="viewConc" type="number" min="1" max="16384" step="1" placeholder="e.g. 300" style="width:90px"><span class="muted small">or click a chart</span></div>
     <div class="tiles" id="tiles"></div>
   </div>
   <div class="panel">
@@ -305,6 +308,11 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="cols2">
       <div class="panel"><h3>Best configurations (grid on the roadmap stack)</h3><div class="tablewrap" id="gridTable" style="margin-top:8px"></div></div>
       <div class="panel"><h3>Sensitivity of the best configuration</h3><div class="tablewrap" id="sensTable" style="margin-top:8px"></div></div>
+    </div>
+    <div class="panel">
+      <h3>Hourly volume at the goodput point</h3>
+      <p class="muted small" style="margin:4px 0 8px">At the concurrency where each configuration reaches its goodput (p90 TTFT ≤ SLO): input tokens of the requests completed per hour, split into new tokens the pipeline prefilled (re-prefill included) and cached prefix hits, and requests completed per hour.</p>
+      <div class="tablewrap" id="hourTable"></div>
     </div>
     <div class="panel">
       <h3>Baseline vs best, this scenario</h3>
@@ -592,7 +600,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <h2 id="m-read">Reading the Explore tab</h2>
     <ul>
       <li><b>Loading.</b> On load, the charts show the precomputed baseline (<span class="mono">today-C</span>). <b>Run sweep</b> simulates your configuration at every concurrency in the grid, in your browser, in about 5-30 s. It also runs the same configuration with an infinite cache, unless you untick that option.</li>
-      <li><b>Tiles.</b> Goodput; goodput with an infinite cache; TTFT p50/p90 and hit rate at the goodput point; the peak useful throughput regardless of TTFT; wasted compute (the share of processed tokens that is re-prefill or padding, the complement of the useful share in "Where processed tokens go"); requests per batch at the goodput point and at the peak.</li>
+      <li><b>Metrics at.</b> Picks the concurrency the tiles and "Where processed tokens go" show: the goodput point by default, any concurrency of the sweep (also by clicking a chart; a dashed line marks it), or any other concurrency typed into the box, which is simulated on demand (with its infinite-cache twin) and added to the charts. At a picked concurrency the first tile shows useful tok/s there instead of goodput, and the infinite-cache tile compares at the same concurrency. Added concurrencies never move goodput, which comes from the sweep alone. Peak useful always describes the sweep. Copy link keeps the choice.</li>
+      <li><b>Tiles.</b> Goodput; goodput with an infinite cache; TTFT p50/p90 and hit rate at the goodput point; input tokens per hour at the goodput point (the input of the requests completed there, split into new tokens the pipeline prefilled, re-prefill included, and cached prefix hits) and requests completed per hour; the peak useful throughput regardless of TTFT; wasted compute (the share of processed tokens that is re-prefill or padding, the complement of the useful share in "Where processed tokens go"); requests per batch at the goodput point and at the peak.</li>
       <li><b>Charts</b> share a log concurrency axis:
         <ul>
           <li>useful tok/s;</li>
@@ -602,7 +611,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
         </ul>
         "Pin as comparison" keeps a run as a third line.</li>
       <li><b>Copy link.</b> Copies a URL holding every setting that differs from the defaults (plus SLO, concurrency grid and the infinite-cache option); the address bar also tracks it. Opening the link loads that configuration and runs the sweep.</li>
-      <li><b>Where processed tokens go.</b> At the goodput point, splits the pipeline's processed tokens into useful, re-prefill and padding.</li>
+      <li><b>Where processed tokens go.</b> At the goodput point (or the concurrency picked in Metrics at), splits the pipeline's processed tokens into useful, re-prefill and padding.</li>
       <li><b>Plan.</b> Updates without simulating. It shows chips, KV capacity, slots or pool and lane sizes, KV bytes per token, and the modelled time of one chunk (at 140k cached) on each stage. Orange bars are stages holding a dense layer; the outlined bar is the bottleneck. The ceiling line is that chunk's tokens divided by the bottleneck time plus the send.</li>
     </ul>
 
@@ -643,6 +652,8 @@ const SIM = self.M3SIM;
 const $ = (id) => document.getElementById(id);
 const fmtK = (x) => (x == null || !isFinite(x) ? '–' : x >= 1e4 ? (x / 1000).toFixed(1) + 'k' : x >= 1000 ? (x / 1000).toFixed(2) + 'k' : Math.round(x).toString());
 const fmtS = (x) => (x == null || !isFinite(x) ? '–' : x >= 100 ? x.toFixed(0) : x >= 10 ? x.toFixed(1) : x.toFixed(2));
+// large counts (tokens or requests per hour): 1.23B, 45.6M, 789k
+const fmtBig = (x) => (x == null || !isFinite(x) ? '–' : x >= 1e9 ? (x / 1e9).toFixed(2) + 'B' : x >= 1e6 ? (x / 1e6).toFixed(1) + 'M' : fmtK(x));
 const pct = (x, d = 0) => (x == null || !isFinite(x) ? '–' : (100 * x).toFixed(d) + '%');
 const cssv = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -675,7 +686,7 @@ const GLUE = `
 let TR = null, CAL = null;
 function slim(r, c) {
   if (r.error) return { conc: c, error: r.error };
-  return { conc: c, usefulTps: r.usefulTps, processedTps: r.processedTps, newTps: r.newTps, ttftP50: r.ttftP50, ttftP90: r.ttftP90, ttftP99: r.ttftP99,
+  return { conc: c, usefulTps: r.usefulTps, processedTps: r.processedTps, newTps: r.newTps, inTps: r.inTps, hitTps: r.hitTps, reqPerS: r.reqPerS, ttftP50: r.ttftP50, ttftP90: r.ttftP90, ttftP99: r.ttftP99,
     hitRate: r.hitRate, infHitRate: r.infHitRate, reprefillFrac: r.reprefillFrac, padFrac: r.padFrac, maxUtil: r.maxUtil, avgChunkTok: r.avgChunkTok,
     avgSegsPerChunk: r.avgSegsPerChunk, done: r.done, warmupS: r.warmupS };
 }
@@ -683,6 +694,14 @@ onmessage = (e) => {
   const m = e.data;
   if (m.init) { TR = M3SIM.loadTraffic(m.buf, m.header); CAL = m.cal; postMessage({ ready: true }); return; }
   const j = m.job;
+  // single concurrencies picked on the page (not part of the sweep, so they never move goodput)
+  if (j.points) {
+    for (const c of j.points) {
+      let r; try { r = M3SIM.simulate(TR, CAL, Object.assign({}, j.cfg, { concurrency: c })); } catch (err) { r = { error: String(err) }; }
+      postMessage({ id: j.id, run: j.run, point: slim(r, c), tag: 'pick' });
+    }
+    return;
+  }
   // grid + extension + cliff bisection: lib/sweep.js, the same code the study runs
   M3SWEEP.sweep(j.concs, j.slo, (c, tag) => {
     let r; try { r = M3SIM.simulate(TR, CAL, Object.assign({}, j.cfg, { concurrency: c })); } catch (err) { r = { error: String(err) }; }
@@ -804,6 +823,7 @@ function shareUrl(hash) {
   if (Number($('slo').value) !== STUDY.slo) kv.push(['slo', $('slo').value]);
   const concs = $('concs').value.replace(/\s/g, ''); if (concs !== DEFAULT_CONCS) kv.push(['concs', concs]);
   if (!$('compareInf').checked) kv.push(['inf', '0']);
+  if (viewC != null) kv.push(['at', String(viewC)]);
   const qs = kv.map(([k, v]) => k + '=' + encodeURIComponent(v).replace(/%2C/g, ',')).join('&');
   return location.href.split(/[?#]/)[0] + (qs ? '?' + qs : '') + hash;
 }
@@ -811,7 +831,7 @@ function syncUrl() { try { history.replaceState(null, '', shareUrl(location.hash
 // apply a shared link; returns null without parameters, else the list of parameters it had to ignore
 function applyUrl() {
   const q = new URLSearchParams(location.search);
-  if (![...FIELDS, 'slo', 'concs', 'inf'].some((k) => q.has(k))) return null;
+  if (![...FIELDS, 'slo', 'concs', 'inf', 'at'].some((k) => q.has(k))) return null;
   const cfg = {}, bad = [];
   for (const f of FIELDS) {
     if (!q.has(f)) continue;
@@ -828,6 +848,7 @@ function applyUrl() {
   if (q.has('slo')) { const v = Number(q.get('slo')); if (v > 0) $('slo').value = v; else bad.push('slo=' + q.get('slo')); }
   if (q.has('concs')) { const v = q.get('concs'); if (/^\d+(,\d+)*$/.test(v)) $('concs').value = v; else bad.push('concs=' + v); }
   $('compareInf').checked = q.get('inf') !== '0';
+  if (q.has('at')) { const v = Number(q.get('at')); if (v > 0) viewC = v; else bad.push('at=' + q.get('at')); }
   return bad;
 }
 $('shareBtn').addEventListener('click', async () => {
@@ -904,12 +925,15 @@ function lineChart(el, series, opt) {
     g += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
     for (const p of s.points) g += `<circle cx="${X(p.x)}" cy="${Y(p.y)}" r="3.2" fill="${s.color}" stroke="${cssv('--surface')}" stroke-width="1.5"/>`;
   }
+  // the concurrency the per-point tiles show (Explore tab)
+  if (opt.markX != null && opt.markX >= x0 && opt.markX <= x1) g += `<line x1="${X(opt.markX)}" x2="${X(opt.markX)}" y1="${m.t}" y2="${H - m.b}" stroke="${cssv('--s1')}" stroke-dasharray="3 3" stroke-width="1.5" opacity="0.7"/>`;
   g += `<line class="xh" x1="0" x2="0" y1="${m.t}" y2="${H - m.b}" stroke="${cssv('--ink-3')}" stroke-width="1" visibility="hidden"/>`;
   el.insertAdjacentHTML('beforeend', `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(el.querySelector('h4').textContent)}">${g}<rect x="${m.l}" y="${m.t}" width="${W - m.l - m.r}" height="${H - m.t - m.b}" fill="transparent"/></svg><div class="tip" hidden></div>`);
   const svg = el.querySelector('svg'), tip = el.querySelector('.tip'), xh = svg.querySelector('.xh');
+  const nearX = (ev) => { const r = svg.getBoundingClientRect(); const px = (ev.clientX - r.left) * W / r.width; let best = null; for (const v of ux) if (!best || Math.abs(X(v) - px) < Math.abs(X(best) - px)) best = v; return best; };
+  if (opt.onPick) { svg.style.cursor = 'pointer'; svg.addEventListener('click', (ev) => opt.onPick(nearX(ev))); }
   svg.addEventListener('mousemove', (ev) => {
-    const r = svg.getBoundingClientRect(); const px = (ev.clientX - r.left) * W / r.width;
-    let best = null; for (const v of ux) if (!best || Math.abs(X(v) - px) < Math.abs(X(best) - px)) best = v;
+    const r = svg.getBoundingClientRect(), best = nearX(ev);
     xh.setAttribute('x1', X(best)); xh.setAttribute('x2', X(best)); xh.setAttribute('visibility', 'visible');
     const rows = series.map((s) => { const p = s.points.find((q) => q.x === best); return p ? `<div><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${s.color};margin-right:5px"></i>${esc(s.name)}: <b>${opt.yFmt(p.y)}</b></div>` : ''; }).join('');
     tip.innerHTML = `<div>C = ${best}</div>${rows}`; tip.hidden = false;
@@ -918,12 +942,14 @@ function lineChart(el, series, opt) {
   svg.addEventListener('mouseleave', () => { tip.hidden = true; xh.setAttribute('visibility', 'hidden'); });
 }
 function niceStep(x) { const e = 10 ** Math.floor(Math.log10(x)); const f = x / e; return (f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10) * e; }
-function drawTriple(ids, series, slo) {
-  lineChart($(ids[0]), series.map((s) => ({ name: s.name, color: s.color, points: s.pts.map((p) => ({ x: p.conc, y: p.usefulTps })) })), { yFmt: fmtK });
-  lineChart($(ids[1]), series.map((s) => ({ name: s.name, color: s.color, points: s.pts.map((p) => ({ x: p.conc, y: p.ttftP90 })) })), { yFmt: fmtS, yLog: true, ref: slo });
-  lineChart($(ids[2]), series.map((s) => ({ name: s.name, color: s.color, points: s.pts.map((p) => ({ x: p.conc, y: p.hitRate })) })), { yFmt: (v) => pct(v), yMin: 0, yMax: 1 });
+// pick (optional): {c, fn} marks concurrency c on every chart and calls fn(concurrency) on a click
+function drawTriple(ids, series, slo, pick) {
+  const pk = pick ? { markX: pick.c, onPick: pick.fn } : {};
+  lineChart($(ids[0]), series.map((s) => ({ name: s.name, color: s.color, points: s.pts.map((p) => ({ x: p.conc, y: p.usefulTps })) })), Object.assign({ yFmt: fmtK }, pk));
+  lineChart($(ids[1]), series.map((s) => ({ name: s.name, color: s.color, points: s.pts.map((p) => ({ x: p.conc, y: p.ttftP90 })) })), Object.assign({ yFmt: fmtS, yLog: true, ref: slo }, pk));
+  lineChart($(ids[2]), series.map((s) => ({ name: s.name, color: s.color, points: s.pts.map((p) => ({ x: p.conc, y: p.hitRate })) })), Object.assign({ yFmt: (v) => pct(v), yMin: 0, yMax: 1 }, pk));
   // requests per batch (one pipeline pass): batch fill, grows only as the bottleneck stage nears saturation
-  if (ids[3]) lineChart($(ids[3]), series.map((s) => ({ name: s.name, color: s.color, points: s.pts.filter((p) => p.avgSegsPerChunk != null).map((p) => ({ x: p.conc, y: p.avgSegsPerChunk })) })), { yFmt: (v) => v.toFixed(1), yMin: 0 });
+  if (ids[3]) lineChart($(ids[3]), series.map((s) => ({ name: s.name, color: s.color, points: s.pts.filter((p) => p.avgSegsPerChunk != null).map((p) => ({ x: p.conc, y: p.avgSegsPerChunk })) })), Object.assign({ yFmt: (v) => v.toFixed(1), yMin: 0 }, pk));
 }
 
 // ---------------------------------------------------------------- goodput: lib/sweep.js (same code as the study)
@@ -931,6 +957,41 @@ const summarize = SWEEP.summarize;
 
 // ---------------------------------------------------------------- run
 let run = null, pinned = null, workers = [];
+// concurrency the per-point tiles show ("Metrics at" or a chart click); null = the goodput point
+let viewC = null, runSeq = 0, pickW = null;
+// sweep points plus concurrencies simulated on request (run.extra / run.extraInf); goodput uses the sweep only
+const allReal = () => (run ? run.real.concat(run.extra || []) : []);
+const allInf = () => (run ? run.inf.concat(run.extraInf || []) : []);
+// a chart click can land on an ∞-cache concurrency: snap to the nearest point of this config (log distance)
+function pickConc(c) {
+  const pts = allReal().filter((p) => !p.error);
+  if (!pts.length) return;
+  const p = pts.reduce((b, q) => (Math.abs(Math.log(q.conc / c)) < Math.abs(Math.log(b.conc / c)) ? q : b));
+  viewC = p.conc; $('viewConc').value = ''; render(); syncUrl();
+}
+// simulate concurrency c for this config (and its infinite-cache twin) unless the run already has it
+function ensurePick(c) {
+  if (!run || !run.cfg || c == null) return;
+  const has = (arr) => arr.some((p) => p.conc === c);
+  const jobs = [];
+  if (!has(allReal())) jobs.push({ id: 'extra', cfg: run.cfg });
+  if (run.infCfg && !has(allInf())) jobs.push({ id: 'extraInf', cfg: run.infCfg });
+  if (!jobs.length) return;
+  if (!trafficBuf) decodeTraffic();
+  if (!pickW) {
+    pickW = mkWorker();
+    pickW.onmessage = (e) => {
+      const m = e.data;
+      if (!m.point || !run || m.run !== run.seq) return; // a newer run replaced this one
+      const arr = run[m.id];
+      if (!arr.some((p) => p.conc === m.point.conc)) arr.push(m.point);
+      $('statusTxt').textContent = m.point.error ? `C = ${m.point.conc} failed: ${m.point.error}` : `Simulated C = ${m.point.conc}`;
+      render();
+    };
+  }
+  $('statusTxt').textContent = `Simulating C = ${c}…`;
+  for (const j of jobs) pickW.postMessage({ job: { id: j.id, cfg: j.cfg, points: [c], run: run.seq } });
+}
 // useful comes straight from the simulator (same number as the Goodput tile); re-prefill = prefilled new tokens - useful
 function tokSplit(p) {
   const proc = p.processedTps, nw = p.newTps != null ? p.newTps : proc * (1 - p.padFrac), pad = Math.max(0, proc - nw);
@@ -942,24 +1003,43 @@ function render() {
   const slo = Number($('slo').value);
   const C = colors();
   const series = [];
-  if (run) { series.push({ name: 'this config', color: C.cfg, pts: run.real }); if (run.inf.length) series.push({ name: 'same, infinite cache', color: C.inf, pts: run.inf }); }
+  const realAll = allReal(), infAll = allInf();
+  if (run) { series.push({ name: 'this config', color: C.cfg, pts: realAll }); if (infAll.length) series.push({ name: 'same, infinite cache', color: C.inf, pts: infAll }); }
   if (pinned) series.push({ name: 'pinned: ' + pinned.name, color: C.pin, pts: pinned.real });
   $('legend').innerHTML = series.map((s) => `<span><i style="background:${s.color}"></i>${esc(s.name)}</span>`).join('');
-  drawTriple(['chU', 'chT', 'chH', 'chR'], series, slo < NO_SLO ? slo : null);
   const R = run ? summarize(run.real, slo) : null, I = run && run.inf.length ? summarize(run.inf, slo) : null, P = pinned ? summarize(pinned.real, slo) : null;
   const a = R && R.at;
+  // per-point metrics: the picked concurrency, else the goodput point, else the peak (no point meets the SLO)
+  const pickP = viewC != null ? realAll.find((p) => p.conc === viewC && !p.error) : null;
+  // a picked point other than the goodput point: Goodput and ∞-cache tiles show that concurrency too
+  const showPick = pickP && pickP !== a, infP = showPick ? infAll.find((p) => p.conc === pickP.conc && !p.error) : null;
+  const v = pickP || a || (R && R.peak);
+  const where = !v ? '' : v === a ? 'at the goodput point' : `at C = ${v.conc}` + (pickP ? '' : ' (peak)');
+  const at = (txt) => (where ? `${txt}, ${where}` : txt);
+  const vpts = realAll.filter((p) => !p.error).sort((x, y) => x.conc - y.conc);
+  $('viewAt').innerHTML = `<option value="">${a ? `goodput point (C = ${a.conc})` : R && R.peak ? `peak (C = ${R.peak.conc}): no point meets the SLO` : 'goodput point'}</option>`
+    + vpts.map((p) => `<option value="${p.conc}">C = ${p.conc} · p90 ${fmtS(p.ttftP90)} s${SWEEP.passes(p, slo) ? '' : ' (over SLO)'} · useful ${fmtK(p.usefulTps)}${run.extra && run.extra.includes(p) ? ' · added' : ''}</option>`).join('');
+  $('viewAt').value = pickP ? String(pickP.conc) : '';
+  drawTriple(['chU', 'chT', 'chH', 'chR'], series, slo < NO_SLO ? slo : null, run ? { c: v ? v.conc : null, fn: pickConc } : null);
   // a run stops sweeping about 4x past the SLO it was started with: a much looser SLO needs a new run
   const stale = run && run.slo && slo > 4 * run.slo;
-  // processed-token split at the goodput point (else the peak), shared by the Wasted tile and the breakdown bar
-  const bp = a || (R && R.peak), sp = bp && tokSplit(bp);
+  // processed-token split at the viewed point, shared by the Wasted tile and the breakdown bar
+  const bp = v, sp = bp && tokSplit(bp);
+  const h = v && SIM.hourly(v);
   const tiles = [
-    ['Goodput', R ? (R.atEdge ? '≥ ' : '') + fmtK(R.goodput) : '–', slo >= NO_SLO ? 'useful tok/s, no TTFT limit (= peak)' : 'useful tok/s @ p90 ≤ ' + slo + ' s', stale ? `run swept for a ${sloTxt(run.slo)} SLO: run again for this one` : R && R.atEdge ? 'still under the SLO at the highest concurrency simulated' : P ?`pinned ${fmtK(P.goodput)} (${R && P.goodput ? (R.goodput / P.goodput).toFixed(2) + 'x' : '–'})` : ''],
-    ['With infinite cache', I ? (I.atEdge ? '≥ ' : '') + fmtK(I.goodput) : '–', 'same config, nothing evicted', R && I && I.goodput ? `real = ${I.atEdge ? '≤ ' : ''}${pct(R.goodput / I.goodput)} of ∞` : ''],
-    ['TTFT at goodput point', a ? `${fmtS(a.ttftP50)}<small> / ${fmtS(a.ttftP90)} s</small>` : '–', 'p50 / p90', a ? `C = ${a.conc} lanes` : ''],
-    ['Hit rate there', a ? pct(a.hitRate, 1) : '–', 'prefix-cache hit, token-weighted', a ? `∞-cache ${pct(a.infHitRate, 1)}` : ''],
+    showPick
+      ? ['Useful throughput', fmtK(pickP.usefulTps), `useful tok/s at C = ${pickP.conc}`, '']
+      : ['Goodput', R ? (R.atEdge ? '≥ ' : '') + fmtK(R.goodput) : '–', slo >= NO_SLO ? 'useful tok/s, no TTFT limit (= peak)' : 'useful tok/s @ p90 ≤ ' + slo + ' s', stale ? `run swept for a ${sloTxt(run.slo)} SLO: run again for this one` : R && R.atEdge ? 'still under the SLO at the highest concurrency simulated' : P ?`pinned ${fmtK(P.goodput)} (${R && P.goodput ? (R.goodput / P.goodput).toFixed(2) + 'x' : '–'})` : ''],
+    showPick && infP
+      ? ['With infinite cache', fmtK(infP.usefulTps), `useful tok/s at C = ${pickP.conc}, nothing evicted`, `real = ${pct(pickP.usefulTps / infP.usefulTps)} of ∞`]
+      : ['With infinite cache', I ? (I.atEdge ? '≥ ' : '') + fmtK(I.goodput) : '–', 'same config, nothing evicted', R && I && I.goodput ? `real = ${I.atEdge ? '≤ ' : ''}${pct(R.goodput / I.goodput)} of ∞` : ''],
+    ['TTFT', v ? `${fmtS(v.ttftP50)}<small> / ${fmtS(v.ttftP90)} s</small>` : '–', at('p50 / p90'), v ? `C = ${v.conc} lanes` : ''],
+    ['Hit rate', v ? pct(v.hitRate, 1) : '–', at('prefix-cache hit, token-weighted'), v ? `∞-cache ${pct(v.infHitRate, 1)}` : ''],
+    ['Input tokens per hour', h ? fmtBig(h.inTok) : '–', at('cached + new'), h ? `new ${fmtBig(h.newTok)} (${pct(h.newTok / h.inTok, 1)}) · cached ${fmtBig(h.cachedTok)}` : ''],
+    ['Requests per hour', h ? fmtBig(h.req) : '–', at('completed'), h ? `${fmtK(h.inTok / h.req)} input tok per request` : ''],
     ['Peak useful', R && R.peak ? fmtK(R.peak.usefulTps) : '–', 'any TTFT', R && R.peak ? `C = ${R.peak.conc}, p90 ${fmtS(R.peak.ttftP90)} s` : ''],
-    ['Wasted compute', sp && sp.proc ? pct((sp.rep + sp.pad) / sp.proc, 1) : '–', bp ? `of processed tokens, at C = ${bp.conc}` + (a ? '' : ' (peak)') : 'of processed tokens', sp && sp.proc ? `re-prefill ${pct(sp.rep / sp.proc, 1)} · padding ${pct(sp.pad / sp.proc, 1)}` : ''],
-    ['Requests per batch', a ? a.avgSegsPerChunk.toFixed(2) : '–', 'average, at the goodput point (1 without batching)', a ? `batch ${Math.round(a.avgChunkTok)} tok, busy ${pct(a.maxUtil)}` + (R.peak && R.peak !== a ? ` · at peak ${R.peak.avgSegsPerChunk.toFixed(2)}` : '') : ''],
+    ['Wasted compute', sp && sp.proc ? pct((sp.rep + sp.pad) / sp.proc, 1) : '–', at('of processed tokens'), sp && sp.proc ? `re-prefill ${pct(sp.rep / sp.proc, 1)} · padding ${pct(sp.pad / sp.proc, 1)}` : ''],
+    ['Requests per batch', v ? v.avgSegsPerChunk.toFixed(2) : '–', at('average (1 without batching)'), v ? `batch ${Math.round(v.avgChunkTok)} tok, busy ${pct(v.maxUtil)}` + (R.peak && R.peak !== v ? ` · at peak ${R.peak.avgSegsPerChunk.toFixed(2)}` : '') : ''],
   ];
   $('tiles').innerHTML = tiles.map(([k, v, s, d]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="k">${s}</div><div class="d">${d}</div></div>`).join('');
   // breakdown
@@ -968,13 +1048,13 @@ function render() {
     const parts = [['useful', use, cssv('--s1')], ['re-prefill (evicted / misaligned)', rep, cssv('--s2')], ['padding', pad, cssv('--ink-3')]];
     $('bdBar').innerHTML = parts.map(([n, v, c]) => `<span style="width:${100 * v / proc}%;background:${c}" title="${n}: ${fmtK(v)} tok/s"></span>`).join('');
     $('bdLegend').innerHTML = parts.map(([n, v, c]) => `<span><i style="background:${c};height:8px;width:8px"></i>${n} <b class="mono">${fmtK(v)}</b> (${pct(v / proc)})</span>`).join('');
-    $('bdAt').textContent = `at C = ${bp.conc}`;
+    $('bdAt').textContent = where;
     $('bdNote').textContent = `Processed ${fmtK(proc)} tok/s, bottleneck-stage busy ${pct(bp.maxUtil)}, average chunk ${Math.round(bp.avgChunkTok)} tokens with ${bp.avgSegsPerChunk.toFixed(1)} requests.`;
   } else { $('bdBar').innerHTML = ''; $('bdLegend').innerHTML = ''; $('bdNote').textContent = ''; }
   // points table
   const rows = [];
-  for (const [nm, arr] of [['config', run ? run.real : []], ['∞ cache', run ? run.inf : []]]) for (const p of arr) rows.push(`<tr><td>${nm}</td><td class="n">${p.conc}</td><td class="n">${fmtK(p.usefulTps)}</td><td class="n">${fmtK(p.processedTps)}</td><td class="n">${fmtS(p.ttftP50)}</td><td class="n">${fmtS(p.ttftP90)}</td><td class="n">${pct(p.hitRate, 1)}</td><td class="n">${pct(p.reprefillFrac)}</td><td class="n">${pct(p.padFrac)}</td><td class="n">${pct(p.maxUtil)}</td><td class="n">${Math.round(p.avgChunkTok)}</td><td class="n">${p.avgSegsPerChunk != null ? p.avgSegsPerChunk.toFixed(2) : '–'}</td></tr>`);
-  $('ptsTable').innerHTML = rows.length ? `<table><thead><tr><th>run</th><th class="n">C</th><th class="n">useful</th><th class="n">processed</th><th class="n">TTFT p50</th><th class="n">p90</th><th class="n">hit</th><th class="n">re-prefill</th><th class="n">pad</th><th class="n">util</th><th class="n">chunk</th><th class="n">req/chunk</th></tr></thead><tbody>${rows.join('')}</tbody></table>` : '<p class="hint">No run yet.</p>';
+  for (const [nm, arr] of [['config', realAll.slice().sort((x, y) => x.conc - y.conc)], ['∞ cache', infAll.slice().sort((x, y) => x.conc - y.conc)]]) for (const p of arr) { const hp = SIM.hourly(p); rows.push(`<tr><td>${nm}</td><td class="n">${p.conc}</td><td class="n">${fmtK(p.usefulTps)}</td><td class="n">${fmtK(p.processedTps)}</td><td class="n">${fmtS(p.ttftP50)}</td><td class="n">${fmtS(p.ttftP90)}</td><td class="n">${pct(p.hitRate, 1)}</td><td class="n">${fmtBig(hp.inTok)}</td><td class="n">${fmtBig(hp.newTok)}</td><td class="n">${fmtBig(hp.req)}</td><td class="n">${pct(p.reprefillFrac)}</td><td class="n">${pct(p.padFrac)}</td><td class="n">${pct(p.maxUtil)}</td><td class="n">${Math.round(p.avgChunkTok)}</td><td class="n">${p.avgSegsPerChunk != null ? p.avgSegsPerChunk.toFixed(2) : '–'}</td></tr>`); }
+  $('ptsTable').innerHTML = rows.length ? `<table><thead><tr><th>run</th><th class="n">C</th><th class="n">useful</th><th class="n">processed</th><th class="n">TTFT p50</th><th class="n">p90</th><th class="n">hit</th><th class="n">input/h</th><th class="n">new/h</th><th class="n">req/h</th><th class="n">re-prefill</th><th class="n">pad</th><th class="n">util</th><th class="n">chunk</th><th class="n">req/chunk</th></tr></thead><tbody>${rows.join('')}</tbody></table>` : '<p class="hint">No run yet.</p>';
 }
 function startRun() {
   if (!trafficBuf) decodeTraffic();
@@ -985,9 +1065,9 @@ function startRun() {
   const concs = $('concs').value.split(',').map((x) => Number(x.trim())).filter((x) => x > 0).sort((a, b) => a - b);
   const slo = Number($('slo').value);
   const name = $('preset').value >= 0 ? PRESETS[Number($('preset').value)].name : 'custom';
-  run = { name, cfg, real: [], inf: [], slo };
   const jobs = [{ id: 'real', cfg }];
   if ($('compareInf').checked && cfg.cache !== 'inf') jobs.push({ id: 'inf', cfg: Object.assign({}, cfg, { cache: 'inf', hostTier: false }) });
+  run = { seq: ++runSeq, name, cfg, infCfg: jobs[1] ? jobs[1].cfg : null, real: [], inf: [], extra: [], extraInf: [], slo };
   $('runBtn').disabled = true; $('runBtn').dataset.busy = '1'; $('pinBtn').disabled = true;
   let pending = jobs.length; const total = (concs.length + 7) * jobs.length; let got = 0; const t0 = performance.now();
   $('statusTxt').textContent = 'Simulating…'; $('progBar').style.width = '0%';
@@ -997,12 +1077,19 @@ function startRun() {
     w.onmessage = (e) => {
       const m = e.data; if (m.ready) return;
       if (m.point) { run[m.id].push(m.point); run[m.id].sort((a, b) => a.conc - b.conc); got++; $('progBar').style.width = Math.min(100, 100 * got / total) + '%'; if (m.tag === 'refine') $('statusTxt').textContent = 'Refining the cliff…'; else if (m.tag === 'extend') $('statusTxt').textContent = 'Still under the SLO, extending the grid…'; render(); }
-      if (m.done) { if (--pending === 0) { $('runBtn').dataset.busy = '0'; $('runBtn').disabled = false; $('pinBtn').disabled = false; $('progBar').style.width = '100%'; $('statusTxt').textContent = `Done in ${((performance.now() - t0) / 1000).toFixed(1)} s`; render(); } }
+      if (m.done) { if (--pending === 0) { $('runBtn').dataset.busy = '0'; $('runBtn').disabled = false; $('pinBtn').disabled = false; $('progBar').style.width = '100%'; $('statusTxt').textContent = `Done in ${((performance.now() - t0) / 1000).toFixed(1)} s`; ensurePick(viewC); render(); } }
     };
     w.postMessage({ job: { id: j.id, cfg: j.cfg, concs, slo } });
   });
 }
 $('runBtn').addEventListener('click', startRun);
+$('viewAt').addEventListener('change', () => { viewC = $('viewAt').value === '' ? null : Number($('viewAt').value); $('viewConc').value = ''; render(); syncUrl(); });
+// any concurrency: simulated on demand (and its infinite-cache twin) if the sweep did not run it
+$('viewConc').addEventListener('change', () => {
+  const c = Math.round(Number($('viewConc').value));
+  if (!(c >= 1 && c <= 16384)) return;
+  viewC = c; ensurePick(c); render(); syncUrl();
+});
 $('pinBtn').addEventListener('click', () => { if (run) { pinned = { name: run.name, real: run.real.slice() }; render(); } });
 // SLO: number box + log slider (1 s .. 600 s; the right end = no SLO, stored as NO_SLO seconds)
 const NO_SLO = 1e6, SLO_MIN = 1, SLO_MAX = 600;
@@ -1083,6 +1170,8 @@ function renderRoadmap() {
   $('gridTable').innerHTML = `<table><thead><tr><th>topology</th><th class="n">budget / chunk</th><th class="n">lanes</th><th class="n">goodput</th><th class="n">p90</th><th class="n">hit</th><th></th></tr></thead><tbody>${S.grid.slice(0, 8).map((g, i) => `<tr><td class="mono">${topo(g.extra)}</td><td class="n">${g.extra.budget || g.extra.chunk}</td><td class="n">${g.extra.arenaTokens ? (g.extra.arenaTokens / 1e6) + 'M arena' : g.extra.lanes || '–'}</td><td class="n">${fmtK(g.goodput)}</td><td class="n">${g.at ? fmtS(g.at.ttftP90) : '–'}</td><td class="n">${g.at ? pct(g.at.hitRate) : '–'}</td><td>${i === 0 ? '<button type="button" id="loadBest">Load</button>' : ''}</td></tr>`).join('')}</tbody></table><p class="hint" style="margin-top:6px">[4,2] = TP=2 stage; today's KV allocation assumes one KV head per chip (TP=4), so it needs a KV-head sharding change.</p>`;
   const lb = $('loadBest'); if (lb) lb.addEventListener('click', () => { const i = PRESETS.findIndex((p) => p.name === 'best-' + curSc); if (i >= 0) { $('preset').value = String(i); $('preset').dispatchEvent(new Event('change')); location.hash = 'explore'; } });
   $('sensTable').innerHTML = `<table><thead><tr><th>variant</th><th class="n">goodput</th><th class="n">vs best</th></tr></thead><tbody>${S.sens.map((s) => `<tr><td>${esc(s.name === 'SLO-free peak' ? 'peak useful (no SLO)' : s.name)}</td><td class="n">${fmtK(s.name === 'SLO-free peak' ? s.peak : s.goodput)}</td><td class="n">${s.name === 'SLO-free peak' ? '' : '×' + (s.goodput / Math.max(1, S.grid[0].goodput)).toFixed(2)}</td></tr>`).join('')}</tbody></table>`;
+  const hourRows = [['Baseline (today)', S.greedy[0].at], ['Greedy full stack', S.full && S.full.at], ['Best configuration', S.grid[0].at]];
+  $('hourTable').innerHTML = `<table><thead><tr><th>configuration</th><th class="n">C</th><th class="n">p90</th><th class="n">input tok/h</th><th class="n">new tok/h</th><th class="n">cached tok/h</th><th class="n">hit</th><th class="n">requests/h</th></tr></thead><tbody>${hourRows.map(([nm, a]) => { const h = SIM.hourly(a); return h ? `<tr><td>${nm}</td><td class="n">${a.conc}</td><td class="n">${fmtS(a.ttftP90)}</td><td class="n">${fmtBig(h.inTok)}</td><td class="n">${fmtBig(h.newTok)}</td><td class="n">${fmtBig(h.cachedTok)}</td><td class="n">${pct(a.hitRate, 1)}</td><td class="n">${fmtBig(h.req)}</td></tr>` : `<tr><td>${nm}</td><td colspan="7" class="muted">no point meets the SLO</td></tr>`; }).join('')}</tbody></table>`;
   const C = colors();
   const ser = [{ name: 'baseline (today)', color: C.pin, pts: S.curves.base }, { name: 'best configuration', color: C.cfg, pts: S.curves.best }];
   $('cmpLegend').innerHTML = ser.map((s) => `<span><i style="background:${s.color}"></i>${s.name}</span>`).join('');
@@ -1141,7 +1230,7 @@ syncSlo('n'); updatePlan(); renderRoadmap(); renderModel();
 if (shared) { $('resTitle').textContent = 'Results: shared configuration'; syncUrl(); }
 else (function seed() {
   const S = STUDY.scenarios.g4_k0;
-  run = { name: 'study baseline, 4 gx', real: S.curves.base, inf: [], slo: STUDY.slo };
+  run = { seq: ++runSeq, name: 'study baseline, 4 gx', cfg: S.base, infCfg: null, real: S.curves.base, inf: [], extra: [], extraInf: [], slo: STUDY.slo };
   $('resTitle').textContent = 'Results: study baseline for 4 galaxies (16x[2,4], chunk 2048, auto split, static slots, round robin, unaligned resume; precomputed, press Run for a live sweep)';
   render();
 })();

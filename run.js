@@ -30,10 +30,12 @@ function parseArgs(argv) {
   return a;
 }
 
+const big = (x) => (x >= 1e9 ? (x / 1e9).toFixed(2) + 'B' : x >= 1e6 ? (x / 1e6).toFixed(1) + 'M' : (x / 1e3).toFixed(1) + 'k');
 function fmt(r) {
   if (r.error) return `ERROR ${r.error}`;
   const k = (x) => (x / 1000).toFixed(1) + 'k';
-  return `C=${String(r.cfg.concurrency).padStart(4)} useful ${k(r.usefulTps).padStart(7)} tok/s | proc ${k(r.processedTps).padStart(7)} | TTFT p50 ${r.ttftP50.toFixed(2)}s p90 ${r.ttftP90.toFixed(2)}s | hit ${(100 * r.hitRate).toFixed(1)}% (inf ${(100 * r.infHitRate).toFixed(1)}%) | reprefill ${(100 * r.reprefillFrac).toFixed(1)}% pad ${(100 * r.padFrac).toFixed(1)}% | util ${(100 * r.maxUtil).toFixed(0)}% | chunk ${r.avgChunkTok.toFixed(0)} segs ${r.avgSegsPerChunk.toFixed(2)} | done ${r.done} warm ${r.warmupS.toFixed(0)}s ev ${r.events}`;
+  const h = SIM.hourly(r);
+  return `C=${String(r.cfg.concurrency).padStart(4)} useful ${k(r.usefulTps).padStart(7)} tok/s | proc ${k(r.processedTps).padStart(7)} | TTFT p50 ${r.ttftP50.toFixed(2)}s p90 ${r.ttftP90.toFixed(2)}s | hit ${(100 * r.hitRate).toFixed(1)}% (inf ${(100 * r.infHitRate).toFixed(1)}%) | in ${big(h.inTok)}/h (new ${big(h.newTok)}, cached ${big(h.cachedTok)}) req ${big(h.req)}/h | reprefill ${(100 * r.reprefillFrac).toFixed(1)}% pad ${(100 * r.padFrac).toFixed(1)}% | util ${(100 * r.maxUtil).toFixed(0)}% | chunk ${r.avgChunkTok.toFixed(0)} segs ${r.avgSegsPerChunk.toFixed(2)} | done ${r.done} warm ${r.warmupS.toFixed(0)}s ev ${r.events}`;
 }
 
 if (require.main === module) {

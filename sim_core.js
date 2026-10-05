@@ -1366,6 +1366,8 @@
     return {
       plan: planSummary(plan), cfg,
       usefulTps: st.useful / D, processedTps: st.processed / D, newTps: st.newTok / D, reqPerS: st.done / D,
+      // input tokens of the requests completed in the window: cached (prefix hit) + new (prefilled, incl. re-prefill)
+      inTps: st.inTok / D, hitTps: st.hitTok / D,
       ttftP50: pct(0.5), ttftP90: pct(0.9), ttftP99: pct(0.99), ttftMean: tt.length ? tt.reduce((a, b) => a + b, 0) / tt.length : NaN,
       hitRate: st.inTok ? st.hitTok / st.inTok : NaN, infHitRate: st.inTok ? st.infHitTok / st.inTok : NaN,
       reprefillFrac: st.newTok ? st.reprefill / st.newTok : 0, padFrac: st.processed ? 1 - st.newTok / st.processed : 0,
@@ -1460,6 +1462,16 @@
 
   function calibrateAll(data) { const cal = calibrate(data); fitHandoff(cal, data); return cal; }
 
-  const API = { M3, HW, DEFAULTS, calibrate: calibrateAll, makePlan, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, layerMs, roofTok, roofSeg };
+  // Hourly volume of one sweep point: input tokens of the completed requests, split into new (prefilled) and cached
+  // (prefix hit), and requests completed. Points from studies run before inTps/hitTps existed are derived from
+  // newTps and hitRate (newTok = inTok - hitTok, hitRate = hitTok / inTok), which is exact.
+  function hourly(p) {
+    if (!p) return null;
+    const inTps = p.inTps != null ? p.inTps : p.newTps != null && p.hitRate < 1 ? p.newTps / (1 - p.hitRate) : NaN;
+    const hitTps = p.hitTps != null ? p.hitTps : inTps * p.hitRate;
+    return { inTok: 3600 * inTps, newTok: 3600 * (inTps - hitTps), cachedTok: 3600 * hitTps, req: 3600 * p.reqPerS };
+  }
+
+  const API = { M3, HW, DEFAULTS, calibrate: calibrateAll, makePlan, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, layerMs, roofTok, roofSeg };
   if (typeof module !== 'undefined' && module.exports) module.exports = API; else root.M3SIM = API;
 })(typeof self !== 'undefined' ? self : this);
