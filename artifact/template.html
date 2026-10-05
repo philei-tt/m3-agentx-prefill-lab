@@ -192,7 +192,6 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row"><label for="copyMode">Pool copies</label><select id="copyMode"><option value="sequential">sequential</option><option value="double">double-buffered</option><option value="overlap3">triple-buffered</option></select></div>
     <div class="row check"><input id="laneArena" type="checkbox"><label for="laneArena">Variable-size lanes (arena)</label></div>
     <div class="row"><label for="arenaTokens">Arena (M tokens)</label><select id="arenaTokens"><option value="2000000">2</option><option value="4000000">4</option><option value="8000000">8</option></select></div>
-    <div class="row check"><input id="unaligned" type="checkbox"><label for="unaligned">Unaligned resume</label></div>
     <div class="row check"><input id="hostTier" type="checkbox"><label for="hostTier">SSD KV tier</label></div>
     <div class="row"><label for="hostGBPerGalaxy">SSD capacity GB / galaxy</label><input id="hostGBPerGalaxy" type="number" min="0" step="1024"></div>
     <div class="row"><label for="pcieGBsPerGalaxy">SSD bandwidth GB/s / galaxy</label><input id="pcieGBsPerGalaxy" type="number" min="1" step="4"></div>
@@ -475,7 +474,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <h2 id="m-kv">KV cache</h2>
     <ul>
       <li><b>KV size.</b> Per token per layer: K and V cost 1088 B (bf8). The index-key cache costs 128 values × 2 B (bf16) and is today stored on all 4 TP columns, so 1024 B. Total 2112 B per token per layer, about 127 KB per token over 60 layers, about 133 GB for one 1M-token context. Four galaxies hold about 21.5M tokens of KV after weights and reserves, which is <b>20 static 1M slots</b>.</li>
-      <li><b>Static slots</b> (today). A conversation owns one 1M slot while it is resident. A new conversation takes a free slot or evicts the least recently used idle one. A hit is the prefix shared with that conversation's previous request, rounded down to a chunk multiple unless "unaligned resume" is on. Slots are never shared across conversations.</li>
+      <li><b>Static slots</b> (today). A conversation owns one 1M slot while it is resident. A new conversation takes a free slot or evicts the least recently used idle one. A hit is the prefix shared with that conversation's previous request, resumed at any 32-token boundary (unaligned resume, tt-metal #57636). Slots are never shared across conversations.</li>
       <li><b>Slot lanes + paged pool.</b> A few <b>lanes</b> per stage are the contiguous KV buffers the attention kernels run on (fixed 1M each, or sized per request in an arena). All other memory is a <b>paged pool</b>: content-addressed pages shared by every conversation that has the same prefix, evicted by exact least-recently-used order. Before a request runs, its cached prefix is copied from the pool into its lane; afterwards the new tokens are copied back. The copies are DRAM-bound. By default they run on the stage before the chunk (sequential); double or triple buffering overlaps them with compute and charges 25% of their time for bandwidth contention.
         <ul>
           <li><b>Lane table ("Lane table" control).</b>
@@ -552,7 +551,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Variable-size lanes (arena):</b> lanes allocated at the request's actual length from a contiguous arena (2-8M tokens) instead of 1M each.</li>
       <li><b>SSD KV tier:</b> see KV cache. In the study it requires the paged pool; the simulator also supports it behind static slots.</li>
       <li><b>Not a feature: bounded dense gather.</b> Earlier versions listed bounding the dense ring-joint gather to [0, kv_len) as a P0 feature. The op already does this (tt-metal #47539), so it is part of today's baseline, and the old whole-lane behaviour is only a sensitivity row.</li>
-      <li><b>Not a feature: unaligned resume.</b> Resuming at any 32-token boundary instead of rounding the cached prefix down to a chunk multiple (with chunk 2048 the rounding discards about 1024 cached tokens per request). It is merged (tt-metal #57636; validated on 5 layers, the full 60-layer two-turn accuracy check is still to run), so it is part of today's baseline; untick "Unaligned resume" to see the old behaviour. The variable layout includes it anyway.</li>
+      <li><b>Not a feature: unaligned resume.</b> Resuming at any 32-token boundary instead of rounding the cached prefix down to a chunk multiple (with chunk 2048 the rounding discards about 1024 cached tokens per request). It is merged (tt-metal #57636; validated on 5 layers, the full 60-layer two-turn accuracy check is still to run), so the simulator always resumes unaligned (<span class="mono">node run.js --set unaligned=false</span> still models the old rounding). The variable layout includes it anyway.</li>
       <li><b>index_k stored once:</b> the index-key cache is kept on one TP column instead of all four, and gathered when needed. This cuts KV size from 2112 to 1344 B per token per layer.</li>
       <li><b>index_k bf8:</b> the index-key cache in bf8 instead of bf16. It is the runner's default dtype, but the measured runs used bf16, and it needs an accuracy check.</li>
       <li><b>Variable chunk / flexible SP layout:</b> see Pipeline. It also makes resume block-granular.</li>
@@ -702,7 +701,7 @@ function mkWorker() {
 
 // ---------------------------------------------------------------- form <-> cfg
 const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'batchDynShape', 'attn', 'kvDedup', 'prefetchKV', 'policy',
-  'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'unaligned', 'hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'duration', 'seed'];
+  'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'duration', 'seed'];
 const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'lanes', 'arenaTokens', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'reserveGB', 'decodeTps', 'duration', 'seed']);
 function setForm(cfg) {
   const c = Object.assign({}, SIM.DEFAULTS, cfg);
@@ -742,7 +741,6 @@ function syncUi() {
   // every cache can batch; static slots need requests per batch x stages slots (makePlan reports out of memory)
   $('batch').disabled = false; $('batchHint').hidden = $('cache').value !== 'slots';
   $('budget').disabled = !$('batch').checked; $('attn').disabled = !$('batch').checked; $('batchDynShape').disabled = !$('batch').checked;
-  $('unaligned').disabled = $('layout').value === 'var';
   // pool lanes per stage (as makePlan): derived = copy-mode buffers x requests per batch; the override is for batching
   // on the pool only, and variable-layout batching (no chunk units) must override
   const fixedLanes = pool && !$('laneArena').checked, batched = $('batch').checked;
