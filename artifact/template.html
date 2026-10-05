@@ -249,7 +249,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <div class="status"><span id="statusTxt">Loading traffic…</span><div class="prog" style="width:120px"><span id="progBar"></span></div></div>
     </div>
     <div class="callout bad" id="cfgErr" hidden></div>
-    <div class="viewat"><label for="viewAt">Metrics at</label><select id="viewAt"></select><span class="muted small">or click a chart</span></div>
+    <div class="viewat"><label for="viewAt">Metrics at</label><select id="viewAt"></select><label for="viewConc">or any C =</label><input id="viewConc" type="number" min="1" max="16384" step="1" placeholder="e.g. 300" style="width:90px"><span class="muted small">or click a chart</span></div>
     <div class="tiles" id="tiles"></div>
   </div>
   <div class="panel">
@@ -601,7 +601,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <h2 id="m-read">Reading the Explore tab</h2>
     <ul>
       <li><b>Loading.</b> On load, the charts show the precomputed baseline (<span class="mono">today-C</span>). <b>Run sweep</b> simulates your configuration at every concurrency in the grid, in your browser, in about 5-30 s. It also runs the same configuration with an infinite cache, unless you untick that option.</li>
-      <li><b>Metrics at.</b> Picks the concurrency the per-point tiles and "Where processed tokens go" show: the goodput point by default, or any simulated concurrency (also by clicking a chart; a dashed line marks it). Goodput, goodput with an infinite cache and peak useful always describe the whole sweep. Copy link keeps the choice.</li>
+      <li><b>Metrics at.</b> Picks the concurrency the tiles and "Where processed tokens go" show: the goodput point by default, any concurrency of the sweep (also by clicking a chart; a dashed line marks it), or any other concurrency typed into the box, which is simulated on demand (with its infinite-cache twin) and added to the charts. At a picked concurrency the first tile shows useful tok/s there instead of goodput (the goodput stays in its last line), and the infinite-cache tile compares at the same concurrency. Added concurrencies never move goodput, which comes from the sweep alone. Peak useful always describes the sweep. Copy link keeps the choice.</li>
       <li><b>Tiles.</b> Goodput; goodput with an infinite cache; TTFT p50/p90 and hit rate at the goodput point; input tokens per hour at the goodput point (the input of the requests completed there, split into new tokens the pipeline prefilled, re-prefill included, and cached prefix hits) and requests completed per hour; the peak useful throughput regardless of TTFT; wasted compute (the share of processed tokens that is re-prefill or padding, the complement of the useful share in "Where processed tokens go"); requests per batch at the goodput point and at the peak.</li>
       <li><b>Charts</b> share a log concurrency axis:
         <ul>
@@ -695,6 +695,14 @@ onmessage = (e) => {
   const m = e.data;
   if (m.init) { TR = M3SIM.loadTraffic(m.buf, m.header); CAL = m.cal; postMessage({ ready: true }); return; }
   const j = m.job;
+  // single concurrencies picked on the page (not part of the sweep, so they never move goodput)
+  if (j.points) {
+    for (const c of j.points) {
+      let r; try { r = M3SIM.simulate(TR, CAL, Object.assign({}, j.cfg, { concurrency: c })); } catch (err) { r = { error: String(err) }; }
+      postMessage({ id: j.id, run: j.run, point: slim(r, c), tag: 'pick' });
+    }
+    return;
+  }
   // grid + extension + cliff bisection: lib/sweep.js, the same code the study runs
   M3SWEEP.sweep(j.concs, j.slo, (c, tag) => {
     let r; try { r = M3SIM.simulate(TR, CAL, Object.assign({}, j.cfg, { concurrency: c })); } catch (err) { r = { error: String(err) }; }
@@ -952,13 +960,39 @@ const summarize = SWEEP.summarize;
 // ---------------------------------------------------------------- run
 let run = null, pinned = null, workers = [];
 // concurrency the per-point tiles show ("Metrics at" or a chart click); null = the goodput point
-let viewC = null;
+let viewC = null, runSeq = 0, pickW = null;
+// sweep points plus concurrencies simulated on request (run.extra / run.extraInf); goodput uses the sweep only
+const allReal = () => (run ? run.real.concat(run.extra || []) : []);
+const allInf = () => (run ? run.inf.concat(run.extraInf || []) : []);
 // a chart click can land on an ∞-cache concurrency: snap to the nearest point of this config (log distance)
 function pickConc(c) {
-  const pts = run ? run.real.filter((p) => !p.error) : [];
+  const pts = allReal().filter((p) => !p.error);
   if (!pts.length) return;
   const p = pts.reduce((b, q) => (Math.abs(Math.log(q.conc / c)) < Math.abs(Math.log(b.conc / c)) ? q : b));
-  viewC = p.conc; render(); syncUrl();
+  viewC = p.conc; $('viewConc').value = ''; render(); syncUrl();
+}
+// simulate concurrency c for this config (and its infinite-cache twin) unless the run already has it
+function ensurePick(c) {
+  if (!run || !run.cfg || c == null) return;
+  const has = (arr) => arr.some((p) => p.conc === c);
+  const jobs = [];
+  if (!has(allReal())) jobs.push({ id: 'extra', cfg: run.cfg });
+  if (run.infCfg && !has(allInf())) jobs.push({ id: 'extraInf', cfg: run.infCfg });
+  if (!jobs.length) return;
+  if (!trafficBuf) decodeTraffic();
+  if (!pickW) {
+    pickW = mkWorker();
+    pickW.onmessage = (e) => {
+      const m = e.data;
+      if (!m.point || !run || m.run !== run.seq) return; // a newer run replaced this one
+      const arr = run[m.id];
+      if (!arr.some((p) => p.conc === m.point.conc)) arr.push(m.point);
+      $('statusTxt').textContent = m.point.error ? `C = ${m.point.conc} failed: ${m.point.error}` : `Simulated C = ${m.point.conc}`;
+      render();
+    };
+  }
+  $('statusTxt').textContent = `Simulating C = ${c}…`;
+  for (const j of jobs) pickW.postMessage({ job: { id: j.id, cfg: j.cfg, points: [c], run: run.seq } });
 }
 // useful comes straight from the simulator (same number as the Goodput tile); re-prefill = prefilled new tokens - useful
 function tokSplit(p) {
@@ -971,19 +1005,22 @@ function render() {
   const slo = Number($('slo').value);
   const C = colors();
   const series = [];
-  if (run) { series.push({ name: 'this config', color: C.cfg, pts: run.real }); if (run.inf.length) series.push({ name: 'same, infinite cache', color: C.inf, pts: run.inf }); }
+  const realAll = allReal(), infAll = allInf();
+  if (run) { series.push({ name: 'this config', color: C.cfg, pts: realAll }); if (infAll.length) series.push({ name: 'same, infinite cache', color: C.inf, pts: infAll }); }
   if (pinned) series.push({ name: 'pinned: ' + pinned.name, color: C.pin, pts: pinned.real });
   $('legend').innerHTML = series.map((s) => `<span><i style="background:${s.color}"></i>${esc(s.name)}</span>`).join('');
   const R = run ? summarize(run.real, slo) : null, I = run && run.inf.length ? summarize(run.inf, slo) : null, P = pinned ? summarize(pinned.real, slo) : null;
   const a = R && R.at;
   // per-point metrics: the picked concurrency, else the goodput point, else the peak (no point meets the SLO)
-  const pickP = viewC != null && run ? run.real.find((p) => p.conc === viewC && !p.error) : null;
+  const pickP = viewC != null ? realAll.find((p) => p.conc === viewC && !p.error) : null;
+  // a picked point other than the goodput point: Goodput and ∞-cache tiles show that concurrency too
+  const showPick = pickP && pickP !== a, infP = showPick ? infAll.find((p) => p.conc === pickP.conc && !p.error) : null;
   const v = pickP || a || (R && R.peak);
   const where = !v ? '' : v === a ? 'at the goodput point' : `at C = ${v.conc}` + (pickP ? (SWEEP.passes(v, slo) ? '' : ', over the SLO') : ' (peak)');
   const at = (txt) => (where ? `${txt}, ${where}` : txt);
-  const vpts = run ? run.real.filter((p) => !p.error).sort((x, y) => x.conc - y.conc) : [];
+  const vpts = realAll.filter((p) => !p.error).sort((x, y) => x.conc - y.conc);
   $('viewAt').innerHTML = `<option value="">${a ? `goodput point (C = ${a.conc})` : R && R.peak ? `peak (C = ${R.peak.conc}): no point meets the SLO` : 'goodput point'}</option>`
-    + vpts.map((p) => `<option value="${p.conc}">C = ${p.conc} · p90 ${fmtS(p.ttftP90)} s${SWEEP.passes(p, slo) ? '' : ' (over SLO)'} · useful ${fmtK(p.usefulTps)}</option>`).join('');
+    + vpts.map((p) => `<option value="${p.conc}">C = ${p.conc} · p90 ${fmtS(p.ttftP90)} s${SWEEP.passes(p, slo) ? '' : ' (over SLO)'} · useful ${fmtK(p.usefulTps)}${run.extra && run.extra.includes(p) ? ' · added' : ''}</option>`).join('');
   $('viewAt').value = pickP ? String(pickP.conc) : '';
   drawTriple(['chU', 'chT', 'chH', 'chR'], series, slo < NO_SLO ? slo : null, run ? { c: v ? v.conc : null, fn: pickConc } : null);
   // a run stops sweeping about 4x past the SLO it was started with: a much looser SLO needs a new run
@@ -992,8 +1029,12 @@ function render() {
   const bp = v, sp = bp && tokSplit(bp);
   const h = v && SIM.hourly(v);
   const tiles = [
-    ['Goodput', R ? (R.atEdge ? '≥ ' : '') + fmtK(R.goodput) : '–', slo >= NO_SLO ? 'useful tok/s, no TTFT limit (= peak)' : 'useful tok/s @ p90 ≤ ' + slo + ' s', stale ? `run swept for a ${sloTxt(run.slo)} SLO: run again for this one` : R && R.atEdge ? 'still under the SLO at the highest concurrency simulated' : P ?`pinned ${fmtK(P.goodput)} (${R && P.goodput ? (R.goodput / P.goodput).toFixed(2) + 'x' : '–'})` : ''],
-    ['With infinite cache', I ? (I.atEdge ? '≥ ' : '') + fmtK(I.goodput) : '–', 'same config, nothing evicted', R && I && I.goodput ? `real = ${I.atEdge ? '≤ ' : ''}${pct(R.goodput / I.goodput)} of ∞` : ''],
+    showPick
+      ? ['Useful throughput', fmtK(pickP.usefulTps), `useful tok/s at C = ${pickP.conc}, ` + (SWEEP.passes(pickP, slo) ? 'meets the SLO' : 'over the SLO'), R ? `goodput ${R.atEdge ? '≥ ' : ''}${fmtK(R.goodput)}` + (a ? ` at C = ${a.conc}` : '') : '']
+      : ['Goodput', R ? (R.atEdge ? '≥ ' : '') + fmtK(R.goodput) : '–', slo >= NO_SLO ? 'useful tok/s, no TTFT limit (= peak)' : 'useful tok/s @ p90 ≤ ' + slo + ' s', stale ? `run swept for a ${sloTxt(run.slo)} SLO: run again for this one` : R && R.atEdge ? 'still under the SLO at the highest concurrency simulated' : P ?`pinned ${fmtK(P.goodput)} (${R && P.goodput ? (R.goodput / P.goodput).toFixed(2) + 'x' : '–'})` : ''],
+    showPick && infP
+      ? ['With infinite cache', fmtK(infP.usefulTps), `useful tok/s at C = ${pickP.conc}, nothing evicted`, `real = ${pct(pickP.usefulTps / infP.usefulTps)} of ∞`]
+      : ['With infinite cache', I ? (I.atEdge ? '≥ ' : '') + fmtK(I.goodput) : '–', 'same config, nothing evicted', R && I && I.goodput ? `real = ${I.atEdge ? '≤ ' : ''}${pct(R.goodput / I.goodput)} of ∞` : ''],
     ['TTFT', v ? `${fmtS(v.ttftP50)}<small> / ${fmtS(v.ttftP90)} s</small>` : '–', at('p50 / p90'), v ? `C = ${v.conc} lanes` : ''],
     ['Hit rate', v ? pct(v.hitRate, 1) : '–', at('prefix-cache hit, token-weighted'), v ? `∞-cache ${pct(v.infHitRate, 1)}` : ''],
     ['Input tokens per hour', h ? fmtBig(h.inTok) : '–', at('cached + new'), h ? `new ${fmtBig(h.newTok)} (${pct(h.newTok / h.inTok, 1)}) · cached ${fmtBig(h.cachedTok)}` : ''],
@@ -1014,7 +1055,7 @@ function render() {
   } else { $('bdBar').innerHTML = ''; $('bdLegend').innerHTML = ''; $('bdNote').textContent = ''; }
   // points table
   const rows = [];
-  for (const [nm, arr] of [['config', run ? run.real : []], ['∞ cache', run ? run.inf : []]]) for (const p of arr) { const hp = SIM.hourly(p); rows.push(`<tr><td>${nm}</td><td class="n">${p.conc}</td><td class="n">${fmtK(p.usefulTps)}</td><td class="n">${fmtK(p.processedTps)}</td><td class="n">${fmtS(p.ttftP50)}</td><td class="n">${fmtS(p.ttftP90)}</td><td class="n">${pct(p.hitRate, 1)}</td><td class="n">${fmtBig(hp.inTok)}</td><td class="n">${fmtBig(hp.newTok)}</td><td class="n">${fmtBig(hp.req)}</td><td class="n">${pct(p.reprefillFrac)}</td><td class="n">${pct(p.padFrac)}</td><td class="n">${pct(p.maxUtil)}</td><td class="n">${Math.round(p.avgChunkTok)}</td><td class="n">${p.avgSegsPerChunk != null ? p.avgSegsPerChunk.toFixed(2) : '–'}</td></tr>`); }
+  for (const [nm, arr] of [['config', realAll.slice().sort((x, y) => x.conc - y.conc)], ['∞ cache', infAll.slice().sort((x, y) => x.conc - y.conc)]]) for (const p of arr) { const hp = SIM.hourly(p); rows.push(`<tr><td>${nm}</td><td class="n">${p.conc}</td><td class="n">${fmtK(p.usefulTps)}</td><td class="n">${fmtK(p.processedTps)}</td><td class="n">${fmtS(p.ttftP50)}</td><td class="n">${fmtS(p.ttftP90)}</td><td class="n">${pct(p.hitRate, 1)}</td><td class="n">${fmtBig(hp.inTok)}</td><td class="n">${fmtBig(hp.newTok)}</td><td class="n">${fmtBig(hp.req)}</td><td class="n">${pct(p.reprefillFrac)}</td><td class="n">${pct(p.padFrac)}</td><td class="n">${pct(p.maxUtil)}</td><td class="n">${Math.round(p.avgChunkTok)}</td><td class="n">${p.avgSegsPerChunk != null ? p.avgSegsPerChunk.toFixed(2) : '–'}</td></tr>`); }
   $('ptsTable').innerHTML = rows.length ? `<table><thead><tr><th>run</th><th class="n">C</th><th class="n">useful</th><th class="n">processed</th><th class="n">TTFT p50</th><th class="n">p90</th><th class="n">hit</th><th class="n">input/h</th><th class="n">new/h</th><th class="n">req/h</th><th class="n">re-prefill</th><th class="n">pad</th><th class="n">util</th><th class="n">chunk</th><th class="n">req/chunk</th></tr></thead><tbody>${rows.join('')}</tbody></table>` : '<p class="hint">No run yet.</p>';
 }
 function startRun() {
@@ -1026,9 +1067,9 @@ function startRun() {
   const concs = $('concs').value.split(',').map((x) => Number(x.trim())).filter((x) => x > 0).sort((a, b) => a - b);
   const slo = Number($('slo').value);
   const name = $('preset').value >= 0 ? PRESETS[Number($('preset').value)].name : 'custom';
-  run = { name, cfg, real: [], inf: [], slo };
   const jobs = [{ id: 'real', cfg }];
   if ($('compareInf').checked && cfg.cache !== 'inf') jobs.push({ id: 'inf', cfg: Object.assign({}, cfg, { cache: 'inf', hostTier: false }) });
+  run = { seq: ++runSeq, name, cfg, infCfg: jobs[1] ? jobs[1].cfg : null, real: [], inf: [], extra: [], extraInf: [], slo };
   $('runBtn').disabled = true; $('runBtn').dataset.busy = '1'; $('pinBtn').disabled = true;
   let pending = jobs.length; const total = (concs.length + 7) * jobs.length; let got = 0; const t0 = performance.now();
   $('statusTxt').textContent = 'Simulating…'; $('progBar').style.width = '0%';
@@ -1038,13 +1079,19 @@ function startRun() {
     w.onmessage = (e) => {
       const m = e.data; if (m.ready) return;
       if (m.point) { run[m.id].push(m.point); run[m.id].sort((a, b) => a.conc - b.conc); got++; $('progBar').style.width = Math.min(100, 100 * got / total) + '%'; if (m.tag === 'refine') $('statusTxt').textContent = 'Refining the cliff…'; else if (m.tag === 'extend') $('statusTxt').textContent = 'Still under the SLO, extending the grid…'; render(); }
-      if (m.done) { if (--pending === 0) { $('runBtn').dataset.busy = '0'; $('runBtn').disabled = false; $('pinBtn').disabled = false; $('progBar').style.width = '100%'; $('statusTxt').textContent = `Done in ${((performance.now() - t0) / 1000).toFixed(1)} s`; render(); } }
+      if (m.done) { if (--pending === 0) { $('runBtn').dataset.busy = '0'; $('runBtn').disabled = false; $('pinBtn').disabled = false; $('progBar').style.width = '100%'; $('statusTxt').textContent = `Done in ${((performance.now() - t0) / 1000).toFixed(1)} s`; ensurePick(viewC); render(); } }
     };
     w.postMessage({ job: { id: j.id, cfg: j.cfg, concs, slo } });
   });
 }
 $('runBtn').addEventListener('click', startRun);
-$('viewAt').addEventListener('change', () => { viewC = $('viewAt').value === '' ? null : Number($('viewAt').value); render(); syncUrl(); });
+$('viewAt').addEventListener('change', () => { viewC = $('viewAt').value === '' ? null : Number($('viewAt').value); $('viewConc').value = ''; render(); syncUrl(); });
+// any concurrency: simulated on demand (and its infinite-cache twin) if the sweep did not run it
+$('viewConc').addEventListener('change', () => {
+  const c = Math.round(Number($('viewConc').value));
+  if (!(c >= 1 && c <= 16384)) return;
+  viewC = c; ensurePick(c); render(); syncUrl();
+});
 $('pinBtn').addEventListener('click', () => { if (run) { pinned = { name: run.name, real: run.real.slice() }; render(); } });
 // SLO: number box + log slider (1 s .. 600 s; the right end = no SLO, stored as NO_SLO seconds)
 const NO_SLO = 1e6, SLO_MIN = 1, SLO_MAX = 600;
@@ -1185,7 +1232,7 @@ syncSlo('n'); updatePlan(); renderRoadmap(); renderModel();
 if (shared) { $('resTitle').textContent = 'Results: shared configuration'; syncUrl(); }
 else (function seed() {
   const S = STUDY.scenarios.g4_k0;
-  run = { name: 'study baseline, 4 gx', real: S.curves.base, inf: [], slo: STUDY.slo };
+  run = { seq: ++runSeq, name: 'study baseline, 4 gx', cfg: S.base, infCfg: null, real: S.curves.base, inf: [], extra: [], extraInf: [], slo: STUDY.slo };
   $('resTitle').textContent = 'Results: study baseline for 4 galaxies (16x[2,4], chunk 2048, auto split, static slots, round robin, unaligned resume; precomputed, press Run for a live sweep)';
   render();
 })();
