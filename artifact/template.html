@@ -601,7 +601,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <h2 id="m-read">Reading the Explore tab</h2>
     <ul>
       <li><b>Loading.</b> On load, the charts show the precomputed baseline (<span class="mono">today-C</span>). <b>Run sweep</b> simulates your configuration at every concurrency in the grid, in your browser, in about 5-30 s. It also runs the same configuration with an infinite cache, unless you untick that option.</li>
-      <li><b>Metrics at.</b> Picks the concurrency the tiles and "Where processed tokens go" show: the goodput point by default, any concurrency of the sweep (also by clicking a chart; a dashed line marks it), or any other concurrency typed into the box, which is simulated on demand (with its infinite-cache twin) and added to the charts. At a picked concurrency the first tile shows useful tok/s there instead of goodput (the goodput stays in its last line), and the infinite-cache tile compares at the same concurrency. Added concurrencies never move goodput, which comes from the sweep alone. Peak useful always describes the sweep. Copy link keeps the choice.</li>
+      <li><b>Metrics at.</b> Picks the concurrency the tiles and "Where processed tokens go" show: the goodput point by default, any concurrency of the sweep (also by clicking a chart; a dashed line marks it), or any other concurrency typed into the box, which is simulated on demand (with its infinite-cache twin) and added to the charts. At a picked concurrency the first tile shows useful tok/s there instead of goodput, and the infinite-cache tile compares at the same concurrency. Added concurrencies never move goodput, which comes from the sweep alone. Peak useful always describes the sweep. Copy link keeps the choice.</li>
       <li><b>Tiles.</b> Goodput; goodput with an infinite cache; TTFT p50/p90 and hit rate at the goodput point; input tokens per hour at the goodput point (the input of the requests completed there, split into new tokens the pipeline prefilled, re-prefill included, and cached prefix hits) and requests completed per hour; the peak useful throughput regardless of TTFT; wasted compute (the share of processed tokens that is re-prefill or padding, the complement of the useful share in "Where processed tokens go"); requests per batch at the goodput point and at the peak.</li>
       <li><b>Charts</b> share a log concurrency axis:
         <ul>
@@ -1016,7 +1016,7 @@ function render() {
   // a picked point other than the goodput point: Goodput and ∞-cache tiles show that concurrency too
   const showPick = pickP && pickP !== a, infP = showPick ? infAll.find((p) => p.conc === pickP.conc && !p.error) : null;
   const v = pickP || a || (R && R.peak);
-  const where = !v ? '' : v === a ? 'at the goodput point' : `at C = ${v.conc}` + (pickP ? (SWEEP.passes(v, slo) ? '' : ', over the SLO') : ' (peak)');
+  const where = !v ? '' : v === a ? 'at the goodput point' : `at C = ${v.conc}` + (pickP ? '' : ' (peak)');
   const at = (txt) => (where ? `${txt}, ${where}` : txt);
   const vpts = realAll.filter((p) => !p.error).sort((x, y) => x.conc - y.conc);
   $('viewAt').innerHTML = `<option value="">${a ? `goodput point (C = ${a.conc})` : R && R.peak ? `peak (C = ${R.peak.conc}): no point meets the SLO` : 'goodput point'}</option>`
@@ -1030,7 +1030,7 @@ function render() {
   const h = v && SIM.hourly(v);
   const tiles = [
     showPick
-      ? ['Useful throughput', fmtK(pickP.usefulTps), `useful tok/s at C = ${pickP.conc}, ` + (SWEEP.passes(pickP, slo) ? 'meets the SLO' : 'over the SLO'), R ? `goodput ${R.atEdge ? '≥ ' : ''}${fmtK(R.goodput)}` + (a ? ` at C = ${a.conc}` : '') : '']
+      ? ['Useful throughput', fmtK(pickP.usefulTps), `useful tok/s at C = ${pickP.conc}`, '']
       : ['Goodput', R ? (R.atEdge ? '≥ ' : '') + fmtK(R.goodput) : '–', slo >= NO_SLO ? 'useful tok/s, no TTFT limit (= peak)' : 'useful tok/s @ p90 ≤ ' + slo + ' s', stale ? `run swept for a ${sloTxt(run.slo)} SLO: run again for this one` : R && R.atEdge ? 'still under the SLO at the highest concurrency simulated' : P ?`pinned ${fmtK(P.goodput)} (${R && P.goodput ? (R.goodput / P.goodput).toFixed(2) + 'x' : '–'})` : ''],
     showPick && infP
       ? ['With infinite cache', fmtK(infP.usefulTps), `useful tok/s at C = ${pickP.conc}, nothing evicted`, `real = ${pct(pickP.usefulTps / infP.usefulTps)} of ∞`]
