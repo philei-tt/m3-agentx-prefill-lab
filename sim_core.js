@@ -354,7 +354,9 @@
     asyncHandoff: false,   // stage-to-stage D2D overlapped with compute (no blocking send), link-rate transfer
     boundedDense: true,    // dense ring-joint gathers [0, kv_len) (op-bounded since #47539); false = whole lane capacity
     msaLocal: false,       // MSA: SP-local indexer + top-k merge, fetch only selected K/V blocks (no prefix all-gather)
-    idxBf16: true, idxDerep: false, // index_k cache dtype / de-replicated over TP (today: bf16 x TP replicas)
+    // index_k cache dtype / de-replicated over TP. Today: bf8 x TP replicas (the deployed runner rejects bf16); the
+    // #57827 calibration runs used bf16, so the calibration and validation replays pin idxBf16: true
+    idxBf16: false, idxDerep: false,
     chunk: 5120, layout: 'fixed', batch: false, budget: 16384, attn: 'seq', policy: 'rr',
     // kvDedup: a request that takes several C-units of a batched fixed-layout chunk makes ONE attention call (one
     //   gather of its cached prefix); false = one call and one prefix gather per C-unit (today's kernels process
@@ -386,8 +388,11 @@
     //   'overlap3'   = static triple buffering: next batch copying in, current computing, previous copying out, each
     //                  for a whole chunk period (peak 3x)
     copyMode: 'sequential', copyContention: 0.25,
-    hostTier: false, hostGBPerGalaxy: 1024, pcieGBsPerGalaxy: 64,
-    reserveGB: 3, expertImb: IMB0, maxInflight: 0,
+    // SSD tier: 16 TB per galaxy (planned hardware); 64 GB/s is a placeholder for the drives / PCIe bandwidth
+    hostTier: false, hostGBPerGalaxy: 16384, pcieGBsPerGalaxy: 64,
+    // reserveGB: per-chip DRAM kept free besides the modelled weights and activations; 1 GB reproduces the measured
+    // slot fit (35 x 1M slots on 16x[2,4], bf8 index_k, even split; CCL scratch + transient buffers)
+    reserveGB: 1, expertImb: IMB0, maxInflight: 0,
     concurrency: 64, decodeTps: 180, duration: 1800, seed: 1, idleCap: 10, startMin: 0, startMax: 1, maxWarmup: 1e6,
     gapCap: Infinity,      // AgentX forbids capping recorded idle gaps (only the 10 s system-idle cap applies)
     // policy: 'rr' (default) = round robin, see below; 'rtc' = run to completion (no preemption), oldest first
@@ -1400,7 +1405,8 @@
   // Matrix-cell replay (validation vs the #57827 tables): U users stream (cached, new) requests
   // ------------------------------------------------------------------------------------------------------
   function matrixCell(cal, cfgIn, cached, nnew, users, reqsPerUser) {
-    const plan = makePlan(Object.assign({ cache: 'inf', batch: false, layout: 'fixed' }, cfgIn), cal);
+    // the #57827 matrix runs used bf16 index_k (M3_INDEX_CACHE_BF16=1)
+    const plan = makePlan(Object.assign({ cache: 'inf', batch: false, layout: 'fixed', idxBf16: true }, cfgIn), cal);
     const S = plan.S, C = plan.cfg.chunk, out = new Float64Array(S);
     const cap = cached + 51200;
     const cachedA = Math.floor(cached / C) * C;
@@ -1441,7 +1447,7 @@
     const pts = { 5120: [], 2048: [] };
     for (const run of ['A', 'B', 'C']) {
       const r = data.pipeline[run]; const T = r.chunk; const counts = r.layers.split(',').map(Number);
-      const plan = makePlan({ chunk: T, split: counts, stages: 16, cache: 'inf' }, cal);
+      const plan = makePlan({ chunk: T, split: counts, stages: 16, cache: 'inf', idxBf16: true }, cal); // runs used bf16 index_k
       for (const row of data.tables[run]) {
         if (row.new > T || row.loaded_steady_processed_tps == null) continue;
         const cell = (r.cells || []).find((c) => c.cached === row.cached && c.new === row.new);

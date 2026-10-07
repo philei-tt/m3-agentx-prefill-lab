@@ -149,7 +149,11 @@ Each layer is decomposed into the ops the implementation runs.
 * `reserveGB` per chip plus activation buffers;
 * KV: 1088 B/token/layer for K/V (bf8), plus index_k at 128 × (2 B bf16 | 1.0625 B bf8) × (TP replicas | 1).
 
-KV capacity is the minimum over stages. At 4 galaxies with bf16 index_k replicated ×4, that is about 21.4M tokens, or 20 static 1M slots.
+KV capacity is the minimum over stages. Defaults:
+* bf8 index_k replicated ×4, as deployed (1632 B/token/layer);
+* a 1 GB reserve, calibrated so that 16×[2,4] with an even split fits 35 × 1M slots, as measured on hardware (Sep 30 2026, 4-MoE-layer stages bind);
+* the default auto split puts 5 layers on some stages and fits 28;
+* the #57827 calibration replays keep bf16 index_k, as those runs used.
 
 Every buffer that must hold a whole request (slots, fixed lanes, the lane arena) must be at least 990,016 tokens, the largest AgentX request; `makePlan` rejects smaller ones.
 
@@ -178,11 +182,26 @@ Every buffer that must hold a whole request (slots, fixed lanes, the lane arena)
   * Copy-in: a request whose lane still holds its context, i.e. no other request has used that lane since its last turn, skips the copy-in. On a miss it takes a free lane (an empty one first, else the least recently used) and copies its whole context so far in. Arena lanes always copy in. Results report `rrLaneReuse` (share of continuation turns that skipped the copy-in) and `rrCopyInTps`. Copying in every turn instead made no measurable difference to goodput (≤0.5%, even with sequential copies), so it is not an option.
   * Round robin on the pool, and paging under rr, pin the cached prefix of every request in progress. A request is admitted only while the pool can hold all in-progress requests in full; until then it waits in the queue. This matches tt-d-gen, where admission needs a free slot, a full pool queues the request rather than rejecting it, and in-flight slots are never evicted.
 
-## Findings (study of Oct 1 2026: round-robin scheduling, sequential pool copies, derived lane counts, SSD tier behind static slots, unaligned resume in the baseline; decode 180 tok/s, AIPerf-exact replay, `results/study.json`)
+## Findings (study of Oct 7 2026: deployed memory defaults — bf8 index_k, 1 GB reserve calibrated to the measured 35 slots, 16 TB SSD per galaxy; round-robin scheduling, SSD tier behind static slots, unaligned resume in the baseline; decode 180 tok/s, AIPerf-exact replay, `results/study.json`)
 
 Goodput in useful tok/s at p90 TTFT ≤ 10 s. "Today" = 16×[2,4] (or 32×[2,4]), chunk 2048, auto split, static 1M slots, round-robin scheduling, unaligned resume.
 
-**Changes from the previous study (Sep 29 b):**
+**Changes from the previous study (Oct 1):**
+* **Memory defaults match the deployment.**
+  * index_k is bf8, the dtype the runner deploys; bf16 is rejected. "index_k bf8" is no longer a roadmap feature; the bf16 sensitivity row shows what it would cost.
+  * The per-chip reserve is 1 GB instead of 3. That reproduces the hardware slot fit: 35 × 1M slots on 16×[2,4] with an even split (Sep 30 2026), 70 on 8 galaxies.
+  * Today's auto split (up to 5 layers per stage) fits 28 slots on 4 galaxies, where the old defaults gave 20.
+  * The #57827 calibration replays keep bf16 index_k, as those runs used. Validation is unchanged.
+* **The SSD tier is 16 TB per galaxy** (planned hardware) instead of the 1 TB placeholder. The bandwidth is still a 64 GB/s placeholder.
+* **Effect:**
+  * Today's baselines: 3.4k → 3.8k / 11.1k → 12.9k (today's kernels), 4.8k → 6.5k / 15.0k → 16.4k (roofline kernels).
+  * Best configs: 45.1k → 60.1k, 82.6k → 144k, 104k → 150k, 161k → 344k.
+  * With today's kernels the best stacks now reach 96–99% of their infinite-cache goodput (62.4k / 151k). With roofline kernels they reach 78–93%.
+* **The SSD tier's bandwidth now matters with roofline kernels:** 16 GB/s/gx costs ×0.55–0.57 and 256 GB/s gains ×1.06–1.23, because far more KV now flows through the tier.
+  * With today's kernels it hardly matters (×0.97–1.00).
+  * Capacity: 4 TB/gx already gives 99–100% with today's kernels, but only 78–91% with roofline kernels. 1 TB/gx gives 48–76%.
+
+**Changes in the Oct 1 study (from Sep 29 b):**
 * **Unaligned resume is part of today's baseline** (tt-metal #57636, merged): a conversation resumes at any 32-token boundary instead of rounding its cached prefix down to a chunk multiple. It is no longer a roadmap feature.
   * On top of round robin, today's baselines move 3.3k → 3.4k and 10.9k → 11.1k with today's kernels, 4.6k → 4.8k (15.0k unchanged) with roofline kernels: on static slots the goodput point is set by capacity.
   * Variable chunk loses the part of its gain that was the rounding loss: at 4 gx today ×1.20 (step #3) → ×1.08 (step #6). It drops to P2, and batching to P1 (×1.19 / ×1.24 at 8 gx today, just under the 1.25 cut).
@@ -208,27 +227,27 @@ Earlier studies are kept on exabox under `/data/philei/m3_traffic_sim/results/`,
 
 | scenario | today | greedy full stack | best grid config | best config with ∞ cache |
 |---|---|---|---|---|
-| 4 galaxies, today's kernels | 3.4k | 39.8k | **45.1k** (16×[4,2], 4 lanes, budget 16k) | 62.4k |
-| 4 galaxies, roofline kernels | 4.8k | 78.3k | **82.6k** (16×[4,2], 2M arena, budget 16k) | 209k |
-| 8 galaxies, today's kernels | 11.1k | 94.8k | **104k** (32×[4,2], 2M arena, budget 8k) | 140k |
-| 8 galaxies, roofline kernels | 15.0k | 158k | **161k** (32×[4,2], 4 lanes, budget 8k) | 367k |
+| 4 galaxies, today's kernels | 3.8k | 48.8k | **60.1k** (16×[4,2], 6 lanes, budget 16k) | 62.4k |
+| 4 galaxies, roofline kernels | 6.5k | 134k | **144k** (16×[4,2], 2M arena, budget 8k) | 184k |
+| 8 galaxies, today's kernels | 12.9k | 131k | **150k** (32×[4,2], 2M arena, budget 16k) | 151k |
+| 8 galaxies, roofline kernels | 16.4k | 305k | **344k** (32×[4,2], 2M arena, budget 8k) | 371k |
 
 Hourly volume at the goodput point (the simulated concurrency where each configuration reaches its goodput, p90 TTFT ≤ 10 s): input tokens of the requests completed per hour, split into new tokens the pipeline prefilled (re-prefill included) and cached prefix hits, and requests completed per hour.
 
 | scenario | configuration | C | input tok/h | new tok/h | cached tok/h | hit | requests/h |
 |---|---|---|---|---|---|---|---|
-| 4 galaxies, today's kernels | today | 40 | 469.6M | 59.9M | 409.8M | 87.3% | 3.1k |
-| 4 galaxies, today's kernels | greedy full stack | 416 | 4.06B | 172.2M | 3.89B | 95.8% | 32.3k |
-| 4 galaxies, today's kernels | best grid config | 472 | 4.45B | 216.2M | 4.24B | 95.1% | 36.1k |
-| 4 galaxies, roofline kernels | today | 56 | 594.3M | 146.5M | 447.8M | 75.4% | 4.2k |
-| 4 galaxies, roofline kernels | greedy full stack | 840 | 8.19B | 686.5M | 7.51B | 91.6% | 64.2k |
-| 4 galaxies, roofline kernels | best grid config | 840 | 8.83B | 638.7M | 8.19B | 92.8% | 68.3k |
-| 8 galaxies, today's kernels | today | 104 | 1.06B | 200.3M | 864.4M | 81.2% | 9.1k |
-| 8 galaxies, today's kernels | greedy full stack | 1056 | 9.92B | 457.5M | 9.46B | 95.4% | 77.4k |
-| 8 galaxies, today's kernels | best grid config | 1096 | 10.89B | 513.4M | 10.37B | 95.3% | 85.2k |
-| 8 galaxies, roofline kernels | today | 128 | 1.42B | 342.7M | 1.07B | 75.8% | 12.3k |
-| 8 galaxies, roofline kernels | greedy full stack | 1688 | 16.62B | 1.10B | 15.51B | 93.4% | 130.4k |
-| 8 galaxies, roofline kernels | best grid config | 1688 | 17.05B | 1.11B | 15.95B | 93.5% | 133.5k |
+| 4 galaxies, today's kernels | today | 48 | 446.8M | 63.9M | 382.9M | 85.7% | 3.6k |
+| 4 galaxies, today's kernels | greedy full stack | 496 | 4.90B | 175.3M | 4.73B | 96.4% | 38.6k |
+| 4 galaxies, today's kernels | best grid config | 664 | 6.24B | 222.3M | 6.02B | 96.4% | 47.7k |
+| 4 galaxies, roofline kernels | today | 72 | 758.9M | 149.8M | 609.1M | 80.3% | 5.3k |
+| 4 galaxies, roofline kernels | greedy full stack | 1384 | 14.44B | 493.9M | 13.95B | 96.6% | 112.3k |
+| 4 galaxies, roofline kernels | best grid config | 1544 | 15.40B | 532.7M | 14.87B | 96.5% | 120.9k |
+| 8 galaxies, today's kernels | today | 112 | 1.22B | 191.3M | 1.03B | 84.4% | 10.5k |
+| 8 galaxies, today's kernels | greedy full stack | 1512 | 13.74B | 489.0M | 13.25B | 96.4% | 108.2k |
+| 8 galaxies, today's kernels | best grid config | 1704 | 15.38B | 565.5M | 14.82B | 96.3% | 122.4k |
+| 8 galaxies, roofline kernels | today | 152 | 1.53B | 323.5M | 1.21B | 78.8% | 13.0k |
+| 8 galaxies, roofline kernels | greedy full stack | 3184 | 33.04B | 1.12B | 31.92B | 96.6% | 255.0k |
+| 8 galaxies, roofline kernels | best grid config | 3672 | 36.52B | 1.27B | 35.25B | 96.5% | 287.1k |
 
 Each cell below is "G #step / LOO":
 * **G** is the gain at the greedy step where the feature was added (the step number is the build order);
@@ -245,25 +264,24 @@ Complexity is a rough judgement of how much of the stack a feature touches:
 
 It is not a time estimate and has not been checked with the code owners.
 
-| tier | feature | 4gx today | 4gx roofline | 8gx today (ranking) | 8gx roofline | complexity |
+| tier | feature | 4 galaxies, today's kernels | 4 galaxies, roofline kernels | 8 galaxies, today's kernels (ranking) | 8 galaxies, roofline kernels | complexity |
 |---|---|---|---|---|---|---|
-| P0 | SSD KV tier (1 TB/gx) | ×4.83 #1 / ×1.89 | ×6.70 #1 / ×1.67 | ×3.75 #1 / ×1.61 | ×4.02 #1 / ×1.59 | high |
-| P0 | slot lanes + paged KV pool | ×1.52 #2 / ×1.71 | ×1.23 #3 / ×1.77 | ×1.27 #2 / ×1.83 | ×1.28 #3 / ×1.80 | high |
-| P0 | async stage handoff | ×1.12 #3 / ×1.21 | ×1.30 #2 / ×1.40 | ×1.26 #3 / ×1.36 | ×1.51 #2 / ×1.63 | med |
-| P1 | multi-request batching | ×1.15 #4 / ×1.28 | ×1.22 #4 / ×1.33 | ×1.19 #4 / ×1.24 | ×1.10 #4 / ×1.17 | high |
-| P1 | index_k stored once (not ×TP) | ×1.05 #5 / ×1.06 | ×1.13 #5 / ×1.09 | ×1.08 #5 / ×1.07 | ×1.10 #5 / ×1.10 | med |
-| P2 | index_k bf8 | ×1.07 #7 / ×1.06 | ×1.08 #6 / ×1.08 | ×1.06 #6 / ×1.06 | ×1.05 #7 / ×1.07 | low (PCC) |
-| P2 | variable chunk (a2a KV write) | ×1.08 #6 / ×1.07 | ×1.02 #7 / ×1.01 | ×1.05 #7 / ×1.05 | ×1.06 #6 / ×1.04 | high |
-| P2 | MSA SP-local indexer | ×1.03 #8 / ×1.02 | ×1.01 #8 / ×1.01 | ×1.01 #8 / ×1.01 | ×1.00 #9 / ×1.00 | high |
-| P2 | fused multi-user attention | ×1.01 #10 / ×1.01 | ×1.00 #10 / ×1.00 | ×1.01 #9 / ×1.01 | ×1.02 #8 / ×1.01 | high |
-| P2 | variable-size lanes (arena) | ×0.96 #11 / ×0.96 | ×1.00 #9 / ×1.00 | ×1.01 #10 / ×1.00 | ×0.99 #10 / ×1.01 | med |
-| P2 | shortest-first run to completion | ×1.02 #9 / ×1.01 | ×0.98 #11 / ×0.98 | ×0.97 #11 / ×0.97 | ×1.00 #11 / ×1.00 | low |
+| P0 | SSD KV tier (16 TB/galaxy, 64 GB/s) | ×4.81 #1 / ×2.20 | ×7.27 #1 / ×2.78 | ×3.45 #1 / ×2.11 | ×5.08 #1 / ×2.94 | high |
+| P0 | Slot lanes + paged KV pool (1M lanes per stage, copy-in/out) | ×1.38 #2 / ×1.91 | ×1.22 #2 / ×2.39 | ×1.23 #3 / ×2.23 | ×1.66 #3 / ×2.81 | high |
+| P0 | Async stage handoff (overlap D2D) | ×1.44 #4 / ×1.27 | ×1.42 #3 / ×1.43 | ×1.37 #2 / ×1.74 | ×1.48 #2 / ×2.51 | med |
+| P0 | Multi-request batching (16k token budget) | ×1.16 #3 / ×1.50 | ×1.36 #4 / ×1.50 | ×1.42 #4 / ×1.63 | ×1.25 #4 / ×1.36 | high |
+| P1 | Variable chunk / flexible SP layout (a2a KV write) | ×1.10 #5 / ×1.09 | ×1.02 #6 / ×1.02 | ×1.15 #5 / ×1.17 | ×1.08 #5 / ×1.18 | high |
+| P1 | Variable-size lanes (contiguous arena, 4M tokens) | ×0.92 #10 / ×0.92 | ×1.00 #8 / ×1.01 | ×1.01 #7 / ×1.08 | ×1.00 #9 / ×1.02 | med |
+| P2 | Fused multi-user attention | ×1.01 #8 / ×1.01 | ×1.00 #9 / ×1.01 | ×1.05 #8 / ×1.04 | ×1.03 #7 / ×1.05 | high |
+| P2 | MSA SP-local indexer (no K/V/index prefix all-gather) | ×1.06 #7 / ×1.03 | ×1.01 #7 / ×1.01 | ×1.03 #6 / ×1.03 | ×1.00 #8 / ×1.01 | high |
+| P2 | index_k cache not replicated over TP (store once) | ×1.00 #9 / ×1.02 | ×1.18 #5 / ×1.28 | ×1.00 #9 / ×1.00 | ×1.14 #6 / ×1.17 | med |
+| P2 | Shortest-first run to completion (30 s aging) | ×1.05 #6 / ×1.01 | ×0.99 #10 / ×0.99 | ×0.98 #10 / ×0.98 | ×0.93 #10 / ×0.93 | low |
 
-Takeaways (study numbers are from the Oct 1 study; the results of separate `tools/*.js` runs cited below, e.g. layout, batch-shape, SLO and fill diagnostics, were measured under the previous defaults, i.e. run to completion, double-buffered copies and 4 fixed lanes, with unaligned resume, and have not been re-run with round robin):
-1. **On AgentX, KV capacity sets the throughput, not compute.** The best stacks reach only 40–75% of their own ∞-cache goodput.
-   * The SSD tier and the pool are the top features in every scenario. Behind static slots the SSD tier alone gives ×3.7–6.7; the pool then adds ×1.23–1.52 by sharing prefixes and freeing the slots' memory.
-   * SSD capacity matters much more than its bandwidth: 0.5 → 2 TB/galaxy moves 4-gx goodput 36.4k → 54.5k (today's kernels) and 68.6k → 108k (roofline kernels). Dropping the bandwidth from 64 to 16 GB/s costs at most 7%.
-   * The lane table must be per stage: a global lane table (today's slot_id) drops the best configs 3–4× with today's kernels (4 gx 45.1k → 13.6k) and 3.5× at 8 gx with roofline kernels (161k → 46k).
+Takeaways (study numbers are from the Oct 7 study; the results of separate `tools/*.js` runs cited below, e.g. layout, batch-shape, SLO and fill diagnostics, were measured under the previous defaults, i.e. run to completion, double-buffered copies and 4 fixed lanes, with unaligned resume, 1 TB SSD and bf16 index_k, and have not been re-run with the current defaults):
+1. **On AgentX, KV capacity sets the throughput until there is a large second tier.** With the 16 TB/galaxy SSD tier the best stacks reach 96–99% of their ∞-cache goodput with today's kernels and 78–93% with roofline kernels (40–75% with 1 TB).
+   * The SSD tier and the pool are the top features in every scenario. Behind static slots the SSD tier alone gives ×3.5–7.3; the pool then adds ×1.22–1.66 by sharing prefixes and freeing the slots' memory.
+   * Capacity: 1 → 4 → 16 → 64 TB/galaxy gives 45.5k → 60.1k → 60.1k → 60.1k at 4 gx and 104k → 149k → 150k → 150k at 8 gx with today's kernels; 83k → 131k → 144k → 144k and 167k → 268k → 344k → 344k with roofline kernels. Bandwidth (64 GB/s placeholder) matters only with roofline kernels: 16 GB/s costs ×0.55–0.57, 256 GB/s gains ×1.06–1.23.
+   * The lane table must be per stage: a global lane table (today's slot_id) drops the best configs 4–7× with today's kernels (4 gx 60.1k → 15.5k, 8 gx 150k → 20.8k) and 1.8–4.4× with roofline kernels (8 gx 344k → 78k).
 2. **Async stage handoff: ×1.12–1.63,** growing with pipeline depth and kernel speed. The measured blocking send is 6–23 ms per chunk per stage.
 3. **Batching: ×1.10–1.33.** Batches hold few requests at the goodput point.
    * On today's 4-gx config + pool + SSD tier they average 1.33 requests; the average chunk is 7.0k of the 16k budget.
@@ -278,7 +296,7 @@ Takeaways (study numbers are from the Oct 1 study; the results of separate `tool
    * Paging vs pool: +10% without the SSD tier (15.0k vs 13.6k; paging frees the 4M lane tokens), +4% with it (24.0k vs 23.0k). Pool/paging + SSD tier come within 4–8% of the ∞-cache goodput of this compute config (25.1k), so most further gains must come from compute and TTFT. Sequential per-request attention is as good as fused, so the proposed plan (batch the MoE, attention per request) is the right one, and fused attention is not worth building. Best budget: 16k.
 4. **Bounded dense gather is already done** (tt-metal #47539). Without it (the old whole-lane gather), the best 4-gx config with 4 fixed 1M lanes would drop 45.1k → 30.8k. Configs with arena lanes are unaffected.
    * The M3 comments that say the dense layers gather the whole cache shard (`prefill.py`, `tt_prefill_runtime.reconfigure_capacity`, README `PREFILL_MAX_SEQ_LEN`) are stale. Only the gather buffer is capacity-sized, which costs memory, not time.
-5. **index_k stored once: ×1.05–1.13;** bf8 index_k adds another ×1.05–1.08.
+5. **index_k stored once: ×1.00–1.28.** The gain is ×1.14–1.28 with roofline kernels, but ×1.00–1.02 with today's kernels, where the 16 TB tier already removes the capacity limit. index_k is bf8 in the baseline now; bf16 would cost ×0.92 with roofline kernels and nothing with today's.
 6. **Variable chunk / a2a KV write is worth 1–8%,** most at 4 gx with today's kernels. (Before unaligned resume (#57636) joined the baseline it showed up to 20%: most of that was the chunk-rounding loss on resume.) The a2a KV write before the cache write is costed on every layer.
    * **A small fixed chunk plus batching gets nearly all of it** (`tools/layout_ab.js`, `results/layout_ab.json`, same stack and topology as the best grid config).
      * The budget is always 16k. The best chunk is 128–256 (45.2k / 81.7k / 100.6k / 163.2k), which matches variable layout + fused attention within 1%.

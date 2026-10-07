@@ -18,11 +18,10 @@ const FEATURES = [
   { key: 'pool', name: 'Slot lanes + paged KV pool (1M lanes per stage, copy-in/out)', cfg: { cache: 'pool', lanes: 4, laneArena: false, laneScope: 'stage' } },
   { key: 'arena', name: 'Variable-size lanes (contiguous arena, 4M tokens)', cfg: { laneArena: true, arenaTokens: 4e6 }, requires: ['pool'] },
   // behind static slots too: an evicted slot is written to SSD and read back when its stream returns
-  { key: 'host', name: 'SSD KV tier (1 TB/galaxy, 64 GB/s)', cfg: { hostTier: true } },
+  { key: 'host', name: 'SSD KV tier (16 TB/galaxy, 64 GB/s)', cfg: { hostTier: true } },
   { key: 'idxdedup', name: 'index_k cache not replicated over TP (store once)', cfg: { idxDerep: true } },
-  { key: 'idxbf8', name: 'index_k cache bf8 instead of bf16', cfg: { idxBf16: false } },
   { key: 'var', name: 'Variable chunk / flexible SP layout (a2a KV write)', cfg: { layout: 'var' } },
-  // on the static-slot base, batching runs out of memory (8 requests per batch x 16 stages > 20 slots), so it needs pool
+  // on the static-slot base, batching runs out of memory (8 requests per batch x 16 stages > 28 slots), so it needs pool
   { key: 'batch', name: 'Multi-request batching (16k token budget)', cfg: { batch: true, budget: 16384 }, requires: ['pool'] },
   { key: 'fused', name: 'Fused multi-user attention', cfg: { attn: 'fused' }, requires: ['batch', 'pool'] },
   { key: 'async', name: 'Async stage handoff (overlap D2D)', cfg: { asyncHandoff: true } },
@@ -130,10 +129,10 @@ async function main() {
     const bestExtra = R.grid[0].extra;
     const sens = [
       ['inf cache', { cache: 'inf', hostTier: false }], ['seed 2', { seed: 2 }], ['seed 3', { seed: 3 }],
-      ['SSD 0.5 TB/gx', { hostGBPerGalaxy: 512 }], ['SSD 2 TB/gx', { hostGBPerGalaxy: 2048 }],
+      ['SSD 1 TB/gx', { hostGBPerGalaxy: 1024 }], ['SSD 4 TB/gx', { hostGBPerGalaxy: 4096 }], ['SSD 64 TB/gx', { hostGBPerGalaxy: 65536 }],
       ['SSD 16 GB/s/gx', { pcieGBsPerGalaxy: 16 }], ['SSD 256 GB/s/gx', { pcieGBsPerGalaxy: 256 }],
       ['decode 90 tok/s', { decodeTps: 90 }], ['decode 360 tok/s', { decodeTps: 360 }],
-      ['reserve 6 GB/chip', { reserveGB: 6 }], ['SLO-free peak', {}],
+      ['reserve 3 GB/chip', { reserveGB: 3 }], ['index_k bf16', { idxBf16: true }], ['SLO-free peak', {}],
       ['TP=4 mesh only', sc.base.galaxies === 4 ? { mesh: [2, 4], stages: 16, replicas: 1 } : { mesh: [2, 4], stages: 32, replicas: 1 }],
       ['dense gathers whole lane (pre-#47539 op)', { boundedDense: false }],
       ['rings off (line only)', { torus: 'off' }], ['rings on every 4-long axis', { torus: 'axes' }],
