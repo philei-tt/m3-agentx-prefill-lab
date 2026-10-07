@@ -192,6 +192,14 @@ Goodput in useful tok/s at p90 TTFT ≤ 10 s. "Today" = 16×[2,4] (or 32×[2,4])
   * Today's baselines rise: 3.1k → 3.3k and 8.2k → 10.9k with today's kernels, 4.0k → 4.6k and 11.4k → 15.0k with roofline kernels.
   * Shortest-first run to completion is now ×0.97–1.02 on top of it, where shortest-first scored ×1.01–1.08 over run to completion. Round robin already keeps short requests from waiting behind long ones.
 * **The SSD tier works behind static slots** (a reclaimed slot is written to SSD and read back when its conversation returns), so it no longer needs the pool. It is now the first roadmap step in every scenario (×3.7–6.7), and the pool comes second or third (×1.23–1.52 at its step, ×1.71–1.83 leave-one-out).
+  * **Why the pool still adds on top** (`tools/tier_diag.js`, `results/tier_diag.txt`: today's 4-gx config, round robin, chunk 2048). Behind slots, SSD capacity stops mattering at 1 TB/gx: 1, 8 and 64 TB all give 16.4k at C=144. Two structural losses remain:
+    * **No prefix sharing across streams.** A slot, and its SSD copy, holds one stream's KV, so a request can only reuse the prefix of its *own* previous request. Sub-agents (42% of requests) re-prefill the context they share with their parent and siblings: hit 94.8–95.4% vs 96.1–96.4% possible. That is 22–26% of all prefill work. The content-addressed pool shares those pages.
+    * **Slot churn.** About 20 slots of 1M tokens fit on device, so almost every request swaps a slot: it writes the evicted stream's whole KV to SSD and reads its own whole prefix back.
+      * SSD reads in the window: 494M tokens vs 14M with pool + SSD at C=128 (504M vs 104M at each one's goodput point).
+      * In-flight prefill is capped at the slot count.
+      * The admission waits push p90 TTFT up early (21–29 s vs 9–10 s at C=256).
+    * Result: pool + SSD reaches 24.9k (1 TB/gx) to 25.2k (8 TB/gx) at C≈250, essentially the infinite-cache 25.7k, vs 16.4k for slots + SSD.
+    * At the same concurrency it also processes fewer tokens for the same useful work: at C=128, 19.4k vs 23.5k processed for 15.3k useful. Its higher processed rate at the goodput point comes from running at higher load, not from waste.
 * **Pool copies are sequential by default, and lanes per stage are derived** (1 per stage without batching). With batching the study keeps 4 lanes, and the grid tries 2/4/6.
 * **A global lane table allows only sequential copies.** It now costs more: at 8 gx with roofline kernels the best config drops 161k → 46k.
 * The best grid configs move by at most 3%: 45.1k / 82.6k / 104k / 161k. All four are [4,2] stages.
