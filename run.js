@@ -4,7 +4,7 @@
 //                    [--price-in USD_PER_M] [--price-cached USD_PER_M] [--price-out USD_PER_M]
 //                    [--galaxy-usd USD_PER_GALAXY_HOUR] [--decode-galaxies N]
 //   values are JSON-parsed when possible (e.g. --set mesh=[4,4] --set batch=true --set split=[1,1,1,5,...])
-//   prices (revenue per hour) default to OpenRouter's MiniMax-M3 list price, SIM.PRICE; costs (margin) to SIM.COST
+//   prices (revenue per hour) default to MiniMax's own M3 price on OpenRouter, SIM.PRICE; costs (margin) to SIM.COST
 'use strict';
 const fs = require('fs'), path = require('path');
 const SIM = require('./sim_core.js');

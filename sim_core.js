@@ -1501,8 +1501,9 @@
 
   function calibrateAll(data) { const cal = calibrate(data); fitHandoff(cal, data); return cal; }
 
-  // List prices, USD per million tokens: OpenRouter minimax/minimax-m3 (the model-level price, also MiniMax's own
-  // endpoint and most providers'), read 2026-10-07 from openrouter.ai/api/v1/models. A cache miss (re-prefill
+  // List prices, USD per million tokens: MiniMax's own endpoint for minimax/minimax-m3 on OpenRouter (provider
+  // "Minimax", minimax/fp8; also the model-level price), read 2026-10-07 from
+  // openrouter.ai/api/v1/models/minimax/minimax-m3/endpoints. A cache miss (re-prefill
   // included) is billed at the input price, a prefix hit at the cache-read price; there is no cache-write charge.
   // Prefill revenue is input tokens only; output tokens are decode's, and count only in the margin (economics()),
   // which also pays for the decode galaxies.

@@ -47,9 +47,9 @@ tokens into useful, re-prefill and padding. At the goodput point it also reports
 those input tokens bill per hour.
 
 **Revenue per hour** prices new tokens (cache misses, re-prefill included) at the input price and prefix hits at the
-cache-read price. The defaults (`SIM.PRICE` in `sim_core.js`) are OpenRouter's list price for `minimax/minimax-m3` on
-Oct 7 2026: **$0.30 / M input, $0.06 / M cache read**, no cache-write charge. That is the model-level price, MiniMax's own
-endpoint and most providers' (the cheapest is about 20% lower). Override it with `--price-in` / `--price-cached` (USD per
+cache-read price. The defaults (`SIM.PRICE` in `sim_core.js`) are MiniMax's own endpoint for `minimax/minimax-m3` on
+OpenRouter (provider "Minimax", Oct 7 2026): **$0.30 / M input, $0.06 / M cache read, $1.20 / M output**, no cache-write
+charge. That is also the model-level price and most providers' (the cheapest third-party provider is about 20% lower). Override it with `--price-in` / `--price-cached` (USD per
 million tokens) on `run.js`, `analyze.js` and `tools/feature_table.js`, or with the Revenue & cost fields on the web page.
 * **Output tokens are not counted in revenue.** This system only prefills; decode generates the output tokens, so their
   revenue ($1.20 / M) counts only in the margin below, next to the decode galaxies' cost. AgentX requests average about
