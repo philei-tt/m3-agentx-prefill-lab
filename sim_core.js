@@ -942,7 +942,7 @@
       h2dFreeBusy: 0, d2hFreeBusy: 0, ssdFreeBusy: 0,
       ttft: [], chunks: 0, segs: 0, laneWait: 0, reqs: 0, primers: 0, warmupS: 0, idleWarps: 0, primerTok: 0,
       gated: 0, gateWait: 0, legacyStarts: 0, skippedTraces: 0, rrSegs: 0, rrReuse: 0, rrCopyIn: 0,
-      outTok: 0, decArea: 0, decingArea: 0, decMax: 0, decWaits: 0, decWait: 0, decWaited: 0, runWait: 0, runWaited: 0 };
+      outTok: 0, decArea: 0, decingArea: 0, decMax: 0, decWaits: 0, decWait: 0, decWaited: 0, runWait: 0, runWaited: 0, pfSlot: 0, pfRun: 0, pfNone: 0, sendBlock: 0 };
     // decode slots: held from admission to prefill (TTFT clock already running) until decode ends; time-weighted
     // occupancy over the window, for slots held and for requests actually decoding (prefill done, not yet ended)
     let decHeld = 0, decoding = 0, decT = 0; const decQ = [], runQ = [];
@@ -1333,7 +1333,7 @@
       }
       heapPushNum(rep.exits, end);
       if (opts.onChunk) opts.onChunk(now, segs); // test hook: the segments of every chunk, in issue order
-      if (warmDone && end >= t0 && end <= tEnd) { st.chunks++; st.segs += segs.length; st.processed += T; }
+      if (warmDone && end >= t0 && end <= tEnd) { st.chunks++; st.segs += segs.length; st.processed += T; st.sendBlock += blk; }
       for (const s of segs) {
         if (rrPool) { // every segment frees its lane (held for its copies, as below); the last one also inserts the KV
           let hold = 0;
@@ -1481,6 +1481,13 @@
       if (warmDone && inflightReqs === 0 && t > now + cfg.idleCap) { ev.shiftAll(t - now - cfg.idleCap); st.idleWarps++; t = ev.peekT(); }
       if (t > tEnd) break;
       if (!warmDone && t > cfg.maxWarmup) { st.warmupTimeout = true; break; }
+      if (warmDone && t > now) { // why stage 0 has nothing to issue in [now, t), see pfStarved* in the results
+        const a = Math.max(now, t0), b = Math.min(t, tEnd);
+        if (b > a) for (const rp of reps) {
+          if (rp.free[0] > now + 1e-12 || rp.queue.length || rp.active.some((q) => q.rem > 0)) continue; // busy or has work
+          if (decQ.length) st.pfSlot += b - a; else if (runQ.length) st.pfRun += b - a; else st.pfNone += b - a;
+        }
+      }
       now = Math.max(now, t);
       const p = ev.pop(); evCount++;
       if (evCount > maxEv) { st.eventCap = true; break; }
@@ -1521,6 +1528,12 @@
       decWaitPerS: st.decWaited / D, decWaitMean: st.decWaited ? st.decWait / st.decWaited : 0, decQueuedAtEnd: decQ.length,
       // requests that finished prefill and waited for a decode position (decodeConcurrency), and their mean wait
       runWaitPerS: st.runWaited / D, runWaitMean: st.runWaited ? st.runWait / st.runWaited : 0,
+      // share of the window prefill's first stage had nothing to issue (no queued request, no started request with
+      // tokens left, stage free), by cause: requests waiting for a decode KV slot; else requests that finished prefill
+      // waiting for a decode position (their sessions cannot send the next request); else no demand. sendBlockFrac:
+      // share of time a stage is held after its compute by the synchronous handoff to the next stage
+      pfStarvedSlotFrac: st.pfSlot / (D * reps.length), pfStarvedDecodeFrac: st.pfRun / (D * reps.length), pfStarvedIdleFrac: st.pfNone / (D * reps.length),
+      sendBlockFrac: st.sendBlock / (D * reps.length),
       gated: st.gated, gateWaitMean: st.gated ? st.gateWait / st.gated : 0, legacyStarts: st.legacyStarts, skippedTraces: st.skippedTraces,
       gatedAtEnd: trees.reduce((a, tr) => { const u = new Set(); if (tr) for (const w of tr.waiters.values()) for (const g of w) u.add(g); return a + u.size; }, 0),
       warmupTimeout: !!st.warmupTimeout, eventCap: !!st.eventCap, events: evCount, duration: D,

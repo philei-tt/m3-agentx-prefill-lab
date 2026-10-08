@@ -129,6 +129,14 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   const c = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 16, decodeConcurrency: 4 }, cfg));
   assert.ok(a.usefulTps === b.usefulTps && b.runWaitPerS === 0, 'slots <= concurrency is unchanged');
   assert.ok(c.decodingMean <= 4 + 1e-9 && c.runWaitPerS > 0 && c.runWaitMean > 0 && c.decSlotsMax <= 16, `decoding ${c.decodingMean} runWait ${c.runWaitPerS}`);
+  // starvation causes: shares of the window, summing to at most 1; none attributed to decode without decode limits
+  const u = SIM.simulate(TR, cal, cfg);
+  for (const r of [a, c, u]) {
+    const f = [r.pfStarvedSlotFrac, r.pfStarvedDecodeFrac, r.pfStarvedIdleFrac, r.sendBlockFrac];
+    assert.ok(f.every((x) => x >= 0 && x <= 1) && f[0] + f[1] + f[2] <= 1 + 1e-9, `starved ${f}`);
+  }
+  assert.ok(a.pfStarvedSlotFrac > 0 && c.pfStarvedDecodeFrac + c.pfStarvedSlotFrac > 0, 'decode limits starve prefill');
+  assert.ok(u.pfStarvedSlotFrac === 0 && u.pfStarvedDecodeFrac === 0 && u.sendBlockFrac > 0);
 }
 
 // 11. batchMaxChunks: a request never takes more than that many chunk units of one batch; 0 is the default (no

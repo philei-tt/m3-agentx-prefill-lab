@@ -136,6 +136,12 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
   slots of 1M tokens per stage (tt-blaze: K/V sharded by head over the 4 mesh rows and replicated over the 2 columns,
   index-K split over the columns, bf8, 340 B per token per chip). A request whose prefill is done waits for a decode
   position in FIFO order, holding its slot; runs report the share that waited and the mean wait.
+* **Why prefill starves.** Runs report the share of the window prefill's first stage had nothing to issue (stage
+  free, nothing queued, no started request with tokens left), by cause: `pfStarvedSlotFrac` (requests were waiting
+  for a decode KV slot), `pfStarvedDecodeFrac` (none were, but requests that finished prefill were waiting for a
+  decode position, so their sessions could not send their next request), `pfStarvedIdleFrac` (no demand). Separately,
+  `sendBlockFrac` is the share of time a stage is held after its compute by the synchronous handoff to the next stage
+  (about 25% of a saturated stage; `asyncHandoff` removes it).
 * **Window.** The profiling window is 1800 s.
 
 **Consequence:** an AgentX lane is mostly idle. Saturating a pipeline therefore takes hundreds to thousands of lanes. The KV working set then grows with concurrency, and throughput is limited by a **cache cliff**: past it, evictions turn into re-prefill, which raises TTFT, which leaves more KV idle and evicted.
