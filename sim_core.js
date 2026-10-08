@@ -1462,16 +1462,26 @@
 
   function calibrateAll(data) { const cal = calibrate(data); fitHandoff(cal, data); return cal; }
 
+  // Input-token list prices, USD per million tokens: OpenRouter minimax/minimax-m3 (the model-level price, also
+  // MiniMax's own endpoint and most providers'), read 2026-10-07 from openrouter.ai/api/v1/models. A cache miss
+  // (re-prefill included) is billed at the input price, a prefix hit at the cache-read price; there is no cache-write
+  // charge. Output tokens ($1.20/M) are left out: decode generates them, so their revenue pays for the decode pool.
+  const PRICE = { inUsdPerM: 0.30, cachedUsdPerM: 0.06 };
+
   // Hourly volume of one sweep point: input tokens of the completed requests, split into new (prefilled) and cached
-  // (prefix hit), and requests completed. Points from studies run before inTps/hitTps existed are derived from
-  // newTps and hitRate (newTok = inTok - hitTok, hitRate = hitTok / inTok), which is exact.
-  function hourly(p) {
+  // (prefix hit), requests completed, and the input revenue they bill at `price` (USD per hour). Points from studies
+  // run before inTps/hitTps existed are derived from newTps and hitRate (newTok = inTok - hitTok, hitRate = hitTok /
+  // inTok), which is exact.
+  function hourly(p, price) {
     if (!p) return null;
+    const pr = Object.assign({}, PRICE, price);
     const inTps = p.inTps != null ? p.inTps : p.newTps != null && p.hitRate < 1 ? p.newTps / (1 - p.hitRate) : NaN;
     const hitTps = p.hitTps != null ? p.hitTps : inTps * p.hitRate;
-    return { inTok: 3600 * inTps, newTok: 3600 * (inTps - hitTps), cachedTok: 3600 * hitTps, req: 3600 * p.reqPerS };
+    const newTok = 3600 * (inTps - hitTps), cachedTok = 3600 * hitTps;
+    const newUsd = newTok * pr.inUsdPerM / 1e6, cachedUsd = cachedTok * pr.cachedUsdPerM / 1e6;
+    return { inTok: 3600 * inTps, newTok, cachedTok, req: 3600 * p.reqPerS, usd: newUsd + cachedUsd, newUsd, cachedUsd };
   }
 
-  const API = { M3, HW, DEFAULTS, calibrate: calibrateAll, makePlan, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, layerMs, roofTok, roofSeg };
+  const API = { M3, HW, DEFAULTS, PRICE, calibrate: calibrateAll, makePlan, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, layerMs, roofTok, roofSeg };
   if (typeof module !== 'undefined' && module.exports) module.exports = API; else root.M3SIM = API;
 })(typeof self !== 'undefined' ? self : this);

@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 // Run one simulation (or a concurrency sweep) from the command line.
 // Usage: node run.js [--data DIR] [--preset NAME] [--set key=value ...] [--conc 32,64,128] [--json]
+//                    [--price-in USD_PER_M] [--price-cached USD_PER_M]
 //   values are JSON-parsed when possible (e.g. --set mesh=[4,4] --set batch=true --set split=[1,1,1,5,...])
+//   the prices (input revenue per hour) default to OpenRouter's MiniMax-M3 list price, SIM.PRICE
 'use strict';
 const fs = require('fs'), path = require('path');
 const SIM = require('./sim_core.js');
 const PRESETS = require('./presets.js');
+const { priceFromArgv, usd } = require('./lib/price.js');
 
 function loadAll(dataDir) {
   const header = JSON.parse(fs.readFileSync(path.join(dataDir, 'traffic.json')));
@@ -31,15 +34,15 @@ function parseArgs(argv) {
 }
 
 const big = (x) => (x >= 1e9 ? (x / 1e9).toFixed(2) + 'B' : x >= 1e6 ? (x / 1e6).toFixed(1) + 'M' : (x / 1e3).toFixed(1) + 'k');
-function fmt(r) {
+function fmt(r, price) {
   if (r.error) return `ERROR ${r.error}`;
   const k = (x) => (x / 1000).toFixed(1) + 'k';
-  const h = SIM.hourly(r);
-  return `C=${String(r.cfg.concurrency).padStart(4)} useful ${k(r.usefulTps).padStart(7)} tok/s | proc ${k(r.processedTps).padStart(7)} | TTFT p50 ${r.ttftP50.toFixed(2)}s p90 ${r.ttftP90.toFixed(2)}s | hit ${(100 * r.hitRate).toFixed(1)}% (inf ${(100 * r.infHitRate).toFixed(1)}%) | in ${big(h.inTok)}/h (new ${big(h.newTok)}, cached ${big(h.cachedTok)}) req ${big(h.req)}/h | reprefill ${(100 * r.reprefillFrac).toFixed(1)}% pad ${(100 * r.padFrac).toFixed(1)}% | util ${(100 * r.maxUtil).toFixed(0)}% | chunk ${r.avgChunkTok.toFixed(0)} segs ${r.avgSegsPerChunk.toFixed(2)} | done ${r.done} warm ${r.warmupS.toFixed(0)}s ev ${r.events}`;
+  const h = SIM.hourly(r, price);
+  return `C=${String(r.cfg.concurrency).padStart(4)} useful ${k(r.usefulTps).padStart(7)} tok/s | proc ${k(r.processedTps).padStart(7)} | TTFT p50 ${r.ttftP50.toFixed(2)}s p90 ${r.ttftP90.toFixed(2)}s | hit ${(100 * r.hitRate).toFixed(1)}% (inf ${(100 * r.infHitRate).toFixed(1)}%) | in ${big(h.inTok)}/h (new ${big(h.newTok)}, cached ${big(h.cachedTok)}) req ${big(h.req)}/h | ${usd(h.usd)}/h | reprefill ${(100 * r.reprefillFrac).toFixed(1)}% pad ${(100 * r.padFrac).toFixed(1)}% | util ${(100 * r.maxUtil).toFixed(0)}% | chunk ${r.avgChunkTok.toFixed(0)} segs ${r.avgSegsPerChunk.toFixed(2)} | done ${r.done} warm ${r.warmupS.toFixed(0)}s ev ${r.events}`;
 }
 
 if (require.main === module) {
-  const a = parseArgs(process.argv);
+  const a = parseArgs(process.argv), price = priceFromArgv(process.argv);
   const { TR, cal } = loadAll(a.data);
   let sp = {};
   if (a.studyPreset) {
@@ -57,7 +60,7 @@ if (require.main === module) {
     const r = SIM.simulate(TR, cal, Object.assign({}, base, { concurrency: c }));
     r.wallMs = Date.now() - t0;
     out.push(r);
-    if (!a.json) console.log(fmt(r) + ` | ${r.wallMs} ms`);
+    if (!a.json) console.log(fmt(r, price) + ` | ${r.wallMs} ms`);
   }
   if (a.json) console.log(JSON.stringify(out.map((r) => { const x = Object.assign({}, r); delete x.cfg; return x; })));
 }

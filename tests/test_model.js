@@ -81,7 +81,12 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   const r = SIM.simulate(TR, cal, Object.assign({ cache: 'slots', chunk: 2048 }, base, { concurrency: 64 }));
   const h = SIM.hourly(r), { inTps, hitTps, ...old } = r, g = SIM.hourly(old);
   assert.ok(Math.abs(r.inTps - r.newTps - r.hitTps) < 1e-6 * r.inTps && Math.abs(h.req - 3600 * r.reqPerS) < 1e-9);
-  for (const k of ['inTok', 'newTok', 'cachedTok', 'req']) assert.ok(Math.abs(h[k] - g[k]) < 1e-6 * h[k], `hourly fallback ${k}`);
+  for (const k of ['inTok', 'newTok', 'cachedTok', 'req', 'usd']) assert.ok(Math.abs(h[k] - g[k]) < 1e-6 * h[k], `hourly fallback ${k}`);
+  // revenue: new tokens at the input price, cached at the cache-read price; a partial override keeps the other price
+  const { inUsdPerM, cachedUsdPerM } = SIM.PRICE;
+  assert.ok(Math.abs(h.usd - (h.newTok * inUsdPerM + h.cachedTok * cachedUsdPerM) / 1e6) < 1e-9 * h.usd && h.usd === h.newUsd + h.cachedUsd);
+  const o = SIM.hourly(r, { inUsdPerM: 2 * inUsdPerM });
+  assert.ok(Math.abs(o.newUsd - 2 * h.newUsd) < 1e-9 * h.newUsd && o.cachedUsd === h.cachedUsd);
 }
 
 console.log('test_model: all checks passed');

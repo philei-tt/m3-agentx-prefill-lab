@@ -43,7 +43,19 @@ A point where no request finished (TTFT undefined) never passes. Useful tokens p
 *Useful* tokens are the tokens an infinite prefix cache would still have to prefill (`in - 64·lcp_best`). Re-prefilled tokens
 (evicted, misaligned, never materialised) and padding count as processed but not useful. Each result also reports the same
 configuration with an infinite cache, TTFT p50/p90, the hit rate against the ∞-cache hit rate, and the split of processed
-tokens into useful, re-prefill and padding. At the goodput point it also reports hourly volume (`hourly()` in `sim_core.js`): input tokens per hour of the requests completed, split into new (prefilled, re-prefill included) and cached (prefix hit), and requests completed per hour.
+tokens into useful, re-prefill and padding. At the goodput point it also reports hourly volume (`hourly()` in `sim_core.js`): input tokens per hour of the requests completed, split into new (prefilled, re-prefill included) and cached (prefix hit), requests completed per hour, and the revenue
+those input tokens bill per hour.
+
+**Revenue per hour** prices new tokens (cache misses, re-prefill included) at the input price and prefix hits at the
+cache-read price. The defaults (`SIM.PRICE` in `sim_core.js`) are OpenRouter's list price for `minimax/minimax-m3` on
+Oct 7 2026: **$0.30 / M input, $0.06 / M cache read**, no cache-write charge. That is the model-level price, MiniMax's own
+endpoint and most providers' (the cheapest is about 20% lower). Override it with `--price-in` / `--price-cached` (USD per
+million tokens) on `run.js`, `analyze.js` and `tools/feature_table.js`, or with the Revenue fields on the web page.
+* **Output tokens are not counted.** This system only prefills; decode generates the output tokens, so their revenue
+  ($1.20 / M) pays for the decode pool, which is not modelled. AgentX requests average about 1.1k output tokens against
+  120k–150k input tokens at the goodput points, so output would add roughly 10–15% to a request's bill.
+* **A better cache bills less per token** (a hit costs a fifth of a miss); it raises revenue only through the extra
+  requests the same hardware can then serve.
 
 ## Files
 
@@ -53,7 +65,7 @@ tokens into useful, re-prefill and padding. At the goodput point it also reports
 | `prep_traffic.py` | Corpus → `traffic.bin` + `traffic.json`: agent-chain split, DAG, end-to-start delays, spawn/join, replay barriers, prefix-tree pieces. Takes 23 s on 4 cores. |
 | `collect_calib.py` | Measured data → `calib_data.json` (committed): zone profiles, per-rank per-chunk-position medians of runs A/B/C, matrix tables. |
 | `validate.js` | Calibration report: fitted efficiencies, per-rank stage times, and all 105 matrix cells, model vs measured. |
-| `run.js` | One configuration or a concurrency sweep from the CLI (`--preset`, `--set key=value`, `--conc`). |
+| `run.js` | One configuration or a concurrency sweep from the CLI (`--preset`, `--set key=value`, `--conc`, `--price-in` / `--price-cached`). |
 | `study.js` | Greedy feature roadmap, leave-one-out, topology/budget/lane grid and sensitivity, over {4, 8} galaxies × {today's kernels, roofline kernels}. |
 | `analyze.js`, `tools/study_detail.js` | Print study results. |
 | `lib/pool.js`, `lib/sweep.js` | Worker-thread pool; the concurrency sweep and the goodput rule (shared with the page). |
@@ -62,6 +74,7 @@ tokens into useful, re-prefill and padding. At the goodput point it also reports
 | `build_artifact.js`, `artifact/template.html` | Build the single-file page: the core, calibration, 4 MB of traffic as base64, the study summary and the presets. `--standalone` wraps it as a full HTML document for `server.js`. |
 | `server.js`, `package.json` | Zero-dependency local web server (see Quick start); `npm start` / `npm run build` / `npm run study` are shortcuts. |
 | `feature_details.js` | The per-feature explanations shown when a feature is expanded in the Roadmap table. |
+| `lib/price.js` | `--price-in` / `--price-cached` overrides of the revenue prices (`SIM.PRICE`) for the CLIs. |
 | `lib/paths.js` | Where data and results are read from: env `M3SIM_DATA` / `M3SIM_RESULTS`, else `./data` and `./results`, else the exabox scratch copies. |
 | `on_node.sh` | `JOB=<slurm id> ./on_node.sh <cmd>` runs on the compute node with soft ulimits raised to the hard limits. |
 | `tools/` | Helpers: `feature_table.js` (README tables), `study_detail.js`, `grid_by_topology.js`, `dump_cells.js` (per-cell stage medians), `traffic_stats.js`, `smoke.sh` (every feature path), `investigate.sh`. |
@@ -83,6 +96,7 @@ node run.js --preset today-C --conc 16,64,256                     # one config o
 node run.js --study-preset g8_k0 --set decodeTps=90 --conc 512,1024
 node study.js --workers 36                                        # full study -> results/study.json (about 8 min on 36 threads, 12 on 14 cores)
 node analyze.js && node tools/feature_table.js                    # print results / README tables
+node tools/feature_table.js --price-in 0.6 --price-cached 0.06     # revenue at other prices
 node build_artifact.js --standalone                               # rebuild dist/index.html (server.js does this itself)
 # regenerate the inputs (needs numpy, the AgentX traces and the #57827 run directories):
 python3 prep_traffic.py --traces <traces.jsonl> --procs 32        # data/traffic.bin + traffic.json
@@ -205,22 +219,24 @@ Earlier studies are kept on exabox under `/data/philei/m3_traffic_sim/results/`,
 | 8 galaxies, today's kernels | 11.1k | 94.8k | **104k** (32×[4,2], 2M arena, budget 8k) | 140k |
 | 8 galaxies, roofline kernels | 15.0k | 158k | **161k** (32×[4,2], 4 lanes, budget 8k) | 367k |
 
-Hourly volume at the goodput point (the simulated concurrency where each configuration reaches its goodput, p90 TTFT ≤ 10 s): input tokens of the requests completed per hour, split into new tokens the pipeline prefilled (re-prefill included) and cached prefix hits, and requests completed per hour.
+Hourly volume and revenue at the goodput point (the simulated concurrency where each configuration reaches its goodput, p90 TTFT ≤ 10 s): input tokens of the requests completed per hour, split into new tokens the pipeline prefilled (re-prefill included) and cached prefix hits, requests completed per hour, and the revenue of those input tokens (output tokens not counted).
 
-| scenario | configuration | C | input tok/h | new tok/h | cached tok/h | hit | requests/h |
-|---|---|---|---|---|---|---|---|
-| 4 galaxies, today's kernels | today | 40 | 469.6M | 59.9M | 409.8M | 87.3% | 3.1k |
-| 4 galaxies, today's kernels | greedy full stack | 416 | 4.06B | 172.2M | 3.89B | 95.8% | 32.3k |
-| 4 galaxies, today's kernels | best grid config | 472 | 4.45B | 216.2M | 4.24B | 95.1% | 36.1k |
-| 4 galaxies, roofline kernels | today | 56 | 594.3M | 146.5M | 447.8M | 75.4% | 4.2k |
-| 4 galaxies, roofline kernels | greedy full stack | 840 | 8.19B | 686.5M | 7.51B | 91.6% | 64.2k |
-| 4 galaxies, roofline kernels | best grid config | 840 | 8.83B | 638.7M | 8.19B | 92.8% | 68.3k |
-| 8 galaxies, today's kernels | today | 104 | 1.06B | 200.3M | 864.4M | 81.2% | 9.1k |
-| 8 galaxies, today's kernels | greedy full stack | 1056 | 9.92B | 457.5M | 9.46B | 95.4% | 77.4k |
-| 8 galaxies, today's kernels | best grid config | 1096 | 10.89B | 513.4M | 10.37B | 95.3% | 85.2k |
-| 8 galaxies, roofline kernels | today | 128 | 1.42B | 342.7M | 1.07B | 75.8% | 12.3k |
-| 8 galaxies, roofline kernels | greedy full stack | 1688 | 16.62B | 1.10B | 15.51B | 93.4% | 130.4k |
-| 8 galaxies, roofline kernels | best grid config | 1688 | 17.05B | 1.11B | 15.95B | 93.5% | 133.5k |
+Revenue at $0.30/M input, $0.06/M cached.
+
+| scenario | configuration | C | input tok/h | new tok/h | cached tok/h | hit | requests/h | revenue/h |
+|---|---|---|---|---|---|---|---|---|
+| 4 galaxies, today's kernels | today | 40 | 469.6M | 59.9M | 409.8M | 87.3% | 3.1k | $42.55 |
+| 4 galaxies, today's kernels | greedy full stack | 416 | 4.06B | 172.2M | 3.89B | 95.8% | 32.3k | $285 |
+| 4 galaxies, today's kernels | best grid config | 472 | 4.45B | 216.2M | 4.24B | 95.1% | 36.1k | $319 |
+| 4 galaxies, roofline kernels | today | 56 | 594.3M | 146.5M | 447.8M | 75.4% | 4.2k | $70.81 |
+| 4 galaxies, roofline kernels | greedy full stack | 840 | 8.19B | 686.5M | 7.51B | 91.6% | 64.2k | $656 |
+| 4 galaxies, roofline kernels | best grid config | 840 | 8.83B | 638.7M | 8.19B | 92.8% | 68.3k | $683 |
+| 8 galaxies, today's kernels | today | 104 | 1.06B | 200.3M | 864.4M | 81.2% | 9.1k | $112 |
+| 8 galaxies, today's kernels | greedy full stack | 1056 | 9.92B | 457.5M | 9.46B | 95.4% | 77.4k | $705 |
+| 8 galaxies, today's kernels | best grid config | 1096 | 10.89B | 513.4M | 10.37B | 95.3% | 85.2k | $776 |
+| 8 galaxies, roofline kernels | today | 128 | 1.42B | 342.7M | 1.07B | 75.8% | 12.3k | $167 |
+| 8 galaxies, roofline kernels | greedy full stack | 1688 | 16.62B | 1.10B | 15.51B | 93.4% | 130.4k | $1,262 |
+| 8 galaxies, roofline kernels | best grid config | 1688 | 17.05B | 1.11B | 15.95B | 93.5% | 133.5k | $1,289 |
 
 Each cell below is "G #step / LOO":
 * **G** is the gain at the greedy step where the feature was added (the step number is the build order);
