@@ -611,7 +611,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
 
     <h2 id="m-read">Reading the Explore tab</h2>
     <ul>
-      <li><b>Loading.</b> On load, the charts show the precomputed baseline (<span class="mono">today-C</span>). <b>Run sweep</b> simulates your configuration at every concurrency in the grid, in your browser, in about 5-30 s. It also runs the same configuration with an infinite cache, unless you untick that option.</li>
+      <li><b>Loading.</b> On load, the charts show the precomputed baseline (<span class="mono">today-C</span>) while a live sweep of the starting configuration runs, which then replaces it. <b>Run sweep</b> simulates your configuration at every concurrency in the grid, in your browser, in about 5-30 s. It also runs the same configuration with an infinite cache, unless you untick that option.</li>
       <li><b>Metrics at.</b> Picks the concurrency the tiles and "Where processed tokens go" show: the goodput point by default, any concurrency of the sweep (also by clicking a chart; a dashed line marks it), or any other concurrency typed into the box, which is simulated on demand (with its infinite-cache twin) and added to the charts. At a picked concurrency the first tile shows useful tok/s there instead of goodput, and the infinite-cache tile compares at the same concurrency. Added concurrencies never move goodput, which comes from the sweep alone. Peak useful always describes the sweep. Copy link keeps the choice.</li>
       <li><b>Tiles.</b> Goodput; goodput with an infinite cache; TTFT p50/p90 and hit rate at the goodput point; input tokens per hour at the goodput point (the input of the requests completed there, split into new tokens the pipeline prefilled, re-prefill included, and cached prefix hits) and requests completed per hour; revenue (below); the peak useful throughput regardless of TTFT; wasted compute (the share of processed tokens that is re-prefill or padding, the complement of the useful share in "Where processed tokens go"); decode slots held (mean and max: requests from admission to prefill until the end of their decode, which is what a decode-slot limit caps), how many of them are decoding, and with a limit, the share of requests that waited for a slot and the mean wait; requests per batch at the goodput point and at the peak.</li>
       <li><b>Charts</b> share a log concurrency axis:
@@ -1267,14 +1267,15 @@ $('slo').value = STUDY.slo; $('concs').value = DEFAULT_CONCS;
 for (const [id, [o, k]] of Object.entries(ECON)) $(id).value = o[k];
 const shared = applyUrl();
 syncSlo('n'); updatePlan(); renderRoadmap(); renderModel();
-// a shared link runs its configuration; otherwise show the study curves for the starting preset until the viewer runs one
+// a shared link runs its configuration; otherwise the study curves for the starting preset show until the sweep that
+// starts on load replaces them (they lack output tokens and decode slots, so the Revenue tile needs the live run)
 if (shared) { $('resTitle').textContent = 'Results: shared configuration'; syncUrl(); }
 else (function seed() {
   const S = STUDY.scenarios.g4_k0;
   run = { seq: ++runSeq, name: 'study baseline, 4 gx', cfg: S.base, infCfg: null, real: S.curves.base, inf: [], extra: [], extraInf: [], slo: STUDY.slo };
-  $('resTitle').textContent = 'Results: study baseline for 4 galaxies (16x[2,4], chunk 2048, auto split, static slots, round robin, unaligned resume; precomputed, press Run for a live sweep)';
+  $('resTitle').textContent = 'Results: study baseline for 4 galaxies (16x[2,4], chunk 2048, auto split, static slots, round robin, unaligned resume; precomputed, live sweep running)';
   render();
 })();
-setTimeout(() => { decodeTraffic(); $('statusTxt').textContent = 'Ready. Press Run sweep.'; if (shared && !$('runBtn').disabled) startRun(); }, 30);
+setTimeout(() => { decodeTraffic(); $('statusTxt').textContent = 'Ready. Press Run sweep.'; if (!$('runBtn').disabled) startRun(); }, 30);
 })();
 </script>
