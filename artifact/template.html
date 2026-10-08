@@ -1099,13 +1099,14 @@ function render() {
     ].join('<br>') : ''],
     ['Peak useful', R && R.peak ? fmtK(R.peak.usefulTps) : '–', 'any TTFT', R && R.peak ? `C = ${R.peak.conc}, p90 ${fmtS(R.peak.ttftP90)} s` : ''],
     ['Wasted compute', sp && sp.proc ? pct((sp.rep + sp.pad) / sp.proc, 1) : '–', at('of processed tokens'), sp && sp.proc ? `re-prefill ${pct(sp.rep / sp.proc, 1)} · padding ${pct(sp.pad / sp.proc, 1)}` : ''],
-    ['Decode slots', v && v.decSlotsMean != null ? `${Math.round(v.decSlotsMean)}` : '–', at('mean slots held'), v && v.decSlotsMean != null ? [
+    ['Decode Slots', '', '', v && v.decSlotsMean != null ? [
       `Mean slots held: ${Math.round(v.decSlotsMean)}`, `Max slots held: ${v.decSlotsMax}`, `Mean requests decoding: ${Math.round(v.decodingMean)}`,
       ...(v.decWaitPerS > 0 ? [`${pct(v.decWaitPerS / v.reqPerS)} waited ${fmtS(v.decWaitMean)} s for a slot`] : []),
       ...(v.runWaitPerS > 0 ? [`${pct(v.runWaitPerS / v.reqPerS)} waited ${fmtS(v.runWaitMean)} s to decode`] : [])].join('<br>') : ''],
     ['Requests per batch', v ? v.avgSegsPerChunk.toFixed(2) : '–', at('average (1 without batching)'), v ? `batch ${Math.round(v.avgChunkTok)} tok, busy ${pct(v.maxUtil)}` + (R.peak && R.peak !== v ? ` · at peak ${R.peak.avgSegsPerChunk.toFixed(2)}` : '') : ''],
   ];
-  $('tiles').innerHTML = tiles.map(([k, v, s, d]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="k">${s}</div><div class="d">${d}</div></div>`).join('');
+  // a tile without a headline number (empty value and subtitle) is just its title and detail lines
+  $('tiles').innerHTML = tiles.map(([k, v, s, d]) => `<div class="tile"><div class="k">${k}</div>${v !== '' ? `<div class="v">${v}</div>` : ''}${s !== '' ? `<div class="k">${s}</div>` : ''}<div class="d">${d}</div></div>`).join('');
   // breakdown
   if (bp) {
     const { proc, use, rep, pad } = sp;
