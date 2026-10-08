@@ -206,7 +206,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <legend>Chunking &amp; batching</legend>
     <div class="row"><label for="layout">KV layout</label><select id="layout"><option value="fixed">fixed chunk (block-cyclic)</option><option value="var">variable chunk (a2a KV write)</option></select></div>
     <div class="row"><label for="chunk">Chunk size</label><select id="chunk"><option>128</option><option>256</option><option>512</option><option>1024</option><option>2048</option><option>4096</option><option>5120</option><option>8192</option></select></div>
-    <div class="hint" id="chunkHint" hidden>Not used: with batching on a variable layout, the token budget below is the chunk size.</div>
+    <div class="hint" id="chunkHint" hidden>Not used: with batching on a variable layout, the token budget below is the chunk size (unless max chunks per request is set).</div>
     <div class="row check"><input id="batch" type="checkbox"><label for="batch">Batch several requests per pipeline pass</label></div>
     <div class="hint" id="batchHint" hidden>With static 1M slots a request holds its slot for the whole pipeline trip, so requests per batch × stages must fit in the slots; otherwise the plan reports out of memory.</div>
     <div class="row"><label for="budget">Token budget</label><select id="budget"><option>4096</option><option>5120</option><option>8192</option><option>16384</option><option>32768</option></select></div>
@@ -216,6 +216,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="hint">Default: requests per batch × copy buffers (sequential 1, double 2, triple 3); with a global lane table, stages × requests per batch (sequential copies only). Variable-layout batching must override.</div>
     <div class="row check"><input id="batchDynShape" type="checkbox"><label for="batchDynShape">Dynamic batch size (no padding to the budget)</label></div>
     <div class="hint">On: a partly filled batch runs at its actual size (untraced). Off: it is padded to the full budget, as tracing requires.</div>
+    <div class="row"><label for="batchMaxChunks">Max chunks per request per batch (0 = no limit)</label><input id="batchMaxChunks" type="number" min="0" step="1"></div>
+    <div class="hint">How many chunk units one request may take in one batch. 0: as many as it can fill, so a long request goes through the pipeline in budget-sized passes. 1: one chunk per pass, as without batching (same TTFT for long requests), with the budget filled from other requests.</div>
     <div class="row"><label for="attn">Attention</label><select id="attn"><option value="seq">sequential per request</option><option value="fused">fused multi-user</option></select></div>
     <div class="row check"><input id="kvDedup" type="checkbox"><label for="kvDedup">One attention call per request per chunk (prefix gathered once)</label></div>
     <div class="hint">Off: with a fixed layout, each chunk-unit of a request makes its own call and re-gathers the cached prefix.</div>
@@ -748,9 +750,9 @@ function mkWorker() {
 }
 
 // ---------------------------------------------------------------- form <-> cfg
-const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'batchDynShape', 'attn', 'kvDedup', 'prefetchKV', 'policy',
+const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'batchDynShape', 'batchMaxChunks', 'attn', 'kvDedup', 'prefetchKV', 'policy',
   'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'decodeSlots', 'duration', 'seed'];
-const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'lanes', 'arenaTokens', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeSlots', 'duration', 'seed']);
+const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchMaxChunks', 'lanes', 'arenaTokens', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeSlots', 'duration', 'seed']);
 function setForm(cfg) {
   const c = Object.assign({}, SIM.DEFAULTS, cfg);
   for (const f of FIELDS) {
@@ -788,7 +790,7 @@ function syncUi() {
   $('lanes').disabled = !pool || $('laneArena').checked;
   // every cache can batch; static slots need requests per batch x stages slots (makePlan reports out of memory)
   $('batch').disabled = false; $('batchHint').hidden = $('cache').value !== 'slots';
-  $('budget').disabled = !$('batch').checked; $('attn').disabled = !$('batch').checked; $('batchDynShape').disabled = !$('batch').checked;
+  $('budget').disabled = !$('batch').checked; $('attn').disabled = !$('batch').checked; $('batchDynShape').disabled = !$('batch').checked; $('batchMaxChunks').disabled = !$('batch').checked;
   // pool lanes per stage (as makePlan): derived = copy-mode buffers x requests per batch; the override is for batching
   // on the pool only, and variable-layout batching (no chunk units) must override
   const fixedLanes = pool && !$('laneArena').checked, batched = $('batch').checked;
@@ -808,7 +810,8 @@ function syncUi() {
     $('lanes').value = String($('laneScope').value === 'stage' ? buffers * r : Number($('stages').value) * r);
   }
   // with batching on a variable layout the token budget is the chunk size; the chunk field is unused
-  const chunkUnused = $('batch').checked && $('layout').value === 'var';
+  // variable-layout batching packs to the budget; the chunk size only sets the per-request cap, if there is one
+  const chunkUnused = $('batch').checked && $('layout').value === 'var' && !(Number($('batchMaxChunks').value) > 0);
   $('chunk').disabled = chunkUnused; $('chunkHint').hidden = !chunkUnused;
 }
 // keep the pipeline valid when the hardware changes: fill each replica with stages, and drop a custom split

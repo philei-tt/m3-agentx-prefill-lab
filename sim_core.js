@@ -364,6 +364,11 @@
     //   32*SP granules), as ops do without tracing; false = padded to the full budget, as a traced build with one
     //   fixed shape must be
     batchDynShape: true,
+    // batchMaxChunks: the most chunk units (of `chunk` tokens, on either layout) one request may take in one batch;
+    //   0 = no limit (it takes as many of the batch's remaining units as it can fill). 1 = a request moves through
+    //   the pipeline one chunk per pass, as without batching, and the budget fills from other requests. The request
+    //   still makes one attention call per batch and goes to the back of the round-robin queue.
+    batchMaxChunks: 0,
     cache: 'slots',        // slots | pool | paging | inf
     // pool lanes per stage, derived from r = the most requests a batch (one pipeline pass) holds (1 without
     //   batching, the chunk units per batch with fixed-layout batching; every request in a batch needs its own lane)
@@ -566,6 +571,7 @@
     if (cfg.lanesOverride && cfg.cache === 'pool' && !cfg.batch) errors.push('overriding the lane count needs batching (without it the count is derived)');
     if (fixedLanes && cfg.batch && reqsPerBatch === 0 && !cfg.lanesOverride) errors.push('variable-layout batching on the pool needs the lane count set (lanesOverride)');
     if (cfg.lanesOverride && !(cfg.lanes >= 1)) errors.push('the lane count must be at least 1');
+    if (!(cfg.batchMaxChunks >= 0) || cfg.batchMaxChunks !== Math.floor(cfg.batchMaxChunks)) errors.push('max chunks per request per batch must be a whole number >= 0 (0 = no limit)');
     // every buffer that must hold a whole request has to fit the largest AgentX request (990,016 tokens)
     if (cfg.cache === 'slots' && cfg.slotLen < MAX_REQ) errors.push(`slots must hold the largest request (${MAX_REQ} tokens)`);
     if (cfg.cache === 'pool' && !cfg.laneArena && cfg.laneLen < MAX_REQ) errors.push(`lanes must hold the largest request (${MAX_REQ} tokens)`);
@@ -1098,8 +1104,10 @@
       const cands = rep.active;
       // one segment per request per chunk (a request's tokens in a chunk form one attention call, whatever the
       // layout): fixed layout = a whole number of chunks, variable layout = any multiple of 32*SP tokens
+      const perReq = cfg.batch && cfg.batchMaxChunks > 0 ? cfg.batchMaxChunks * C : Infinity;
       const take = (q, maxTok) => {
         let n, npad;
+        maxTok = Math.min(maxTok, perReq);
         if (fixed) { const units = Math.floor(maxTok / C); if (units < 1) return false; n = Math.min(q.rem, units * C); npad = Math.ceil(n / C) * C; }
         else { const cap = cfg.batch ? maxTok : Math.min(maxTok, C); if (cap < plan.gran) return false; n = Math.min(q.rem, cap - (cap % plan.gran)); if (n <= 0) return false; npad = Math.ceil(n / plan.gran) * plan.gran; }
         segs.push({ q, n, npad, k: q.pos, first: q.first, last: n === q.rem });

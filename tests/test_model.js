@@ -109,4 +109,17 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
     `limit 8: max ${l.decSlotsMax} mean ${l.decSlotsMean} waits ${l.decWaitPerS} req ${l.reqPerS} vs ${u.reqPerS}`);
 }
 
+// 11. batchMaxChunks: a request never takes more than that many chunk units of one batch; 0 is the default (no
+//     limit) and leaves results unchanged; with a cap of 1, unloaded TTFT matches no batching closely
+{
+  const cfg = Object.assign({ cache: 'inf', chunk: 2048, batch: true, budget: 8192 }, base, { concurrency: 16 });
+  let maxSeg = 0;
+  const one = SIM.simulate(TR, cal, Object.assign({ batchMaxChunks: 1 }, cfg), { onChunk: (t, segs) => { for (const s of segs) maxSeg = Math.max(maxSeg, s.n); } });
+  const d = SIM.simulate(TR, cal, cfg), z = SIM.simulate(TR, cal, Object.assign({ batchMaxChunks: 0 }, cfg));
+  const nb = SIM.simulate(TR, cal, Object.assign({}, cfg, { batch: false }));
+  assert.ok(maxSeg === 2048 && d.ttftP90 === z.ttftP90 && d.usefulTps === z.usefulTps, `max segment ${maxSeg}`);
+  assert.ok(one.ttftP90 < d.ttftP90 && Math.abs(one.ttftP90 - nb.ttftP90) < 0.1 * nb.ttftP90, `p90 cap1 ${one.ttftP90} unlimited ${d.ttftP90} no batch ${nb.ttftP90}`);
+  assert.ok(SIM.makePlan(Object.assign({}, cfg, { batchMaxChunks: 1.5 }), cal).errors.length > 0);
+}
+
 console.log('test_model: all checks passed');
