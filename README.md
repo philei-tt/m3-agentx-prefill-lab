@@ -131,16 +131,18 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
   what tt-d-gen does: it needs the decode slot up front to start KV migration eagerly. Every run reports the slots held (mean and max over
   the window), how many of them are decoding, and the share of requests that waited and their mean wait. M3 decode
   today holds about 64 sessions, one per pipeline stage (tt-blaze #4220); batched decode (m = 8) targets about 504.
-* **Decode concurrency.** `decodeConcurrency` (default 0 = unlimited) caps the sessions decode generates for at once,
-  separately from the KV slots: a 64-stage decode ring carries one session per stage, while its memory holds about 85
+* **Decode ring.** `decodeTps` is the speed per user (TSU) while the ring has room: one token per trip through the
+  decode pipeline, so 1 / TSU is the trip time. `decodeStages` (default 0 = unlimited) is how many sessions the ring
+  carries at once, one token per stage: 64 for a 64-stage ring, m × 64 with m-row batched decode. Every request past
+  prefill decodes at once; with N decoding, each runs at TSU × min(1, decodeStages / N) (processor sharing), so an
+  oversubscribed ring slows every session, its requests hold their KV slots longer, and total decode is at most
+  decodeStages × TSU tokens/s. The KV slots (`decodeSlots`) are the only hard limit: the ring's memory holds about 85
   slots of 1M tokens per stage (tt-blaze: K/V sharded by head over the 4 mesh rows and replicated over the 2 columns,
-  index-K split over the columns, bf8, 340 B per token per chip). A request whose prefill is done waits for a decode
-  position in FIFO order, holding its slot; runs report the share that waited, the mean wait, and the decode queue's
-  length at p50 / p90 of the time (`runQP50`, `runQP90`).
+  index-K split over the columns, bf8, 340 B per token per chip). Runs report `decodeTpsMean` (mean speed per
+  decoding session) and `ringFullFrac` (share of the time the ring carried decodeStages or more sessions).
 * **Why prefill starves.** Runs report the share of the window prefill's first stage had nothing to issue (stage
   free, nothing queued, no started request with tokens left), by cause: `pfStarvedSlotFrac` (requests were waiting
-  for a decode KV slot), `pfStarvedDecodeFrac` (none were, but requests that finished prefill were waiting for a
-  decode position, so their sessions could not send their next request), `pfStarvedIdleFrac` (no demand). Separately,
+  for a decode KV slot) and `pfStarvedIdleFrac` (no demand). Separately,
   `sendBlockFrac` is the share of time a stage is held after its compute by the synchronous handoff to the next stage
   (about 25% of a saturated stage; `asyncHandoff` removes it).
 * **Window.** The profiling window is 1800 s.
