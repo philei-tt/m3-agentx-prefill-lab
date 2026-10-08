@@ -129,6 +129,8 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   const c = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 16, decodeConcurrency: 4 }, cfg));
   assert.ok(a.usefulTps === b.usefulTps && b.runWaitPerS === 0, 'slots <= concurrency is unchanged');
   assert.ok(c.decodingMean <= 4 + 1e-9 && c.runWaitPerS > 0 && c.runWaitMean > 0 && c.decSlotsMax <= 16, `decoding ${c.decodingMean} runWait ${c.runWaitPerS}`);
+  // decode queue length percentiles (time-weighted): ordered, at most the slots that can be waiting, 0 without a limit
+  assert.ok(c.runQP90 >= c.runQP50 && c.runQP50 >= 0 && c.runQP90 <= 16 && c.runQP90 > 0 && a.runQP90 === 0, `queue p50 ${c.runQP50} p90 ${c.runQP90}`);
   // starvation causes: shares of the window, summing to at most 1; none attributed to decode without decode limits
   const u = SIM.simulate(TR, cal, cfg);
   for (const r of [a, c, u]) {

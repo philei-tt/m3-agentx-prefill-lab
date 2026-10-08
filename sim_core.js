@@ -959,10 +959,21 @@
     // decode slots: held from admission to prefill (TTFT clock already running) until decode ends; time-weighted
     // occupancy over the window, for slots held and for requests actually decoding (prefill done, not yet ended)
     let decHeld = 0, decoding = 0, decT = 0; const decQ = [], runQ = [];
+    // runQTime[n]: seconds of the window the decode queue (requests done with prefill, waiting for a decode
+    // position) held n requests, for its time-weighted percentiles
+    const runQTime = [];
     function decTick() {
-      if (warmDone) { const a = Math.max(decT, t0), b = Math.min(now, tEnd); if (b > a) { st.decArea += decHeld * (b - a); st.decingArea += decoding * (b - a); } }
+      if (warmDone) {
+        const a = Math.max(decT, t0), b = Math.min(now, tEnd);
+        if (b > a) { st.decArea += decHeld * (b - a); st.decingArea += decoding * (b - a); runQTime[runQ.length] = (runQTime[runQ.length] || 0) + (b - a); }
+      }
       decT = now;
     }
+    const runQPct = (f) => { // smallest queue length n with time(queue <= n) >= f of the time measured
+      const tot = runQTime.reduce((x, y) => x + (y || 0), 0); let acc = 0;
+      for (let n = 0; n < runQTime.length; n++) { acc += runQTime[n] || 0; if (tot > 0 && acc >= f * tot - 1e-9) return n; }
+      return 0;
+    };
     function decTake(q) {
       decTick(); decHeld++; q.decSlot = true;
       if (warmDone && now >= t0 && now <= tEnd && decHeld > st.decMax) st.decMax = decHeld;
@@ -1442,7 +1453,7 @@
         if (cfg.logRequests) (st.reqLog || (st.reqLog = [])).push(r); // opt-in: request ids completed in the window
         st.ttft.push(now - q.tReady);
       }
-      if (q.decSlot && cfg.decodeConcurrency > 0 && decoding >= cfg.decodeConcurrency) { q.runWaitAt = now; runQ.push(q); return; }
+      if (q.decSlot && cfg.decodeConcurrency > 0 && decoding >= cfg.decodeConcurrency) { decTick(); q.runWaitAt = now; runQ.push(q); return; }
       decodeStart(q);
     }
     function decodeStart(q) {
@@ -1565,6 +1576,7 @@
       decWaitPerS: st.decWaited / D, decWaitMean: st.decWaited ? st.decWait / st.decWaited : 0, decQueuedAtEnd: decQ.length,
       // requests that finished prefill and waited for a decode position (decodeConcurrency), and their mean wait
       runWaitPerS: st.runWaited / D, runWaitMean: st.runWaited ? st.runWait / st.runWaited : 0,
+      runQP50: runQPct(0.5), runQP90: runQPct(0.9), // decode queue length, time-weighted percentiles
       // share of the window prefill's first stage had nothing to issue (no queued request, no started request with
       // tokens left, stage free), by cause: requests waiting for a decode KV slot; else requests that finished prefill
       // waiting for a decode position (their sessions cannot send the next request); else no demand. sendBlockFrac:

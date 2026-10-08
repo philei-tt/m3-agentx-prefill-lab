@@ -739,7 +739,7 @@ function slim(r, c) {
   return { conc: c, usefulTps: r.usefulTps, processedTps: r.processedTps, newTps: r.newTps, inTps: r.inTps, hitTps: r.hitTps, outTps: r.outTps, hostReadTps: r.hostReadTps, ssdReadTps: r.ssdReadTps, pcieH2DUtil: r.pcieH2DUtil, ssdUtil: r.ssdUtil, reqPerS: r.reqPerS, ttftP50: r.ttftP50, ttftP90: r.ttftP90, ttftP99: r.ttftP99,
     hitRate: r.hitRate, infHitRate: r.infHitRate, reprefillFrac: r.reprefillFrac, padFrac: r.padFrac, maxUtil: r.maxUtil, avgChunkTok: r.avgChunkTok,
     avgSegsPerChunk: r.avgSegsPerChunk, done: r.done, warmupS: r.warmupS,
-    decSlotsMean: r.decSlotsMean, decSlotsMax: r.decSlotsMax, decodingMean: r.decodingMean, decWaitPerS: r.decWaitPerS, decWaitMean: r.decWaitMean, runWaitPerS: r.runWaitPerS, runWaitMean: r.runWaitMean };
+    decSlotsMean: r.decSlotsMean, decSlotsMax: r.decSlotsMax, decodingMean: r.decodingMean, decWaitPerS: r.decWaitPerS, decWaitMean: r.decWaitMean, runWaitPerS: r.runWaitPerS, runWaitMean: r.runWaitMean, runQP50: r.runQP50, runQP90: r.runQP90 };
 }
 onmessage = (e) => {
   const m = e.data;
@@ -1102,7 +1102,7 @@ function render() {
     ['Decode Slots', '', '', v && v.decSlotsMean != null ? [
       `Mean slots held: ${Math.round(v.decSlotsMean)}`, `Max slots held: ${v.decSlotsMax}`,
       ...(v.decWaitPerS > 0 ? [`${pct(v.decWaitPerS / v.reqPerS)} waited ${fmtS(v.decWaitMean)} s for a slot`] : []),
-      ...(v.runWaitPerS > 0 ? [`${pct(v.runWaitPerS / v.reqPerS)} waited ${fmtS(v.runWaitMean)} s to decode`] : [])].join('<br>') : ''],
+      ...(v.runWaitPerS > 0 ? [`${pct(v.runWaitPerS / v.reqPerS)} waited ${fmtS(v.runWaitMean)} s to decode`, `Decode queue p50 / p90: ${v.runQP50} / ${v.runQP90} requests`] : [])].join('<br>') : ''],
     ['Requests per batch', v ? v.avgSegsPerChunk.toFixed(2) : '–', at('average (1 without batching)'), v ? `batch ${Math.round(v.avgChunkTok)} tok, busy ${pct(v.maxUtil)}` + (R.peak && R.peak !== v ? ` · at peak ${R.peak.avgSegsPerChunk.toFixed(2)}` : '') : ''],
   ];
   // a tile without a headline number (empty value and subtitle) is just its title and detail lines

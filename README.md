@@ -135,7 +135,8 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
   separately from the KV slots: a 64-stage decode ring carries one session per stage, while its memory holds about 85
   slots of 1M tokens per stage (tt-blaze: K/V sharded by head over the 4 mesh rows and replicated over the 2 columns,
   index-K split over the columns, bf8, 340 B per token per chip). A request whose prefill is done waits for a decode
-  position in FIFO order, holding its slot; runs report the share that waited and the mean wait.
+  position in FIFO order, holding its slot; runs report the share that waited, the mean wait, and the decode queue's
+  length at p50 / p90 of the time (`runQP50`, `runQP90`).
 * **Why prefill starves.** Runs report the share of the window prefill's first stage had nothing to issue (stage
   free, nothing queued, no started request with tokens left), by cause: `pfStarvedSlotFrac` (requests were waiting
   for a decode KV slot), `pfStarvedDecodeFrac` (none were, but requests that finished prefill were waiting for a
