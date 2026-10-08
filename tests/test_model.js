@@ -157,17 +157,22 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   assert.ok(g.usefulTps === d.usefulTps && SIM.makePlan(Object.assign({}, cfg, { batchShare: 'x' }), cal).errors.length > 0);
 }
 
-// 11. batchMaxChunks: a request never takes more than that many chunk units of one batch; 0 is the default (no
-//     limit) and leaves results unchanged; with a cap of 1, unloaded TTFT matches no batching closely
+// 11. batchShareChunks (fair sharing): with K chunks per request, a batch holds at most budget / K requests with K
+//     or more chunks; a request with fewer either finishes in it or is the one the budget ran out on (at most one
+//     per batch); a request alone still fills the batch; greedy ignores K
 {
-  const cfg = Object.assign({ cache: 'inf', chunk: 2048, batch: true, budget: 8192 }, base, { concurrency: 16 });
-  let maxSeg = 0;
-  const one = SIM.simulate(TR, cal, Object.assign({ batchMaxChunks: 1 }, cfg), { onChunk: (t, segs) => { for (const s of segs) maxSeg = Math.max(maxSeg, s.n); } });
-  const d = SIM.simulate(TR, cal, cfg), z = SIM.simulate(TR, cal, Object.assign({ batchMaxChunks: 0 }, cfg));
-  const nb = SIM.simulate(TR, cal, Object.assign({}, cfg, { batch: false }));
-  assert.ok(maxSeg === 2048 && d.ttftP90 === z.ttftP90 && d.usefulTps === z.usefulTps, `max segment ${maxSeg}`);
-  assert.ok(one.ttftP90 < d.ttftP90 && Math.abs(one.ttftP90 - nb.ttftP90) < 0.1 * nb.ttftP90, `p90 cap1 ${one.ttftP90} unlimited ${d.ttftP90} no batch ${nb.ttftP90}`);
-  assert.ok(SIM.makePlan(Object.assign({}, cfg, { batchMaxChunks: 1.5 }), cal).errors.length > 0);
+  const K = 4, C = 512, cfg = Object.assign({ cache: 'inf', chunk: C, batch: true, budget: 8192, batchShare: 'fair', batchShareChunks: K }, base);
+  let bad = 0, multi = 0, maxSeg = 0;
+  SIM.simulate(TR, cal, Object.assign({}, cfg, { concurrency: 256 }), { onChunk: (t, segs) => {
+    const big = segs.filter((s) => s.n >= K * C).length, cut = segs.filter((s) => s.n < K * C && !s.last).length;
+    if (big > 8192 / (K * C) || cut > 1) bad++;
+    if (segs.length > 1) multi++;
+  } });
+  SIM.simulate(TR, cal, Object.assign({}, cfg, { concurrency: 1 }), { onChunk: (t, segs) => { for (const s of segs) maxSeg = Math.max(maxSeg, s.n); } });
+  assert.ok(bad === 0 && multi > 0 && maxSeg > K * C, `batches breaking the share ${bad}, shared ${multi}, largest segment alone ${maxSeg}`);
+  const g = Object.assign({}, cfg, { batchShare: 'greedy', concurrency: 64 });
+  assert.ok(SIM.simulate(TR, cal, g).usefulTps === SIM.simulate(TR, cal, Object.assign({}, g, { batchShareChunks: 0 })).usefulTps);
+  assert.ok(SIM.makePlan(Object.assign({}, cfg, { batchShareChunks: 1.5 }), cal).errors.length > 0);
 }
 
 console.log('test_model: all checks passed');
