@@ -124,7 +124,7 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
 * **Delays.** Each next request waits `max(0, t_k − t_{k−1} − api_time_{k−1})` after the live end of the previous one. The delay is **not capped**. Root-chain gaps have a median of 4.5 s, a mean of 285 s and a p99 of 51 min. The only cap is AIPerf's 10 s system-idle cap. `gapCap` exists as a knob, default off.
 * **Children.** Sub-agents (and, separately, flat chains) that share a spawn turn and a join turn form one branch. The branch starts at its earliest marker; it overlaps its spawn turn (dispatch at the spawn turn's issue instead of its return) when that start is before the spawn turn's recorded end. Each child's first request is offset from the spawn turn's issue (overlap) or from the branch start. The join turn fires immediately once the last child ends.
 * **Barriers.** AIPerf's cross-stream replay barriers: within a replay scope (the root with its flat chains, or one sub-agent with its chains) a request waits, on every other stream, for the latest request that had completed at its recorded start. 62% of requests have such predecessors (76k edges, `pred_head`/`pred_list` in `traffic.bin`, optional). Requests before t* count as completed; primers are not gated.
-* **Decode.** A request ends at prefill done + `out / decodeTps` (default 180 tok/s).
+* **Decode.** A request ends at prefill done + `out / decodeTps` (default 180 tokens/s/u, i.e. per user).
 * **Decode slots (backpressure).** `decodeSlots` (default 0 = unlimited) caps the requests decode holds KV for. A request
   takes a slot before it may start prefill (waiting in FIFO order, inside its TTFT, while all are held) and frees it when
   decode ends, so prefill only runs requests decode has room for. Taking the slot at admission, not at hand-off, is
@@ -330,15 +330,15 @@ Slots held count requests from admission to prefill until the end of their decod
 
 | decode | slots | goodput | C | requests/h | revenue/h | slots held, mean / max | decoding | waited for a slot |
 |---|---|---|---|---|---|---|---|---|
-| 180 tok/s | unlimited | 30.7k | 312 | 25.2k | $372 | 75 / 135 | 40 | – |
-| 180 tok/s | 128 | 30.7k | 312 | 25.3k | $372 | 75 / 128 | 40 | 1%, 0.3 s |
-| 180 tok/s | 64 | 28.6k | 280 | 23.1k | $338 | 58 / 64 | 36 | 46%, 3.9 s |
-| 180 tok/s | 32 | 16.1k | 144 | 12.1k | $151 | 27 / 32 | 20 | 57%, 3.4 s |
-| 100 tok/s | unlimited | 28.2k | 320 | 22.8k | $342 | 97 / 157 | 64 | – |
-| 100 tok/s | 128 | 28.0k | 312 | 22.7k | $335 | 93 / 128 | 63 | 5%, 0.9 s |
-| 100 tok/s | 64 | 23.0k | 248 | 18.1k | $254 | 62 / 64 | 49 | 68%, 3.8 s |
+| 180 tokens/s/u | unlimited | 30.7k | 312 | 25.2k | $372 | 75 / 135 | 40 | – |
+| 180 tokens/s/u | 128 | 30.7k | 312 | 25.3k | $372 | 75 / 128 | 40 | 1%, 0.3 s |
+| 180 tokens/s/u | 64 | 28.6k | 280 | 23.1k | $338 | 58 / 64 | 36 | 46%, 3.9 s |
+| 180 tokens/s/u | 32 | 16.1k | 144 | 12.1k | $151 | 27 / 32 | 20 | 57%, 3.4 s |
+| 100 tokens/s/u | unlimited | 28.2k | 320 | 22.8k | $342 | 97 / 157 | 64 | – |
+| 100 tokens/s/u | 128 | 28.0k | 312 | 22.7k | $335 | 93 / 128 | 63 | 5%, 0.9 s |
+| 100 tokens/s/u | 64 | 23.0k | 248 | 18.1k | $254 | 62 / 64 | 49 | 68%, 3.8 s |
 
-One 64-session decode keeps up with this prefill at 180 tok/s for a 7% loss, and at 100 tok/s for 18%. 128 slots
+One 64-session decode keeps up with this prefill at 180 tokens/s/u for a 7% loss, and at 100 tokens/s/u for 18%. 128 slots
 is enough either way.
 
 Margin per hour of the same runs, at $12 per galaxy-hour, 16 decode galaxies per 64 slots, and either OpenRouter's
@@ -346,9 +346,9 @@ prices ($0.30 / $0.06 / $1.20 per M input / cached / output) or 1.5× them ($0.4
 
 | decode | slots | galaxies (prefill + decode) | cost/h | revenue/h, OpenRouter (in + out) | margin | revenue/h, 1.5× | margin |
 |---|---|---|---|---|---|---|---|
-| 180 tok/s | 64 | 8 + 16 | $288 | $225 + $28 = $253 | −$35 | $338 + $43 = $381 | +$93 (24%) |
-| 100 tok/s | 64 | 8 + 16 | $288 | $169 + $21 = $190 | −$98 | $254 + $32 = $286 | −$2 |
-| 180 tok/s | 128 | 8 + 32 | $480 | $248 + $31 = $279 | −$201 | $372 + $47 = $419 | −$61 |
+| 180 tokens/s/u | 64 | 8 + 16 | $288 | $225 + $28 = $253 | −$35 | $338 + $43 = $381 | +$93 (24%) |
+| 100 tokens/s/u | 64 | 8 + 16 | $288 | $169 + $21 = $190 | −$98 | $254 + $32 = $286 | −$2 |
+| 180 tokens/s/u | 128 | 8 + 32 | $480 | $248 + $31 = $279 | −$201 | $372 + $47 = $419 | −$61 |
 
 Decode is two thirds of the cost but bills only the output tokens: with a slot held from admission, about 40% of the
 64 slots hold requests still queued or in prefill rather than decoding.
@@ -474,7 +474,7 @@ Takeaways (study numbers are from the Oct 8 study unless marked Oct 7 (host DRAM
      * Rings alone give [4,4] +21% with today's kernels (4 gx 50.9k → 61.8k, 8 gx 105.8k → 128.5k) and +1–4% with roofline kernels, on each scenario's best stack (`tools/torus_ab.js`, `results/torus_ab.txt`).
    * Rings on every 4-long axis ([4,2]'s SP axis, [2,4]'s TP axis) add 16% to [4,2] at 8 gx with today's kernels (150k → 174k) and nothing at 4 gx (73.9k → 73.4k; with the old split they gave 60.3k → 72.2k, mostly by speeding up the single-dense-layer stages). With roofline kernels they move it by under 1%.
    * 8 gx: one 32-stage pipeline still beats 2×16 at goodput, but by less (both [2,4]: 134k vs 129k today, 291k vs 249k roofline; first Oct 8 run 98k and 246k). At the ∞-cache throughput peak without batching (chunk 2048, no SLO, unlimited decode) 2×16×[2,4] is ahead: 64.6k vs 55.3k (53.4k with the old split). [8,4] stages lose at 8 gx.
-8. **Faster decode raises prefill goodput with roofline kernels** (90 → 360 tok/s: 117k → 154k at 4 gx, 250k → 329k at 8 gx), because it shrinks the live KV working set per unit of load. With today's kernels it moves goodput within seed noise (4 gx 74.4k → 73.1k, 8 gx 152k → 149k). Oct 1, with the 1 TB tier: 42.7k → 46.7k at 4 gx today.
+8. **Faster decode raises prefill goodput with roofline kernels** (90 → 360 tokens/s/u: 117k → 154k at 4 gx, 250k → 329k at 8 gx), because it shrinks the live KV working set per unit of load. With today's kernels it moves goodput within seed noise (4 gx 74.4k → 73.1k, 8 gx 152k → 149k). Oct 1, with the 1 TB tier: 42.7k → 46.7k at 4 gx today.
 9. **Pool copies:** double-buffered copies are within 1% of sequential; triple buffering costs 12% at 4 gx and 13% at 8 gx with today's kernels (its lanes take memory), and nothing with roofline kernels. 4 fixed 1M lanes are 1–4% behind an arena.
 10. **The SLO is not what limits batch fill. With today's kernels nothing much does; with roofline kernels SSD read bandwidth does** (`tools/slo_ab.js`, `results/slo_ab.txt`).
     * Requests per batch at p90 ≤ 10 s → no SLO: 2.45 → 2.97 on today's 4-gx config + pool + tiers + batch 16k, and 1.41–4.29 → 1.43–4.27 on the best stacks.

@@ -232,10 +232,10 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
   </fieldset>
   <fieldset>
     <legend>Traffic &amp; SLO</legend>
-    <div class="row"><label for="decodeTps">Decode tok/s per request</label><input id="decodeTps" type="number" min="5" step="5"></div>
+    <div class="row"><label for="decodeTps">Decode tokens/s/u (per user)</label><input id="decodeTps" type="number" min="5" step="5"></div>
     <div class="row"><label for="decodeSlots">Decode KV slots (0 = unlimited)</label><input id="decodeSlots" type="number" min="0" step="1"></div>
     <div class="row"><label for="decodeStages">Decode pipeline stages (0 = unlimited)</label><input id="decodeStages" type="number" min="0" step="1"></div>
-    <div class="hint">The decode ring carries one token per stage, so up to this many sessions decode at the full tok/s per request above (one token per trip through the ring); with more, they share it and each slows to tok/s × stages / sessions, holding its KV slot longer. A 64-stage ring: 64 (× m with m-row batched decode). Its memory holds about 85 slots of 1M tokens.</div>
+    <div class="hint">The decode ring carries one token per stage, so up to this many sessions decode at the full tokens/s/u above (one token per trip through the ring); with more, they share it and each slows to tokens/s/u × stages / sessions, holding its KV slot longer. A 64-stage ring: 64 (× m with m-row batched decode). Its memory holds about 85 slots of 1M tokens.</div>
     <div class="hint">A request needs a free decode slot before its prefill may start (tt-d-gen reserves it up front to start KV migration eagerly), and holds it until decode ends; waiting for one counts in TTFT. M3 decode today holds about 64 sessions (one per pipeline stage).</div>
     <div class="row"><label for="slo">p90 TTFT SLO (s)</label><input id="slo" type="number" min="0.5" step="0.5"></div>
     <div class="row"><label for="sloR">SLO slider <span class="mono" id="sloV"></span></label><input id="sloR" type="range" min="0" max="100" step="1" aria-label="p90 TTFT SLO, log scale, right end = no SLO"></div>
@@ -445,7 +445,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Primers and warmup.</b> Every conversation active at t* first re-sends its last request before t* as a primer: a full prefill with max_tokens=1. That warms the cache the way the benchmark does. Measurement starts when all primers are done.</li>
       <li><b>Think time.</b> Each next request waits for its predecessor to end, then for the recorded gap: <span class="mono">max(0, t<sub>k</sub> − t<sub>k−1</sub> − api_time<sub>k−1</sub>)</span>. The gaps are <b>not capped</b>, as AgentX requires. Main-agent gaps have a median of 4.9 s but a mean of 395 s (p99 54 min), because humans think and tools run. The only cap is AIPerf's rule that if the whole system is idle, the next request fires within 10 s.</li>
       <li><b>Sub-agents.</b> A sub-agent starts when the main-agent turn that spawned it returns. The main agent's next dependent turn fires as soon as the last sub-agent in its group finishes.</li>
-      <li><b>End of a request.</b> Prefill finishes, then decode runs for the recorded output length at a fixed decode speed (default 180 tok/s). The output's KV is not reused: the benchmark sends synthetic assistant text in the next turn, which is prefilled like any other new text.</li>
+      <li><b>End of a request.</b> Prefill finishes, then decode runs for the recorded output length at a fixed decode speed per user (default 180 tokens/s/u). The output's KV is not reused: the benchmark sends synthetic assistant text in the next turn, which is prefilled like any other new text.</li>
       <li><b>Recycle.</b> When a session's whole tree is finished, the lane moves to the next session in the corpus and starts at turn 0 with a fresh cache-bust marker, so different lanes never share cache.</li>
       <li><b>Window.</b> 1800 s of profiling (the AgentX default). Goodput counts requests whose prefill ends inside the window.</li>
     </ul>
@@ -622,7 +622,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
         <ul>
           <li>other seeds (about ±5% noise);</li>
           <li>no host DRAM tier; 1, 4 or 64 TB of SSD per galaxy; PCIe at 181 GB/s per galaxy (x8 relay); or half the SSD bandwidth;</li>
-          <li>decode at 90 or 360 tok/s;</li>
+          <li>decode at 90 or 360 tokens/s/u;</li>
           <li>a 3 GB reserve per chip;</li>
           <li>index_k in bf16, as in the calibration runs;</li>
           <li>a TP=4-only mesh.</li>
@@ -1102,7 +1102,7 @@ function render() {
     ['Decode Slots', '', '', v && v.decSlotsMean != null ? [
       `Mean slots held: ${Math.round(v.decSlotsMean)}`, `Max slots held: ${v.decSlotsMax}`,
       ...(v.decWaitPerS > 0 ? [`${pct(v.decWaitPerS / v.reqPerS)} waited ${fmtS(v.decWaitMean)} s for a slot`] : []),
-      ...(v.ringFullFrac > 0 ? [`Decode speed per session: ${Math.round(v.decodeTpsMean)} tok/s`, `Decode ring full ${pct(v.ringFullFrac)} of the time`] : [])].join('<br>') : ''],
+      ...(v.ringFullFrac > 0 ? [`Decode speed per user: ${Math.round(v.decodeTpsMean)} tokens/s/u`, `Decode ring full ${pct(v.ringFullFrac)} of the time`] : [])].join('<br>') : ''],
     ['Requests per batch', v ? v.avgSegsPerChunk.toFixed(2) : '–', at('average (1 without batching)'), v ? `batch ${Math.round(v.avgChunkTok)} tok, busy ${pct(v.maxUtil)}` + (R.peak && R.peak !== v ? ` · at peak ${R.peak.avgSegsPerChunk.toFixed(2)}` : '') : ''],
   ];
   // a tile without a headline number (empty value and subtitle) is just its title and detail lines
