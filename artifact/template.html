@@ -1068,7 +1068,7 @@ function render() {
     ['Hit rate', v ? pct(v.hitRate, 1) : '–', at('prefix-cache hit, token-weighted'), v ? `∞-cache ${pct(v.infHitRate, 1)}` : ''],
     ['Input tokens per hour', h ? fmtBig(h.inTok) : '–', at('cached + new'), h ? `new ${fmtBig(h.newTok)} (${pct(h.newTok / h.inTok, 1)}) · cached ${fmtBig(h.cachedTok)}` : ''],
     ['Requests per hour', h ? fmtBig(h.req) : '–', at('completed'), h ? `${fmtK(h.inTok / h.req)} input tok per request` : ''],
-    ['Revenue', e && isFinite(e.margin) ? `<small>net </small>${fmtUsd(e.margin)}` : '–', at('per hour'), e ? [
+    ['Revenue', e && isFinite(e.margin) ? fmtUsd(e.margin) : '–', at('per hour'), e ? [
       `Input tokens: ${fmtUsd(e.inUsd)} (${fmtUsd(h.cachedUsd)} cache + ${fmtUsd(h.newUsd)} new)`,
       `Output tokens: ${isFinite(e.outUsd) ? fmtUsd(e.outUsd) : '– (needs a live run)'}`,
       `<span title="${runGalaxies()} prefill + ${e.decodeUsd / Math.max(1e-9, cost().galaxyUsdPerH)} decode galaxies">Cost: ${fmtUsd(e.cost)} (${runGalaxies() + cost().decodeGalaxies} galaxies)</span>`,
