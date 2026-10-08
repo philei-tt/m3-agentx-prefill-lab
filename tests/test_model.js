@@ -131,6 +131,13 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   assert.ok(Math.abs(w.usefulTps - u.usefulTps) < 1e-3 * u.usefulTps && Math.abs(w.decodeTpsMean - 180) < 1e-6 && w.ringFullFrac === 0, `wide ring ${w.usefulTps} vs ${u.usefulTps}`);
   assert.ok(c.decodeTpsMean < 180 && c.ringFullFrac > 0 && c.decodingMean > 4 && c.decodingMean * c.decodeTpsMean <= 4 * 180 * (1 + 1e-9) && c.reqPerS < u.reqPerS,
     `ring 4: speed ${c.decodeTpsMean} full ${c.ringFullFrac} decoding ${c.decodingMean}`);
+  // decodeCurve 'm3': decodeTps is the speed at 100k context, within 0.6% of the measured curve's shape; longer
+  // contexts decode slower, so AgentX sessions average below decodeTps; a ring that never fills changes nothing
+  const m3 = Object.assign({}, SIM.DEFAULTS, { decodeCurve: 'm3' });
+  assert.ok(Math.abs(SIM.decodeSpeed(m3, 100000) - 180) < 1e-9 && SIM.decodeSpeed(m3, 550000) < SIM.decodeSpeed(m3, 8000) && SIM.decodeSpeed(SIM.DEFAULTS, 550000) === 180);
+  for (const [x, t] of SIM.M3_DECODE_TSU) assert.ok(Math.abs(SIM.decodeSpeed(m3, x) * 98 / 180 / t - 1) < 0.006, `curve at ${x}`);
+  const cu = SIM.simulate(TR, cal, Object.assign({ decodeCurve: 'm3' }, cfg)), cw = SIM.simulate(TR, cal, Object.assign({ decodeCurve: 'm3', decodeStages: 1e6 }, cfg));
+  assert.ok(cu.decodeTpsMean < 180 && cu.decodeTpsMean > 100 && Math.abs(cw.usefulTps - cu.usefulTps) < 1e-3 * cu.usefulTps, `m3 mean speed ${cu.decodeTpsMean}`);
   // starvation causes: shares of the window, summing to at most 1; none from slots without a slot limit
   const n = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeSlots: 0 }));
   for (const r of [u, c, n]) {

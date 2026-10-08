@@ -140,6 +140,14 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
   slots of 1M tokens per stage (tt-blaze: K/V sharded by head over the 4 mesh rows and replicated over the 2 columns,
   index-K split over the columns, bf8, 340 B per token per chip). Runs report `decodeTpsMean` (mean speed per
   decoding session) and `ringFullFrac` (share of the time the ring carried decodeStages or more sessions).
+* **Decode speed vs context.** `decodeCurve: 'm3'` makes each session's speed follow its context. The "Minimax M3
+  Updates" deck measures 116 / 105 / 98 / 92 / 72 / 55 tokens/s/u at 8k / 60k / 100k / 140k / 310k / 550k context (64
+  users); time per token is linear in context (8.48 ms + 0.0175 ms per 1k tokens, within 0.6% of every point), so
+  the model uses that line, scaled so `decodeTps` is the speed at 100k (the deck's targets are quoted @100k): 180
+  gives about 214 at 8k, 168 at 140k, 132 at 310k, 101 at 550k and 71 at 990k. Ring sharing applies on top. Default
+  `'flat'` (every session at `decodeTps`).
+* **KV migration to decode is not modelled.** It streams layer by layer while prefill runs, so only the last layer
+  of the last chunk is left when prefill ends, and that overlaps the first token's trip through the decode ring.
 * **Why prefill starves.** Runs report the share of the window prefill's first stage had nothing to issue (stage
   free, nothing queued, no started request with tokens left), by cause: `pfStarvedSlotFrac` (requests were waiting
   for a decode KV slot) and `pfStarvedIdleFrac` (no demand). Separately,
