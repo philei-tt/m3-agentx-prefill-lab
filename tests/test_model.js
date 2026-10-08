@@ -89,4 +89,16 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   assert.ok(Math.abs(o.newUsd - 2 * h.newUsd) < 1e-9 * h.newUsd && o.cachedUsd === h.cachedUsd);
 }
 
+// 10. decode slots: without a limit nothing waits and the results match the default exactly; with a limit, slots held
+//     never exceed it, requests wait for one, and fewer requests complete
+{
+  const cfg = Object.assign({ cache: 'pool', chunk: 512, batch: true, budget: 8192 }, base, { concurrency: 128 });
+  const d = SIM.simulate(TR, cal, cfg), u = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 0 }, cfg));
+  const l = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 8 }, cfg));
+  assert.ok(d.usefulTps === u.usefulTps && d.ttftP90 === u.ttftP90 && u.decWaitPerS === 0 && u.decSlotsMax > 8, `unlimited ${u.decSlotsMax}`);
+  assert.ok(u.decodingMean > 0 && u.decodingMean <= u.decSlotsMean, `decoding ${u.decodingMean} / held ${u.decSlotsMean}`);
+  assert.ok(l.decSlotsMax === 8 && l.decSlotsMean <= 8 && l.decWaitPerS > 0 && l.decWaitMean > 0 && l.reqPerS < u.reqPerS,
+    `limit 8: max ${l.decSlotsMax} mean ${l.decSlotsMean} waits ${l.decWaitPerS} req ${l.reqPerS} vs ${u.reqPerS}`);
+}
+
 console.log('test_model: all checks passed');

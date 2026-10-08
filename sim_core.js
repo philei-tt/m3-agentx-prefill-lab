@@ -388,6 +388,10 @@
     copyMode: 'sequential', copyContention: 0.25,
     hostTier: false, hostGBPerGalaxy: 1024, pcieGBsPerGalaxy: 64,
     reserveGB: 3, expertImb: IMB0, maxInflight: 0,
+    // decodeSlots: KV slots on the decode side (0 = unlimited). A request takes one before it may start prefill (it
+    //   waits in FIFO order, inside its TTFT, while all are held) and frees it when decode ends: prefill only runs
+    //   requests decode has room for. M3 decode today holds ~62-64 sessions (one per pipeline stage, tt-blaze #4220).
+    decodeSlots: 0,
     concurrency: 64, decodeTps: 180, duration: 1800, seed: 1, idleCap: 10, startMin: 0, startMax: 1, maxWarmup: 1e6,
     gapCap: Infinity,      // AgentX forbids capping recorded idle gaps (only the 10 s system-idle cap applies)
     // policy: 'rr' (default) = round robin, see below; 'rtc' = run to completion (no preemption), oldest first
@@ -840,7 +844,19 @@
     // stats
     const st = { done: 0, useful: 0, newTok: 0, processed: 0, hitTok: 0, inTok: 0, infHitTok: 0, hostTok: 0, reprefill: 0, alignLoss: 0,
       ttft: [], chunks: 0, segs: 0, laneWait: 0, reqs: 0, primers: 0, warmupS: 0, idleWarps: 0, primerTok: 0,
-      gated: 0, gateWait: 0, legacyStarts: 0, skippedTraces: 0, rrSegs: 0, rrReuse: 0, rrCopyIn: 0 };
+      gated: 0, gateWait: 0, legacyStarts: 0, skippedTraces: 0, rrSegs: 0, rrReuse: 0, rrCopyIn: 0,
+      decArea: 0, decingArea: 0, decMax: 0, decWaits: 0, decWait: 0, decWaited: 0 };
+    // decode slots: held from admission to prefill (TTFT clock already running) until decode ends; time-weighted
+    // occupancy over the window, for slots held and for requests actually decoding (prefill done, not yet ended)
+    let decHeld = 0, decoding = 0, decT = 0; const decQ = [];
+    function decTick() {
+      if (warmDone) { const a = Math.max(decT, t0), b = Math.min(now, tEnd); if (b > a) { st.decArea += decHeld * (b - a); st.decingArea += decoding * (b - a); } }
+      decT = now;
+    }
+    function decTake(q) {
+      decTick(); decHeld++; q.decSlot = true;
+      if (warmDone && now >= t0 && now <= tEnd && decHeld > st.decMax) st.decMax = decHeld;
+    }
     let nextTrace = 0; const nsKey = { v: 0 };
     const scratch = new Float64Array(S);
 
@@ -967,11 +983,19 @@
     function issue(q) {
       const tree = q.tree, rep = tree.rep, r = q.r;
       q.tReady = now; inflightReqs++;
-      const blocks = TR.req_blocks[r];
       // overlap-path subagents are dispatched when the spawning main turn is issued
       if (!q.primer && TR.req_stream[r] === tree.s0) {
         for (let s = TR.spawnHead[r]; s >= 0; s = TR.spawnNext[s]) if (TR.st_ovl[s]) dispatch(tree, TR.st_first[s], now + TR.st_off[s]);
       }
+      if (!q.primer) {
+        if (cfg.decodeSlots > 0 && decHeld >= cfg.decodeSlots) { q.decWaitAt = now; decQ.push(q); return; }
+        decTake(q);
+      }
+      admit(q);
+    }
+    // the request may start: look up its prefix (fetching host / SSD parts first), then queue it for prefill
+    function admit(q) {
+      const tree = q.tree, rep = tree.rep, r = q.r;
       if (rep.pool) {
         const pool = rep.pool; const n = pool.walk(tree.ns, TR.req_leaf[r] - TR.tr_pc0[tree.trace]);
         pool.hit(n);
@@ -1287,11 +1311,20 @@
         if (cfg.logRequests) (st.reqLog || (st.reqLog = [])).push(r); // opt-in: request ids completed in the window
         st.ttft.push(now - q.tReady);
       }
+      if (q.decSlot) { decTick(); decoding++; }
       ev.push(now + TR.req_out[r] / cfg.decodeTps, { e: EV_END, q });
     }
     function onEnd(q) {
       const tree = q.tree, r = q.r;
       inflightReqs--; tree.live--;
+      if (q.decSlot) {
+        decTick(); decHeld--; decoding--; q.decSlot = false;
+        while (decQ.length && (cfg.decodeSlots <= 0 || decHeld < cfg.decodeSlots)) {
+          const w = decQ.shift();
+          if (warmDone && now >= t0 && now <= tEnd) { st.decWaited++; st.decWait += now - w.decWaitAt; }
+          decTake(w); admit(w);
+        }
+      }
       if (tree.ended) {
         tree.ended[r - tree.r0] = 1;
         const w = tree.waiters.get(r);
@@ -1360,6 +1393,7 @@
     }
     // ---------- results
     const D = warmDone ? Math.min(cfg.duration, Math.max(1e-9, now - t0)) : 1;
+    decTick();
     const tt = Float64Array.from(st.ttft).sort();
     const pct = (p) => (tt.length ? tt[Math.min(tt.length - 1, Math.floor(p * (tt.length - 1)))] : NaN);
     const util = []; for (let s = 0; s < S; s++) { let u = 0; for (const rp of reps) u += rp.busy[s]; util.push(u / (D * reps.length)); }
@@ -1375,6 +1409,10 @@
       avgChunkTok: st.chunks ? st.processed / st.chunks : 0, avgSegsPerChunk: st.chunks ? st.segs / st.chunks : 0,
       stageUtil: util, maxUtil: Math.max(...util), done: st.done, warmupS: st.warmupS, primers: st.primers, primerTok: st.primerTok,
       laneWaitMean: st.done ? st.laneWait / Math.max(1, st.done) : 0, hostTok: st.hostTok, idleWarps: st.idleWarps,
+      // decode slots: held on average and at most (admission to decode end), decoding on average, and the requests
+      // that waited for a slot (count per second, mean wait)
+      decSlotsMean: st.decArea / D, decSlotsMax: st.decMax, decodingMean: st.decingArea / D,
+      decWaitPerS: st.decWaited / D, decWaitMean: st.decWaited ? st.decWait / st.decWaited : 0, decQueuedAtEnd: decQ.length,
       gated: st.gated, gateWaitMean: st.gated ? st.gateWait / st.gated : 0, legacyStarts: st.legacyStarts, skippedTraces: st.skippedTraces,
       gatedAtEnd: trees.reduce((a, tr) => { const u = new Set(); if (tr) for (const w of tr.waiters.values()) for (const g of w) u.add(g); return a + u.size; }, 0),
       warmupTimeout: !!st.warmupTimeout, eventCap: !!st.eventCap, events: evCount, duration: D,

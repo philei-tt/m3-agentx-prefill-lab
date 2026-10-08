@@ -226,6 +226,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
   <fieldset>
     <legend>Traffic &amp; SLO</legend>
     <div class="row"><label for="decodeTps">Decode tok/s per request</label><input id="decodeTps" type="number" min="5" step="5"></div>
+    <div class="row"><label for="decodeSlots">Decode KV slots (0 = unlimited)</label><input id="decodeSlots" type="number" min="0" step="1"></div>
+    <div class="hint">A request needs a free decode slot before its prefill may start, and holds it until decode ends; waiting for one counts in TTFT. M3 decode today holds about 64 sessions (one per pipeline stage).</div>
     <div class="row"><label for="slo">p90 TTFT SLO (s)</label><input id="slo" type="number" min="0.5" step="0.5"></div>
     <div class="row"><label for="sloR">SLO slider <span class="mono" id="sloV"></span></label><input id="sloR" type="range" min="0" max="100" step="1" aria-label="p90 TTFT SLO, log scale, right end = no SLO"></div>
     <div class="hint">Log scale from 1 s to 10 min; the right end means no SLO (goodput = peak). Results update live; a run sweeps up to about 4× the SLO it was started with, so for a much looser SLO, run again.</div>
@@ -607,7 +609,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <ul>
       <li><b>Loading.</b> On load, the charts show the precomputed baseline (<span class="mono">today-C</span>). <b>Run sweep</b> simulates your configuration at every concurrency in the grid, in your browser, in about 5-30 s. It also runs the same configuration with an infinite cache, unless you untick that option.</li>
       <li><b>Metrics at.</b> Picks the concurrency the tiles and "Where processed tokens go" show: the goodput point by default, any concurrency of the sweep (also by clicking a chart; a dashed line marks it), or any other concurrency typed into the box, which is simulated on demand (with its infinite-cache twin) and added to the charts. At a picked concurrency the first tile shows useful tok/s there instead of goodput, and the infinite-cache tile compares at the same concurrency. Added concurrencies never move goodput, which comes from the sweep alone. Peak useful always describes the sweep. Copy link keeps the choice.</li>
-      <li><b>Tiles.</b> Goodput; goodput with an infinite cache; TTFT p50/p90 and hit rate at the goodput point; input tokens per hour at the goodput point (the input of the requests completed there, split into new tokens the pipeline prefilled, re-prefill included, and cached prefix hits) and requests completed per hour; revenue per hour (below); the peak useful throughput regardless of TTFT; wasted compute (the share of processed tokens that is re-prefill or padding, the complement of the useful share in "Where processed tokens go"); requests per batch at the goodput point and at the peak.</li>
+      <li><b>Tiles.</b> Goodput; goodput with an infinite cache; TTFT p50/p90 and hit rate at the goodput point; input tokens per hour at the goodput point (the input of the requests completed there, split into new tokens the pipeline prefilled, re-prefill included, and cached prefix hits) and requests completed per hour; revenue per hour (below); the peak useful throughput regardless of TTFT; wasted compute (the share of processed tokens that is re-prefill or padding, the complement of the useful share in "Where processed tokens go"); decode slots held (mean and max: requests from admission to prefill until the end of their decode, which is what a decode-slot limit caps), how many of them are decoding, and with a limit, the share of requests that waited for a slot and the mean wait; requests per batch at the goodput point and at the peak.</li>
       <li><b>Charts</b> share a log concurrency axis:
         <ul>
           <li>useful tok/s;</li>
@@ -631,7 +633,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>SSD tier.</b> Capacity, bandwidth and the ideal page DMA are assumptions; endurance, read/write asymmetry and IO latency are not modelled. Capacity matters a lot for the result; bandwidth hardly does.</li>
       <li><b>Pool copies.</b> Assumed to be page-list gather kernels at 50% DRAM efficiency. Arena fragmentation is not modelled.</li>
       <li><b>Torus rings.</b> Every measurement used line (mesh) collectives, so the ring speed-ups are textbook link-load ratios, not measurements. [4,4] has no profile at all (geometric midpoint of [2,4] and [8,4]).</li>
-      <li><b>Decode.</b> A fixed per-request speed. Decode-side capacity and KV migration to decode are not modelled.</li>
+      <li><b>Decode.</b> A fixed per-request speed, whatever the number of sessions decoding. Decode capacity is a slot count only (Decode KV slots, default unlimited), not KV bytes per context length. KV migration to decode is not modelled.</li>
       <li><b>Extrapolation.</b> Batched chunks above 5120 tokens, meshes without a profile, and stage counts other than 16 are extrapolated. [4,2] stage costs come from a single-stage profile.</li>
       <li><b>Memory figures are approximate.</b> The 3 GB per-chip reserve and the activation-buffer estimate are approximations.</li>
       <li><b>Complexity bins are rough</b> and not checked with the code owners.</li>
@@ -706,7 +708,8 @@ function slim(r, c) {
   if (r.error) return { conc: c, error: r.error };
   return { conc: c, usefulTps: r.usefulTps, processedTps: r.processedTps, newTps: r.newTps, inTps: r.inTps, hitTps: r.hitTps, reqPerS: r.reqPerS, ttftP50: r.ttftP50, ttftP90: r.ttftP90, ttftP99: r.ttftP99,
     hitRate: r.hitRate, infHitRate: r.infHitRate, reprefillFrac: r.reprefillFrac, padFrac: r.padFrac, maxUtil: r.maxUtil, avgChunkTok: r.avgChunkTok,
-    avgSegsPerChunk: r.avgSegsPerChunk, done: r.done, warmupS: r.warmupS };
+    avgSegsPerChunk: r.avgSegsPerChunk, done: r.done, warmupS: r.warmupS,
+    decSlotsMean: r.decSlotsMean, decSlotsMax: r.decSlotsMax, decodingMean: r.decodingMean, decWaitPerS: r.decWaitPerS, decWaitMean: r.decWaitMean };
 }
 onmessage = (e) => {
   const m = e.data;
@@ -738,8 +741,8 @@ function mkWorker() {
 
 // ---------------------------------------------------------------- form <-> cfg
 const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'batchDynShape', 'attn', 'kvDedup', 'prefetchKV', 'policy',
-  'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'duration', 'seed'];
-const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'lanes', 'arenaTokens', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'reserveGB', 'decodeTps', 'duration', 'seed']);
+  'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'decodeSlots', 'duration', 'seed'];
+const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'lanes', 'arenaTokens', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeSlots', 'duration', 'seed']);
 function setForm(cfg) {
   const c = Object.assign({}, SIM.DEFAULTS, cfg);
   for (const f of FIELDS) {
@@ -1062,6 +1065,7 @@ function render() {
     ['Revenue per hour', h ? fmtUsd(h.usd) : '–', at('input tokens billed'), h ? `new ${fmtUsd(h.newUsd)} · cached ${fmtUsd(h.cachedUsd)}` : ''],
     ['Peak useful', R && R.peak ? fmtK(R.peak.usefulTps) : '–', 'any TTFT', R && R.peak ? `C = ${R.peak.conc}, p90 ${fmtS(R.peak.ttftP90)} s` : ''],
     ['Wasted compute', sp && sp.proc ? pct((sp.rep + sp.pad) / sp.proc, 1) : '–', at('of processed tokens'), sp && sp.proc ? `re-prefill ${pct(sp.rep / sp.proc, 1)} · padding ${pct(sp.pad / sp.proc, 1)}` : ''],
+    ['Decode slots', v && v.decSlotsMean != null ? `${Math.round(v.decSlotsMean)}<small> / ${v.decSlotsMax} max</small>` : '–', at('held, mean / max'), v && v.decSlotsMean != null ? `decoding ${Math.round(v.decodingMean)}` + (v.decWaitPerS > 0 ? ` · ${pct(v.decWaitPerS / v.reqPerS)} waited ${fmtS(v.decWaitMean)} s` : '') : ''],
     ['Requests per batch', v ? v.avgSegsPerChunk.toFixed(2) : '–', at('average (1 without batching)'), v ? `batch ${Math.round(v.avgChunkTok)} tok, busy ${pct(v.maxUtil)}` + (R.peak && R.peak !== v ? ` · at peak ${R.peak.avgSegsPerChunk.toFixed(2)}` : '') : ''],
   ];
   $('tiles').innerHTML = tiles.map(([k, v, s, d]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="k">${s}</div><div class="d">${d}</div></div>`).join('');

@@ -117,6 +117,11 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
 * **Children.** Sub-agents (and, separately, flat chains) that share a spawn turn and a join turn form one branch. The branch starts at its earliest marker; it overlaps its spawn turn (dispatch at the spawn turn's issue instead of its return) when that start is before the spawn turn's recorded end. Each child's first request is offset from the spawn turn's issue (overlap) or from the branch start. The join turn fires immediately once the last child ends.
 * **Barriers.** AIPerf's cross-stream replay barriers: within a replay scope (the root with its flat chains, or one sub-agent with its chains) a request waits, on every other stream, for the latest request that had completed at its recorded start. 62% of requests have such predecessors (76k edges, `pred_head`/`pred_list` in `traffic.bin`, optional). Requests before t* count as completed; primers are not gated.
 * **Decode.** A request ends at prefill done + `out / decodeTps` (default 180 tok/s).
+* **Decode slots (backpressure).** `decodeSlots` (default 0 = unlimited) caps the requests decode holds KV for. A request
+  takes a slot before it may start prefill (waiting in FIFO order, inside its TTFT, while all are held) and frees it when
+  decode ends, so prefill only runs requests decode has room for. Every run reports the slots held (mean and max over
+  the window), how many of them are decoding, and the share of requests that waited and their mean wait. M3 decode
+  today holds about 64 sessions, one per pipeline stage (tt-blaze #4220); batched decode (m = 8) targets about 504.
 * **Window.** The profiling window is 1800 s.
 
 **Consequence:** an AgentX lane is mostly idle. Saturating a pipeline therefore takes hundreds to thousands of lanes. The KV working set then grows with concurrency, and throughput is limited by a **cache cliff**: past it, evictions turn into re-prefill, which raises TTFT, which leaves more KV idle and evicted.
@@ -237,6 +242,23 @@ Revenue at $0.30/M input, $0.06/M cached.
 | 8 galaxies, roofline kernels | today | 128 | 1.42B | 342.7M | 1.07B | 75.8% | 12.3k | $167 |
 | 8 galaxies, roofline kernels | greedy full stack | 1688 | 16.62B | 1.10B | 15.51B | 93.4% | 130.4k | $1,262 |
 | 8 galaxies, roofline kernels | best grid config | 1688 | 17.05B | 1.11B | 15.95B | 93.5% | 133.5k | $1,289 |
+
+**Decode backpressure** (`decodeSlots`, not part of the study). One configuration: 8 galaxies, 32 stages, chunk 512,
+batching with an 8k budget, paged pool, today's kernels; goodput at p90 TTFT ≤ 10 s, revenue at $0.45 / $0.09 per M.
+Slots held count requests from admission to prefill until the end of their decode.
+
+| decode | slots | goodput | C | requests/h | revenue/h | slots held, mean / max | decoding | waited for a slot |
+|---|---|---|---|---|---|---|---|---|
+| 180 tok/s | unlimited | 30.7k | 312 | 25.2k | $372 | 75 / 135 | 40 | – |
+| 180 tok/s | 128 | 30.7k | 312 | 25.3k | $372 | 75 / 128 | 40 | 1%, 0.3 s |
+| 180 tok/s | 64 | 28.6k | 280 | 23.1k | $338 | 58 / 64 | 36 | 46%, 3.9 s |
+| 180 tok/s | 32 | 16.1k | 144 | 12.1k | $151 | 27 / 32 | 20 | 57%, 3.4 s |
+| 100 tok/s | unlimited | 28.2k | 320 | 22.8k | $342 | 97 / 157 | 64 | – |
+| 100 tok/s | 128 | 28.0k | 312 | 22.7k | $335 | 93 / 128 | 63 | 5%, 0.9 s |
+| 100 tok/s | 64 | 23.0k | 248 | 18.1k | $254 | 62 / 64 | 49 | 68%, 3.8 s |
+
+One 64-session decode keeps up with this prefill at 180 tok/s for a 7% loss, and at 100 tok/s for 18%. 128 slots
+is enough either way.
 
 Each cell below is "G #step / LOO":
 * **G** is the gain at the greedy step where the feature was added (the step number is the build order);
@@ -363,7 +385,9 @@ Takeaways (study numbers are from the Oct 1 study; the results of separate `tool
 
 * SSD tier: 1 TB and 64 GB/s per galaxy are placeholders (carried over from the earlier host-DRAM tier), modelled as an ideal page DMA with one symmetric bandwidth; endurance, read/write asymmetry and IO latency are not modelled. Set the real drive numbers; see the sensitivity table in the artifact.
 * Pool copies are page-list gathers at 50% DRAM efficiency. Arena fragmentation is not modelled.
-* Decode is a fixed per-request rate. KV migration to decode is not modelled.
+* Decode is a fixed per-request rate, whatever the number of sessions decoding, and its capacity is a slot count
+  (`decodeSlots`), not KV bytes per context length (today's decode slots hold 64k positions; AgentX contexts average
+  about 130k). KV migration to decode is not modelled.
 * Meshes without a profile ([4,4], [1,4], …) are extrapolated. TP=2 stages use the [4,2] single-stage profile.
 * Ring-collective speed-ups on the torus are textbook link-load ratios, not measured; profile a [4,4] stage with ring CCLs to pin them down.
 * Batched chunks larger than 5120 are extrapolated from the roofline scaling of each op.
