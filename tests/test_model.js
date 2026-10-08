@@ -141,38 +141,26 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   assert.ok(u.pfStarvedSlotFrac === 0 && u.pfStarvedDecodeFrac === 0 && u.sendBlockFrac > 0);
 }
 
-// 10c. batchShare 'fair': max-min fair split of each batch; a request cut short by its share holds the largest share in
-//      its batch (within one chunk); a request alone takes the whole budget; the default ('greedy') is unchanged
+// 10c. batchChunksPerRequest L: rounds over the queue, up to L chunks per request per round.
+//      L = 1 is an even split: within a batch, every request not finishing in it holds the largest share (within one
+//      chunk), and a request alone takes the whole budget. L = 4: at most one request per batch gets fewer than 4
+//      chunks without finishing (the one the budget ran out on). L = 0 (default) is greedy.
 {
-  const cfg = Object.assign({ cache: 'inf', batch: true, budget: 8192 }, base, { concurrency: 256, chunk: 512 });
+  const C = 512, cfg = Object.assign({ cache: 'inf', batch: true, budget: 8192 }, base, { concurrency: 256, chunk: C });
   let bad = 0, multi = 0, alone = 0;
-  const f = SIM.simulate(TR, cal, Object.assign({ batchShare: 'fair' }, cfg), { onChunk: (t, segs) => {
+  const one = SIM.simulate(TR, cal, Object.assign({ batchChunksPerRequest: 1 }, cfg), { onChunk: (t, segs) => {
     const tot = segs.reduce((a, s) => a + s.npad, 0), mx = Math.max(...segs.map((s) => s.npad));
     if (tot > 8192) bad++;
-    if (segs.length > 1) { multi++; for (const s of segs) if (!s.last && s.npad < mx - 512) bad++; }
+    if (segs.length > 1) { multi++; for (const s of segs) if (!s.last && s.npad < mx - C) bad++; }
     else if (!segs[0].last && segs[0].npad === 8192) alone++;
   } });
-  const g = SIM.simulate(TR, cal, cfg), d = SIM.simulate(TR, cal, Object.assign({ batchShare: 'greedy' }, cfg));
-  assert.ok(bad === 0 && multi > 0 && alone > 0 && f.avgSegsPerChunk > g.avgSegsPerChunk, `fair: bad ${bad} multi ${multi} alone ${alone}`);
-  assert.ok(g.usefulTps === d.usefulTps && SIM.makePlan(Object.assign({}, cfg, { batchShare: 'x' }), cal).errors.length > 0);
-}
-
-// 11. batchShareChunks (fair sharing): with K chunks per request, a batch holds at most budget / K requests with K
-//     or more chunks; a request with fewer either finishes in it or is the one the budget ran out on (at most one
-//     per batch); a request alone still fills the batch; greedy ignores K
-{
-  const K = 4, C = 512, cfg = Object.assign({ cache: 'inf', chunk: C, batch: true, budget: 8192, batchShare: 'fair', batchShareChunks: K }, base);
-  let bad = 0, multi = 0, maxSeg = 0;
-  SIM.simulate(TR, cal, Object.assign({}, cfg, { concurrency: 256 }), { onChunk: (t, segs) => {
-    const big = segs.filter((s) => s.n >= K * C).length, cut = segs.filter((s) => s.n < K * C && !s.last).length;
-    if (big > 8192 / (K * C) || cut > 1) bad++;
-    if (segs.length > 1) multi++;
+  let cut = 0;
+  SIM.simulate(TR, cal, Object.assign({ batchChunksPerRequest: 4 }, cfg), { onChunk: (t, segs) => {
+    if (segs.filter((s) => !s.last && s.npad < 4 * C).length > 1) cut++;
   } });
-  SIM.simulate(TR, cal, Object.assign({}, cfg, { concurrency: 1 }), { onChunk: (t, segs) => { for (const s of segs) maxSeg = Math.max(maxSeg, s.n); } });
-  assert.ok(bad === 0 && multi > 0 && maxSeg > K * C, `batches breaking the share ${bad}, shared ${multi}, largest segment alone ${maxSeg}`);
-  const g = Object.assign({}, cfg, { batchShare: 'greedy', concurrency: 64 });
-  assert.ok(SIM.simulate(TR, cal, g).usefulTps === SIM.simulate(TR, cal, Object.assign({}, g, { batchShareChunks: 0 })).usefulTps);
-  assert.ok(SIM.makePlan(Object.assign({}, cfg, { batchShareChunks: 1.5 }), cal).errors.length > 0);
+  const g = SIM.simulate(TR, cal, cfg), z = SIM.simulate(TR, cal, Object.assign({ batchChunksPerRequest: 0 }, cfg));
+  assert.ok(bad === 0 && multi > 0 && alone > 0 && cut === 0 && one.avgSegsPerChunk > g.avgSegsPerChunk, `L=1 bad ${bad} multi ${multi} alone ${alone}; L=4 cut ${cut}`);
+  assert.ok(g.usefulTps === z.usefulTps && SIM.makePlan(Object.assign({}, cfg, { batchChunksPerRequest: 1.5 }), cal).errors.length > 0);
 }
 
 console.log('test_model: all checks passed');

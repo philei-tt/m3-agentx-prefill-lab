@@ -219,9 +219,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="hint">Default: requests per batch × copy buffers (sequential 1, double 2, triple 3); with a global lane table, stages × requests per batch (sequential copies only). Variable-layout batching must override.</div>
     <div class="row check"><input id="batchDynShape" type="checkbox"><label for="batchDynShape">Dynamic batch size (no padding to the budget)</label></div>
     <div class="hint">On: a partly filled batch runs at its actual size (untraced). Off: it is padded to the full budget, as tracing requires.</div>
-    <div class="row"><label for="batchShare">Batch sharing</label><select id="batchShare"><option value="greedy">greedy (front request fills what it can)</option><option value="fair">fair share among waiting requests</option></select></div>
-    <div class="row"><label for="batchShareChunks">Chunks per request when sharing (0 = even split)</label><input id="batchShareChunks" type="number" min="0" step="1"></div>
-    <div class="hint">Fair (round robin only): the budget is shared among the requests waiting at the front of the queue, and a request alone takes the whole budget. With K chunks per request, each gets up to K in queue order until the budget is used (at most budget / K requests that need K or more, plus short ones) and any budget left goes back to them; with 0, it is split evenly over as many requests as there are chunks. Every request in a batch reads its own cached prefix, so many requests per batch cost throughput.</div>
+    <div class="row"><label for="batchChunksPerRequest">Chunks per request per round (0 = no limit)</label><input id="batchChunksPerRequest" type="number" min="0" step="1"></div>
+    <div class="hint">Round robin: a batch is filled in rounds over the queue, each request getting up to this many more chunks per round, until the budget is used. 0: the front request takes all it can (greedy); 1: an even split. A request alone fills the batch either way. Every request in a batch reads its own cached prefix, so many requests per batch cost throughput.</div>
     <div class="row"><label for="attn">Attention</label><select id="attn"><option value="seq">sequential per request</option><option value="fused">fused multi-user</option></select></div>
     <div class="row check"><input id="kvDedup" type="checkbox"><label for="kvDedup">One attention call per request per chunk (prefix gathered once)</label></div>
     <div class="hint">Off: with a fixed layout, each chunk-unit of a request makes its own call and re-gathers the cached prefix.</div>
@@ -769,9 +768,9 @@ function mkWorker() {
 }
 
 // ---------------------------------------------------------------- form <-> cfg
-const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'batchDynShape', 'batchShare', 'batchShareChunks', 'attn', 'kvDedup', 'prefetchKV', 'policy',
+const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'batchDynShape', 'batchChunksPerRequest', 'attn', 'kvDedup', 'prefetchKV', 'policy',
   'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeConcurrency', 'duration', 'seed'];
-const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchShareChunks', 'lanes', 'arenaTokens', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeConcurrency', 'duration', 'seed']);
+const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchChunksPerRequest', 'lanes', 'arenaTokens', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeConcurrency', 'duration', 'seed']);
 function setForm(cfg) {
   const c = Object.assign({}, SIM.DEFAULTS, cfg);
   for (const f of FIELDS) {
@@ -809,7 +808,7 @@ function syncUi() {
   $('lanes').disabled = !pool || $('laneArena').checked;
   // every cache can batch; static slots need requests per batch x stages slots (makePlan reports out of memory)
   $('batch').disabled = false; $('batchHint').hidden = $('cache').value !== 'slots';
-  $('budget').disabled = !$('batch').checked; $('attn').disabled = !$('batch').checked; $('batchDynShape').disabled = !$('batch').checked; $('batchShareChunks').disabled = !$('batch').checked || $('batchShare').value !== 'fair'; $('batchShare').disabled = !$('batch').checked || $('policy').value !== 'rr';
+  $('budget').disabled = !$('batch').checked; $('attn').disabled = !$('batch').checked; $('batchDynShape').disabled = !$('batch').checked; $('batchChunksPerRequest').disabled = !$('batch').checked || $('policy').value !== 'rr';
   // pool lanes per stage (as makePlan): derived = copy-mode buffers x requests per batch; the override is for batching
   // on the pool only, and variable-layout batching (no chunk units) must override
   const fixedLanes = pool && !$('laneArena').checked, batched = $('batch').checked;
@@ -830,7 +829,7 @@ function syncUi() {
   }
   // with batching on a variable layout the token budget is the chunk size; the chunk field is unused
   // variable-layout batching packs to the budget; the chunk size only sets the per-request cap, if there is one
-  const chunkUnused = $('batch').checked && $('layout').value === 'var' && !($('batchShare').value === 'fair' && Number($('batchShareChunks').value) > 0);
+  const chunkUnused = $('batch').checked && $('layout').value === 'var' && !(Number($('batchChunksPerRequest').value) > 0);
   $('chunk').disabled = chunkUnused; $('chunkHint').hidden = !chunkUnused;
 }
 // keep the pipeline valid when the hardware changes: fill each replica with stages, and drop a custom split

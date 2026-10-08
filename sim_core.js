@@ -366,18 +366,15 @@
     //   32*SP granules), as ops do without tracing; false = padded to the full budget, as a traced build with one
     //   fixed shape must be
     batchDynShape: true,
-    // batchShare (round robin, batched): how a batch's budget is split among the requests waiting for it. Every
-    //   request makes one attention call per batch (reading its cached prefix) and goes to the back of the queue.
-    //   'greedy' = each request popped from the front takes as many of the remaining units as it can fill;
-    //   'fair' = shared among the requests at the front of the queue, and a request alone takes the whole budget:
-    //     batchShareChunks K > 0: in queue order, each gets up to K chunk units (fewer if it needs fewer) until the
-    //       budget is used, so a batch holds at most budget / K requests that need K or more (plus short ones that
-    //       need less); budget left over goes back to them in the same order, up to what they need.
-    //     K = 0: max-min fair over as many requests as there are units (each an equal share; a request needing less
-    //       keeps only that and the rest goes to the others). Many requests per batch, each reading its prefix,
-    //       cost throughput.
-    //   Units are chunks (fixed layout) or 32*SP granules (variable layout); K counts chunks of `chunk` tokens.
-    batchShare: 'greedy', batchShareChunks: 0,
+    // batchChunksPerRequest L (round robin, batched): how a batch's budget is split among the requests waiting for
+    //   it. Rounds over the queue: in each round every request, in queue order, gets up to L more chunk units
+    //   (fewer if it needs fewer, or if the budget runs out), until the budget is used or no request needs more.
+    //   0 = no limit: the front request takes as many units as it can fill, then the next (greedy). 1 = one unit
+    //   per request per round: an even split. A request alone fills the batch whatever L is. Each request makes one
+    //   attention call per batch (reading its cached prefix) for all its units, so many requests per batch cost
+    //   throughput. Units are chunks (fixed layout) or 32*SP granules (variable layout); L counts chunks of `chunk`
+    //   tokens. On the pool, a request joins a batch only if it gets a lane.
+    batchChunksPerRequest: 0,
     cache: 'slots',        // slots | pool | paging | inf
     // pool lanes per stage, derived from r = the most requests a batch (one pipeline pass) holds (1 without
     //   batching, the chunk units per batch with fixed-layout batching; every request in a batch needs its own lane)
@@ -613,8 +610,7 @@
     for (const k of ['hostDramGBPerGalaxy', 'ssdTBPerGalaxy']) if (!(cfg[k] >= 0)) errors.push(`${k} must be >= 0`);
     for (const k of ['pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy']) if (!(cfg[k] > 0)) errors.push(`${k} must be > 0`);
     if (!(cfg.decodeConcurrency >= 0)) errors.push('decode concurrency must be >= 0 (0 = unlimited)');
-    if (!['greedy', 'fair'].includes(cfg.batchShare)) errors.push(`batchShare must be 'greedy' or 'fair', got ${cfg.batchShare}`);
-    if (!(cfg.batchShareChunks >= 0) || cfg.batchShareChunks !== Math.floor(cfg.batchShareChunks)) errors.push('chunks per request when sharing must be a whole number >= 0 (0 = even split)');
+    if (!(cfg.batchChunksPerRequest >= 0) || cfg.batchChunksPerRequest !== Math.floor(cfg.batchChunksPerRequest)) errors.push('chunks per request per round must be a whole number >= 0 (0 = no limit)');
     // every buffer that must hold a whole request has to fit the largest AgentX request (990,016 tokens)
     if (cfg.cache === 'slots' && cfg.slotLen < MAX_REQ) errors.push(`slots must hold the largest request (${MAX_REQ} tokens)`);
     if (cfg.cache === 'pool' && !cfg.laneArena && cfg.laneLen < MAX_REQ) errors.push(`lanes must hold the largest request (${MAX_REQ} tokens)`);
@@ -1234,28 +1230,26 @@
           rep.queue = keep;
         }
         const again = [];
-        if (cfg.batch && cfg.batchShare === 'fair') {
-          const unit = fixed ? C : plan.gran, U = Math.floor(budget / unit), cand = [], need = [];
-          const K = cfg.batchShareChunks > 0 ? Math.max(1, Math.floor(cfg.batchShareChunks * C / unit)) : 0; // share in units
-          let firstPass = 0; // units the candidates take in the first pass (K each, or what they need)
-          for (const q of rep.active) { // the front requests, one unit each at least, that get a lane
-            if (cand.length >= U || (K && firstPass >= U)) break;
+        if (cfg.batch) { // rounds over the queue, up to L units per request per round (batchChunksPerRequest)
+          const unit = fixed ? C : plan.gran;
+          const L = cfg.batchChunksPerRequest > 0 ? Math.max(1, Math.floor(cfg.batchChunksPerRequest * C / unit)) : Infinity;
+          const cand = [], need = [], alloc = [];
+          let left = Math.floor(budget / unit);
+          // first round: requests join in queue order while the budget lasts and they get a lane
+          for (const q of rep.active) {
+            if (left <= 0) break;
             if (rrPool && !laneGet(q, rep)) break; // no lane free: a lane release re-pumps
-            cand.push(q); need.push(Math.ceil(q.rem / unit)); firstPass += K ? Math.min(need[need.length - 1], K) : 0;
+            const n = Math.ceil(q.rem / unit), a = Math.min(n, L, left);
+            cand.push(q); need.push(n); alloc.push(a); left -= a;
           }
-          const alloc = need.map(() => 0); let left = U;
-          if (K) { // K each in queue order until the budget is used, then the rest back to them in the same order
-            for (let i = 0; i < cand.length && left > 0; i++) { alloc[i] = Math.min(need[i], K, left); left -= alloc[i]; }
-            for (let i = 0; i < cand.length && left > 0; i++) { const x = Math.min(need[i] - alloc[i], left); alloc[i] += x; left -= x; }
-          } else { // max-min fair: equal shares, a request needing less keeps only that
-            const order = need.map((_, i) => i).sort((a, b) => need[a] - need[b]);
-            order.forEach((i, k) => { alloc[i] = Math.min(need[i], Math.floor(left / (cand.length - k))); left -= alloc[i]; });
-            for (let more = true; left > 0 && more;) { // rounding leftovers, one unit at a time in queue order
-              more = false;
-              for (let i = 0; left > 0 && i < cand.length; i++) if (alloc[i] < need[i]) { alloc[i]++; left--; more = true; }
+          // further rounds among them while budget is left and someone needs more
+          for (let more = true; left > 0 && more;) {
+            more = false;
+            for (let i = 0; i < cand.length && left > 0; i++) {
+              const a = Math.min(need[i] - alloc[i], L, left);
+              if (a > 0) { alloc[i] += a; left -= a; more = true; }
             }
           }
-          // every candidate gets at least one unit: with K, candidates stop once their first-pass units fill the budget
           cand.forEach((q, i) => {
             rep.active.shift();
             take(q, alloc[i] * unit);
@@ -1265,14 +1259,14 @@
           for (const q of again) rep.active.push(q);
           return segs.length ? { segs, T } : null;
         }
-        while (rep.active.length && room()) {
+        while (rep.active.length && room()) { // unbatched: one chunk of the front request
           const q = rep.active[0];
           if (rrPool && !laneGet(q, rep)) break; // no lane free: a lane release re-pumps
           rep.active.shift();
           take(q, budget - T);
           if (rrPool) Object.assign(segs[segs.length - 1], q.seg);
           if (q.rem > 0) again.push(q);
-          if (!cfg.batch) break;
+          break;
         }
         for (const q of again) rep.active.push(q);
         return segs.length ? { segs, T } : null;
