@@ -140,7 +140,7 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
   slots of 1M tokens per stage (tt-blaze: K/V sharded by head over the 4 mesh rows and replicated over the 2 columns,
   index-K split over the columns, bf8, 340 B per token per chip). Runs report `decodeTpsMean` (mean speed per
   decoding session) and `ringFullFrac` (share of the time the ring carried decodeStages or more sessions).
-* **Decode speed vs context.** `decodeCurve: 'm3'` makes each session's speed follow its context. The "Minimax M3
+* **Decode speed vs context** (page: "Decode TSU", constant / adapt to KV length). `decodeCurve: 'm3'` makes each session's speed follow its context. The "Minimax M3
   Updates" deck measures 116 / 105 / 98 / 92 / 72 / 55 tokens/s/u at 8k / 60k / 100k / 140k / 310k / 550k context (64
   users); time per token is linear in context (8.48 ms + 0.0175 ms per 1k tokens, within 0.6% of every point), so
   the model uses that line, scaled so `decodeTps` is the speed at 100k (the deck's targets are quoted @100k): 180
