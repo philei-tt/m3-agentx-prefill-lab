@@ -10,7 +10,7 @@ const { withFeatures } = require('../study.js');
 const { STUDY } = require('../lib/paths.js');
 
 const VARIANTS = [
-  ['best (pool + host DRAM + 32 TB SSD)', {}],
+  ['best (pool + host DRAM + 16 TB SSD)', {}],
   ['paging + offload tiers', { cache: 'paging', laneArena: false }],
   ['no host DRAM tier (SSD only)', { hostDramGBPerGalaxy: 0 }],
   ['SSD half bandwidth', { ssdReadGBsPerGalaxy: 15.75, ssdWriteGBsPerGalaxy: 13.6 }],

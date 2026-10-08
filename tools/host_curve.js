@@ -11,7 +11,7 @@ const { STUDY } = require('../lib/paths.js');
 
 const PAGE_GRID = [16, 32, 64, 96, 128, 192, 256, 384, 512, 640, 768, 1024, 1536, 2048]; // the page's DEFAULT_CONCS (the sweep extends past it)
 const VARIANTS = [
-  ['best (host DRAM + 32 TB SSD)', {}],
+  ['best (host DRAM + 16 TB SSD)', {}],
   ['no host DRAM tier (SSD only)', { hostDramGBPerGalaxy: 0 }],
   ['SSD half bandwidth', { ssdReadGBsPerGalaxy: 15.75, ssdWriteGBsPerGalaxy: 13.6 }],
   ['PCIe 181 GB/s/gx (x8 relay)', { pcieGBsPerGalaxy: 181 }],

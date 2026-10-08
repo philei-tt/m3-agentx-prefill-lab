@@ -30,7 +30,7 @@ const V = [
   const [S, P] = await Promise.all([sweeps, points]);
   pool.close();
   const k = (x) => (x / 1e3).toFixed(1).padStart(6) + 'k';
-  const line = (p) => `useful ${k(p.usefulTps)} processed ${k(p.processedTps)} | hit ${(100 * p.hitRate).toFixed(1)}% (inf ${(100 * p.infHitRate).toFixed(1)}%) | re-prefill ${(100 * p.reprefillFrac).toFixed(0).padStart(2)}% | SSD read ${((p.hostTok || 0) / 1e6).toFixed(0).padStart(4)}M tok | slot evictions ${String(p.slotEvictions || 0).padStart(5)} | busy ${(100 * p.maxUtil).toFixed(0).padStart(3)}% | p50/p90 ${p.ttftP50.toFixed(1)}/${p.ttftP90.toFixed(1)} s`;
+  const line = (p) => `useful ${k(p.usefulTps)} processed ${k(p.processedTps)} | hit ${(100 * p.hitRate).toFixed(1)}% (inf ${(100 * p.infHitRate).toFixed(1)}%) | re-prefill ${(100 * p.reprefillFrac).toFixed(0).padStart(2)}% | read host ${((p.hostTok || 0) / 1e6).toFixed(0).padStart(4)}M / SSD ${((p.ssdTok || 0) / 1e6).toFixed(0).padStart(4)}M tok | slot evictions ${String(p.slotEvictions || 0).padStart(5)} | busy ${(100 * p.maxUtil).toFixed(0).padStart(3)}% | p50/p90 ${p.ttftP50.toFixed(1)}/${p.ttftP90.toFixed(1)} s`;
   console.log('== goodput point (p90 TTFT <= 10 s)');
   for (const [n, s] of S) console.log(`  ${n.padEnd(22)} goodput ${k(s.goodput)} @C=${String(s.at ? s.at.conc : '-').padStart(4)} | ${s.at ? line(s.at) : ''}`);
   for (const c of fixed) {
