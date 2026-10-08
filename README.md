@@ -145,7 +145,9 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
   users); time per token is linear in context (8.48 ms + 0.0175 ms per 1k tokens, within 0.6% of every point), so
   the model uses that line, scaled so `decodeTps` is the speed at 100k (the deck's targets are quoted @100k): 180
   gives about 214 at 8k, 168 at 140k, 132 at 310k, 101 at 550k and 71 at 990k. Ring sharing applies on top. Default
-  `'flat'` (every session at `decodeTps`).
+  `'m3'` at `decodeTps` 180, the decode target (180 tokens/s/u @100k) with the measured shape; `decodeTps` 98
+  reproduces the measured table, and `'flat'` gives every session `decodeTps`. The study in `results/study.json` ran
+  with flat 180.
 * **KV migration to decode is not modelled.** It streams layer by layer while prefill runs, so only the last layer
   of the last chunk is left when prefill ends, and that overlaps the first token's trip through the decode ring.
 * **Why prefill starves.** Runs report the share of the window prefill's first stage had nothing to issue (stage

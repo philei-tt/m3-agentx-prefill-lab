@@ -457,7 +457,9 @@
     //   the measured M3 curve (M3_DECODE_TSU), with decodeTps the speed at 100k context (180 -> about 213 at 8k, 169
     //   at 140k, 132 at 310k, 101 at 550k). KV migration to decode is not modelled: it streams layer by layer during
     //   prefill, so only the last layer of the last chunk is left at the end, and that overlaps the first token's trip.
-    decodeCurve: 'flat',
+    //   Default 'm3' at decodeTps 180: the decode target (180 tokens/s/u @100k) with the measured shape; decodeTps 98
+    //   reproduces the measured table.
+    decodeCurve: 'm3',
     concurrency: 64, decodeTps: 180, duration: 1800, seed: 1, idleCap: 10, startMin: 0, startMax: 1, maxWarmup: 1e6,
     gapCap: Infinity,      // AgentX forbids capping recorded idle gaps (only the 10 s system-idle cap applies)
     // policy: 'rr' (default) = round robin, see below; 'rtc' = run to completion (no preemption), oldest first
