@@ -1,0 +1,12 @@
+slots (today)                    goodput   3.4k @C=  40 | req/batch 1.00 | chunk  2048 tok | pad  6% | util  46% | hit 87.3% (inf 97.5%) | reprefill 80% | p90 5.6 s
+pool                             goodput  15.1k @C= 136 | req/batch 1.00 | chunk  2048 tok | pad 14% | util  71% | hit 93.9% (inf 96.2%) | reprefill 37% | p90 6.4 s
+pool 4 lanes + batch 16k         goodput  13.9k @C= 120 | req/batch 1.20 | chunk  7950 tok | pad 13% | util  50% | hit 93.1% (inf 96.1%) | reprefill 44% | p90 9.3 s
+pool 8 lanes + batch 16k         goodput  11.2k @C= 104 | req/batch 1.19 | chunk  8518 tok | pad 11% | util  46% | hit 92.2% (inf 96.2%) | reprefill 52% | p90 9.0 s
+paging                           goodput  15.1k @C= 136 | req/batch 1.00 | chunk  2048 tok | pad 14% | util  69% | hit 93.9% (inf 96.2%) | reprefill 37% | p90 6.2 s
+paging + batch 16k               goodput  15.0k @C= 128 | req/batch 1.16 | chunk  7046 tok | pad 15% | util  47% | hit 94.3% (inf 96.2%) | reprefill 33% | p90 7.3 s
+pool + host                      goodput  25.2k @C= 256 | req/batch 1.00 | chunk  2048 tok | pad 19% | util  83% | hit 96.4% (inf 96.6%) | reprefill 5% | p90 9.3 s
+pool 4 lanes + host + batch 16k  goodput  29.4k @C= 296 | req/batch 1.36 | chunk  6782 tok | pad 20% | util  68% | hit 96.6% (inf 96.6%) | reprefill 1% | p90 9.4 s
+paging + host                    goodput  25.7k @C= 256 | req/batch 1.00 | chunk  2048 tok | pad 19% | util  82% | hit 96.4% (inf 96.6%) | reprefill 5% | p90 8.7 s
+paging + host + batch 16k        goodput  29.7k @C= 304 | req/batch 1.39 | chunk  6866 tok | pad 20% | util  68% | hit 96.6% (inf 96.6%) | reprefill 2% | p90 10.0 s
+inf cache                        goodput  25.7k @C= 256 | req/batch 1.00 | chunk  2048 tok | pad 20% | util  82% | hit 96.4% (inf 96.6%) | reprefill 5% | p90 8.7 s
+inf cache + batch 16k            goodput  29.7k @C= 304 | req/batch 1.40 | chunk  6878 tok | pad 20% | util  68% | hit 96.6% (inf 96.6%) | reprefill 1% | p90 9.9 s

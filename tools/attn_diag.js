@@ -48,11 +48,17 @@ function breakdown(label, cfgBase) {
   }
 }
 const best = (key) => { const R = study.scenarios[key]; return Object.assign(withFeatures(R.base, R.bestKeys.filter((k) => !['var', 'fused'].includes(k))), R.grid[0].extra, { layout: 'fixed', cache: 'inf', hostTier: false, laneArena: false }); };
-breakdown('8 gx today (32x[4,2], today\'s kernels)', best('g8_k0'));
-breakdown('8 gx roofline (16x[4,4], roofline kernels)', best('g8_k1'));
+const topo = (key) => { const g = study.scenarios[key].grid[0].extra; return `${g.stages}x[${g.mesh}]`; };
+breakdown(`8 gx today (${topo('g8_k0')}, today's kernels)`, best('g8_k0'));
+breakdown(`8 gx roofline (${topo('g8_k1')}, roofline kernels)`, best('g8_k1'));
 
 // ---- B) bottleneck at the peak
-const PEAK = { g4_k0: 1056, g8_k0: 4096, g8_k1: 5240 }; // peak concurrency of fixed C=128, 64k (results/layout_ab_inf_peak.json)
+// peak concurrency of fixed C=128, 64k, per-request attention (results/layout_ab_inf_peak.json)
+const PEAK = {};
+for (const [key, rows] of Object.entries(JSON.parse(fs.readFileSync(path.join(require('../lib/paths.js').RESULTS, 'layout_ab_inf_peak.json'))).scenarios)) {
+  const r = rows.find((x) => x.mode === 'base' && x.layout === 'fixed' && x.attn === 'seq' && x.chunk === 128 && x.budget === 65536);
+  if (r && r.at) PEAK[key] = r.at.conc;
+}
 const jobs = [];
 for (const [key, conc] of Object.entries(PEAK)) for (const [attn, prefetchKV] of [['seq', false], ['fused', false], ['seq', true], ['fused', true]])
   jobs.push({ key, attn, prefetchKV, cfg: Object.assign(best(key), { chunk: 128, batch: true, budget: 65536, attn, prefetchKV, concurrency: conc }) });

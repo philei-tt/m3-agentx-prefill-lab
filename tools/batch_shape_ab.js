@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // Dynamic batch size (batchDynShape: a batch runs at the tokens it holds) vs padding every batch to the budget (traced).
-//   A) today's 4-gx config (16x[2,4], chunk 2048) + pool + host tier
+//   A) today's 4-gx config (study base: 16x[2,4], chunk 2048, round robin) + the study's pool (4 lanes) + offload tiers
 //   B) each scenario's best stack and topology from results/study.json, fixed chunk 256 and variable layout
 // Usage: JOB=<slurm job> ./on_node.sh node tools/batch_shape_ab.js [--workers 38]
 'use strict';
 const fs = require('fs');
 const { Pool, summarize } = require('../lib/pool.js');
-const { withFeatures, laneCount, CONCS, SLO } = require('../study.js');
+const { withFeatures, laneCount, scenarios, CONCS, SLO } = require('../study.js');
 const { STUDY } = require('../lib/paths.js');
 
 const BUDGETS = [4096, 8192, 16384, 32768];
@@ -17,8 +17,8 @@ async function main() {
   const study = JSON.parse(fs.readFileSync(STUDY));
   const pool = new Pool(Number(get('--workers', 38)));
   const groups = [];
-  const today = { galaxies: 4, stages: 16, mesh: [2, 4], chunk: 2048, split: 'auto', cache: 'pool', lanes: 4, hostTier: true, layout: 'fixed', unaligned: true };
-  groups.push({ name: 'today 4gx 16x[2,4] C=2048 + pool + host', base: today, noBatch: today });
+  const today = withFeatures(scenarios()[0].base, ['pool', 'host']);
+  groups.push({ name: 'today 4gx 16x[2,4] C=2048 + pool + tiers', base: today, noBatch: today });
   for (const [key, R] of Object.entries(study.scenarios)) {
     const g = R.grid[0].extra;
     const keys = R.bestKeys.filter((k) => !['var', 'fused', 'batch'].includes(k));

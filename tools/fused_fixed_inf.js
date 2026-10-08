@@ -2,7 +2,14 @@
 const { Pool, summarize } = require('../lib/pool.js');
 const { withFeatures, CONCS, SLO } = require('../study.js');
 const study = require(require('../lib/paths.js').STUDY);
-const BUD = { g4_k0: [16384], g8_k0: [16384], g4_k1: [32768, 65536], g8_k1: [32768, 65536] };
+// budgets: the best one for fixed C=128 with an infinite cache (results/layout_ab_inf.json), plus twice it if that is
+// the largest budget tried there
+const LAB = JSON.parse(require('fs').readFileSync(require('path').join(require('../lib/paths.js').RESULTS, 'layout_ab_inf.json')));
+const BUD = {};
+for (const [key, rows] of Object.entries(LAB.scenarios)) {
+  const b = rows.find((x) => x.mode === 'base' && x.layout === 'fixed' && x.attn === 'seq' && x.chunk === 128).budget;
+  BUD[key] = b === Math.max(...LAB.budgets) ? [b, 2 * b] : [b];
+}
 (async () => {
   const i = process.argv.indexOf('--workers');
   const pool = new Pool(i >= 0 ? Number(process.argv[i + 1]) : 38);
