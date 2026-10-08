@@ -137,6 +137,8 @@ table.prio tr.fdetail > td { background: var(--surface-2); padding: 12px 14px; }
 .cols2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 @media (max-width: 1000px) { .cols2 { grid-template-columns: 1fr; } }
 .prose { display: flex; flex-direction: column; gap: 10px; max-width: 80ch; }
+/* the Method tab is reference text: use the full content width */
+#tab-method .prose, #tab-method .prose p { max-width: none; }
 .prose ul { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
 .callout { border-left: 3px solid var(--accent); padding: 8px 12px; background: var(--accent-soft); border-radius: 0 6px 6px 0; }
 .callout.bad { border-left-color: var(--bad); background: var(--bad-soft); color: var(--ink); margin-bottom: 10px; }
