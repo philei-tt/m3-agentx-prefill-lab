@@ -371,6 +371,14 @@
     //   the pipeline one chunk per pass, as without batching, and the budget fills from other requests. The request
     //   still makes one attention call per batch and goes to the back of the round-robin queue.
     batchMaxChunks: 0,
+    // batchShare (round robin, batched): how a batch's budget is split among the requests waiting for it.
+    //   'greedy' = each request popped from the front takes as many of the remaining units as it can fill;
+    //   'fair' = max-min fair share over the requests at the front of the queue (as many as there are units):
+    //   each gets an equal share of the units, a request needing less keeps only what it needs and the rest goes
+    //   to the others, so a request alone takes the whole budget and a long one is held to a share only while
+    //   others are waiting. Units are chunks (fixed layout) or 32*SP granules (variable layout); batchMaxChunks
+    //   still caps every request.
+    batchShare: 'greedy',
     cache: 'slots',        // slots | pool | paging | inf
     // pool lanes per stage, derived from r = the most requests a batch (one pipeline pass) holds (1 without
     //   batching, the chunk units per batch with fixed-layout batching; every request in a batch needs its own lane)
@@ -606,6 +614,7 @@
     for (const k of ['hostDramGBPerGalaxy', 'ssdTBPerGalaxy']) if (!(cfg[k] >= 0)) errors.push(`${k} must be >= 0`);
     for (const k of ['pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy']) if (!(cfg[k] > 0)) errors.push(`${k} must be > 0`);
     if (!(cfg.decodeConcurrency >= 0)) errors.push('decode concurrency must be >= 0 (0 = unlimited)');
+    if (!['greedy', 'fair'].includes(cfg.batchShare)) errors.push(`batchShare must be 'greedy' or 'fair', got ${cfg.batchShare}`);
     if (!(cfg.batchMaxChunks >= 0) || cfg.batchMaxChunks !== Math.floor(cfg.batchMaxChunks)) errors.push('max chunks per request per batch must be a whole number >= 0 (0 = no limit)');
     // every buffer that must hold a whole request has to fit the largest AgentX request (990,016 tokens)
     if (cfg.cache === 'slots' && cfg.slotLen < MAX_REQ) errors.push(`slots must hold the largest request (${MAX_REQ} tokens)`);
@@ -1217,6 +1226,30 @@
           rep.queue = keep;
         }
         const again = [];
+        if (cfg.batch && cfg.batchShare === 'fair') {
+          const unit = fixed ? C : plan.gran, U = Math.floor(budget / unit), cand = [];
+          for (const q of rep.active) { // the front requests, one unit each at least, that get a lane
+            if (cand.length >= U) break;
+            if (rrPool && !laneGet(q, rep)) break; // no lane free: a lane release re-pumps
+            cand.push(q);
+          }
+          const need = cand.map((q) => Math.min(Math.ceil(q.rem / unit), perReq / unit));
+          const alloc = need.map(() => 0); let left = U;
+          const order = need.map((_, i) => i).sort((a, b) => need[a] - need[b]);
+          order.forEach((i, k) => { alloc[i] = Math.min(need[i], Math.floor(left / (cand.length - k))); left -= alloc[i]; });
+          for (let more = true; left > 0 && more;) { // rounding leftovers, one unit at a time in queue order
+            more = false;
+            for (let i = 0; left > 0 && i < cand.length; i++) if (alloc[i] < need[i]) { alloc[i]++; left--; more = true; }
+          }
+          cand.forEach((q, i) => {
+            rep.active.shift();
+            take(q, alloc[i] * unit);
+            if (rrPool) Object.assign(segs[segs.length - 1], q.seg);
+            if (q.rem > 0) again.push(q);
+          });
+          for (const q of again) rep.active.push(q);
+          return segs.length ? { segs, T } : null;
+        }
         while (rep.active.length && room()) {
           const q = rep.active[0];
           if (rrPool && !laneGet(q, rep)) break; // no lane free: a lane release re-pumps

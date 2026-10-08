@@ -139,6 +139,22 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   assert.ok(u.pfStarvedSlotFrac === 0 && u.pfStarvedDecodeFrac === 0 && u.sendBlockFrac > 0);
 }
 
+// 10c. batchShare 'fair': max-min fair split of each batch; a request cut short by its share holds the largest share in
+//      its batch (within one chunk); a request alone takes the whole budget; the default ('greedy') is unchanged
+{
+  const cfg = Object.assign({ cache: 'inf', batch: true, budget: 8192 }, base, { concurrency: 256, chunk: 512 });
+  let bad = 0, multi = 0, alone = 0;
+  const f = SIM.simulate(TR, cal, Object.assign({ batchShare: 'fair' }, cfg), { onChunk: (t, segs) => {
+    const tot = segs.reduce((a, s) => a + s.npad, 0), mx = Math.max(...segs.map((s) => s.npad));
+    if (tot > 8192) bad++;
+    if (segs.length > 1) { multi++; for (const s of segs) if (!s.last && s.npad < mx - 512) bad++; }
+    else if (!segs[0].last && segs[0].npad === 8192) alone++;
+  } });
+  const g = SIM.simulate(TR, cal, cfg), d = SIM.simulate(TR, cal, Object.assign({ batchShare: 'greedy' }, cfg));
+  assert.ok(bad === 0 && multi > 0 && alone > 0 && f.avgSegsPerChunk > g.avgSegsPerChunk, `fair: bad ${bad} multi ${multi} alone ${alone}`);
+  assert.ok(g.usefulTps === d.usefulTps && SIM.makePlan(Object.assign({}, cfg, { batchShare: 'x' }), cal).errors.length > 0);
+}
+
 // 11. batchMaxChunks: a request never takes more than that many chunk units of one batch; 0 is the default (no
 //     limit) and leaves results unchanged; with a cap of 1, unloaded TTFT matches no batching closely
 {

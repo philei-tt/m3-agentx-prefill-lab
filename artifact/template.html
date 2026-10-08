@@ -219,6 +219,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="hint">Default: requests per batch × copy buffers (sequential 1, double 2, triple 3); with a global lane table, stages × requests per batch (sequential copies only). Variable-layout batching must override.</div>
     <div class="row check"><input id="batchDynShape" type="checkbox"><label for="batchDynShape">Dynamic batch size (no padding to the budget)</label></div>
     <div class="hint">On: a partly filled batch runs at its actual size (untraced). Off: it is padded to the full budget, as tracing requires.</div>
+    <div class="row"><label for="batchShare">Batch sharing</label><select id="batchShare"><option value="greedy">greedy (front request fills what it can)</option><option value="fair">fair share among waiting requests</option></select></div>
+    <div class="hint">Fair: the budget is split max-min fairly among the requests waiting at the front of the queue; a request alone takes the whole budget, a long one is held to an equal share only while others wait (round robin only).</div>
     <div class="row"><label for="batchMaxChunks">Max chunks per request per batch (0 = no limit)</label><input id="batchMaxChunks" type="number" min="0" step="1"></div>
     <div class="hint">How many chunk units one request may take in one batch. 0: as many as it can fill, so a long request goes through the pipeline in budget-sized passes. 1: one chunk per pass, as without batching (same TTFT for long requests), with the budget filled from other requests.</div>
     <div class="row"><label for="attn">Attention</label><select id="attn"><option value="seq">sequential per request</option><option value="fused">fused multi-user</option></select></div>
@@ -768,7 +770,7 @@ function mkWorker() {
 }
 
 // ---------------------------------------------------------------- form <-> cfg
-const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'batchDynShape', 'batchMaxChunks', 'attn', 'kvDedup', 'prefetchKV', 'policy',
+const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'batchDynShape', 'batchShare', 'batchMaxChunks', 'attn', 'kvDedup', 'prefetchKV', 'policy',
   'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeConcurrency', 'duration', 'seed'];
 const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchMaxChunks', 'lanes', 'arenaTokens', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeConcurrency', 'duration', 'seed']);
 function setForm(cfg) {
@@ -808,7 +810,7 @@ function syncUi() {
   $('lanes').disabled = !pool || $('laneArena').checked;
   // every cache can batch; static slots need requests per batch x stages slots (makePlan reports out of memory)
   $('batch').disabled = false; $('batchHint').hidden = $('cache').value !== 'slots';
-  $('budget').disabled = !$('batch').checked; $('attn').disabled = !$('batch').checked; $('batchDynShape').disabled = !$('batch').checked; $('batchMaxChunks').disabled = !$('batch').checked;
+  $('budget').disabled = !$('batch').checked; $('attn').disabled = !$('batch').checked; $('batchDynShape').disabled = !$('batch').checked; $('batchMaxChunks').disabled = !$('batch').checked; $('batchShare').disabled = !$('batch').checked || $('policy').value !== 'rr';
   // pool lanes per stage (as makePlan): derived = copy-mode buffers x requests per batch; the override is for batching
   // on the pool only, and variable-layout batching (no chunk units) must override
   const fixedLanes = pool && !$('laneArena').checked, batched = $('batch').checked;
