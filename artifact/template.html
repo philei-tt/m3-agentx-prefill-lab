@@ -397,7 +397,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li><b>C:</b> chunk 2048, same split as B.</li>
         </ul>
         Each run measures a (new tokens × cached tokens) matrix, loaded and idle. The preset <span class="mono">today-C</span> is run C.</li>
-      <li><b>Features under consideration</b> (defined in "Features" below): batching several requests per pipeline pass; slot lanes plus a paged KV pool; variable chunk size with an all-to-all KV write; plus a few more the study adds (SSD KV tier, index-cache layout, async stage handoff, and others).</li>
+      <li><b>Features under consideration</b> (defined in "Features" below): batching several requests per pipeline pass; slot lanes plus a paged KV pool; variable chunk size with an all-to-all KV write; plus a few more the study adds (KV offload tiers, index-cache layout, async stage handoff, and others).</li>
     </ul>
 
     <h2 id="m-metric">The metric: goodput</h2>
@@ -507,7 +507,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li><b>Lane table ("Lane table" control).</b>
             <ul>
               <li><b>Per stage (default):</b> each stage allocates a lane only while it works through the request's chunks. That's about 1–3 chunks' worth of requests per stage.</li>
-              <li><b>Global, like today's slot_id:</b> a lane is held on every stage for the request's whole trip through the pipeline, so you need stages × requests-per-batch lanes, and its copies can only be sequential. On the best 4-galaxy config a global lane table drops goodput from 45.1k to 13.6k.</li>
+              <li><b>Global, like today's slot_id:</b> a lane is held on every stage for the request's whole trip through the pipeline, so you need stages × requests-per-batch lanes, and its copies can only be sequential. On the best 4-galaxy config with today's kernels a global lane table drops goodput from 60.7k to 15.5k.</li>
               <li>Each stage keeps its own KV tensors, so a per-stage table is feasible. It is a prerequisite for combining the pool with batching.</li>
             </ul>
           </li>
@@ -559,7 +559,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Dynamic batch size</b> (on by default). Decides what a batch that is not full costs, e.g. a single request. On, it runs at the tokens it holds, rounded up to whole chunks (fixed layout) or 32·SP (variable layout), as ops do without tracing. Off, it is padded to the full budget, as a traced build with one fixed shape must be.
         <ul>
           <li>Off, every batched chunk has one static budget-sized shape. A partly filled batch pays for the whole budget in every token-proportional op and in the stage-to-stage send. Routed MoE ops still trim to the real tokens, as they do for a padded chunk tail today.</li>
-          <li>With few requests per batch this hurts large budgets: on today's 4-galaxy config with pool and SSD tier, a static 16k shape drops 28.0k → 15.5k, below no batching (23.0k).</li>
+          <li>With few requests per batch this hurts large budgets: on today's 4-galaxy config with pool and the old 1 TB SSD tier, a static 16k shape drops 28.0k → 15.5k, below no batching (23.0k).</li>
           <li>There a static 4k shape loses 3% and 8k loses 9%. On the best stacks, which fill batches better, static 8k is within 1% and static 16k costs 0–6%.</li>
         </ul>
       </li>
@@ -577,7 +577,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <ul>
       <li><b>Slot lanes + paged pool:</b> replaces static slots (see KV cache): 4 fixed 1M lanes per stage.</li>
       <li><b>Variable-size lanes (arena):</b> lanes allocated at the request's actual length from a contiguous arena (2-8M tokens) instead of 1M each.</li>
-      <li><b>SSD KV tier:</b> see KV cache. In the study it requires the paged pool; the simulator also supports it behind static slots.</li>
+      <li><b>KV offload tiers:</b> see KV cache. They work behind static slots as well as the paged pool; in the study they are the first roadmap step in every scenario.</li>
       <li><b>Not a feature: bounded dense gather.</b> Earlier versions listed bounding the dense ring-joint gather to [0, kv_len) as a P0 feature. The op already does this (tt-metal #47539), so it is part of today's baseline, and the old whole-lane behaviour is only a sensitivity row.</li>
       <li><b>Not a feature: unaligned resume.</b> Resuming at any 32-token boundary instead of rounding the cached prefix down to a chunk multiple (with chunk 2048 the rounding discards about 1024 cached tokens per request). It is merged (tt-metal #57636; validated on 5 layers, the full 60-layer two-turn accuracy check is still to run), so the simulator always resumes unaligned (<span class="mono">node run.js --set unaligned=false</span> still models the old rounding). The variable layout includes it anyway.</li>
       <li><b>index_k stored once:</b> the index-key cache is kept on one TP column instead of all four, and gathered when needed. This cuts KV size from 2112 to 1344 B per token per layer.</li>
@@ -607,14 +607,13 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Sensitivity.</b> The best configuration re-run with:
         <ul>
           <li>other seeds (about ±5% noise);</li>
-          <li>0.5 or 2 TB of SSD tier per galaxy;</li>
-          <li>16 or 256 GB/s of SSD bandwidth per galaxy;</li>
+          <li>no host DRAM tier, 8 TB of SSD per galaxy, PCIe at 181 GB/s per galaxy (x8 relay), or half the SSD bandwidth;</li>
           <li>decode at 90 or 360 tok/s;</li>
           <li>a 6 GB reserve per chip;</li>
           <li>a TP=4-only mesh.</li>
         </ul>
-        Faster decode raises prefill goodput because requests finish sooner, fewer lanes carry the same load, and less KV is live.</li>
-      <li><b>[4,2] stages</b> (TP=2) win the grids by 1-10%. The current KV cache assumes one KV head per chip (TP=4), so they need a KV-head sharding change.</li>
+        With roofline kernels faster decode raises prefill goodput, because requests finish sooner and less KV is live; with today's kernels it moves goodput within seed noise.</li>
+      <li><b>[4,2] stages</b> (TP=2) win three of the four grids by 2-12% (at 4 galaxies with roofline kernels, 4×[8,4] stages win by 3%). The current KV cache assumes one KV head per chip (TP=4), so they need a KV-head sharding change.</li>
     </ul>
 
     <h2 id="m-read">Reading the Explore tab</h2>
@@ -1234,7 +1233,7 @@ function renderRoadmap() {
   $('roadHead').innerHTML = `<h2>What moves goodput on AgentX</h2>
   <p>Goodput = useful tok/s with p90 TTFT ≤ ${STUDY.slo} s. Baseline → best configuration found: <b>4 galaxies</b> ${fmtK(g0.greedy[0].goodput)} → <b>${fmtK(g0.grid[0].goodput)}</b> with today's kernels, ${fmtK(g1.grid[0].goodput)} with roofline kernels; <b>8 galaxies</b> ${fmtK(h0.greedy[0].goodput)} → <b>${fmtK(h0.grid[0].goodput)}</b> today, ${fmtK(h1.grid[0].goodput)} with roofline kernels.</p>
   <p>P0 features: ${top.map((k) => `<span class="pill p0">${esc(k)}</span>`).join(' ')}. The ordering, gains and complexity are below; hover the orange ticks for the infinite-cache ceiling of each step.</p>
-  <p>On AgentX traffic, KV-cache capacity limits throughput more than compute: even the best configurations reach only about 40-70% of their own infinite-cache goodput. The features that add effective KV capacity therefore come first: the paged pool, the SSD KV tier and the index-cache layout. "Today's kernels" / "roofline kernels", greedy vs leave-one-out, tiers and scope are defined in the <a href="#method">Method</a> tab.</p>`;
+  <p>On AgentX traffic, KV-cache capacity is the first wall, so the features that add effective KV capacity come first: the KV offload tiers (host DRAM + SSD) and the paged pool. With them the best configurations reach 97-99% of their own infinite-cache goodput with today's kernels and about 88% with roofline kernels, where reading KV back from the tiers is the next limit. After that, compute features (async handoff, batching, variable chunk) matter most. "Today's kernels" / "roofline kernels", greedy vs leave-one-out, tiers and scope are defined in the <a href="#method">Method</a> tab.</p>`;
 }
 
 // ---------------------------------------------------------------- model tab
