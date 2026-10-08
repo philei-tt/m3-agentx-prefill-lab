@@ -1072,7 +1072,6 @@ function render() {
       `Input tokens: ${fmtUsd(e.inUsd)} (${fmtUsd(h.cachedUsd)} cache + ${fmtUsd(h.newUsd)} new)`,
       `Output tokens: ${isFinite(e.outUsd) ? fmtUsd(e.outUsd) : '– (needs a live run)'}`,
       `<span title="${runGalaxies()} prefill + ${e.decodeUsd / Math.max(1e-9, cost().galaxyUsdPerH)} decode galaxies">Cost: ${fmtUsd(e.cost)} (${runGalaxies() + cost().decodeGalaxies} galaxies)</span>`,
-      ...(Object.assign({}, SIM.DEFAULTS, run && run.cfg).decodeSlots > 0 ? [] : ['decode slots unlimited: set them to what the decode galaxies hold']),
     ].join('<br>') : ''],
     ['Peak useful', R && R.peak ? fmtK(R.peak.usefulTps) : '–', 'any TTFT', R && R.peak ? `C = ${R.peak.conc}, p90 ${fmtS(R.peak.ttftP90)} s` : ''],
     ['Wasted compute', sp && sp.proc ? pct((sp.rep + sp.pad) / sp.proc, 1) : '–', at('of processed tokens'), sp && sp.proc ? `re-prefill ${pct(sp.rep / sp.proc, 1)} · padding ${pct(sp.pad / sp.proc, 1)}` : ''],
