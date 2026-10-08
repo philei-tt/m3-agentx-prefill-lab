@@ -188,7 +188,11 @@ Each layer is decomposed into the ops the implementation runs.
 * `reserveGB` per chip plus activation buffers;
 * KV: 1088 B/token/layer for K/V (bf8), plus index_k at 128 × (2 B bf16 | 1.0625 B bf8) × (TP replicas | 1).
 
-KV capacity is the minimum over stages. At 4 galaxies with bf16 index_k replicated ×4, that is about 21.4M tokens, or 20 static 1M slots.
+KV capacity is the minimum over stages. Defaults:
+* bf8 index_k replicated ×4, as deployed (1632 B/token/layer);
+* a 1 GB reserve, calibrated so that 16×[2,4] with an even split fits 35 × 1M slots, as measured on hardware (Sep 30 2026, 4-MoE-layer stages bind);
+* the default auto split puts 5 layers on some stages and fits 28;
+* the #57827 calibration replays keep bf16 index_k, as those runs used.
 
 Every buffer that must hold a whole request (slots, fixed lanes, the lane arena) must be at least 990,016 tokens, the largest AgentX request; `makePlan` rejects smaller ones.
 
@@ -217,8 +221,8 @@ Every buffer that must hold a whole request (slots, fixed lanes, the lane arena)
     | pinned PCIe host memory: 1 GiB hugepage channel per chip (tt-metal/UMD picks min(4, chips per MMIO device) = 1 on a Galaxy, where every chip has its own PCIe link) | 34 GB | `hostPinnedGBPerChip` |
     | this galaxy's share of the model weights (host copies while loading / reloading) | 33 GB at 8 galaxies, 67 GB at 4 | `hostStageWeights` |
 
-    That leaves about **371 GB of KV per galaxy at 8 galaxies** (37M tokens per pipeline at 80.6 KB/token, next to 56M of device pool) and 337 GB at 4 galaxies (17M tokens, next to 20M). Set `hostDramGBPerGalaxy: 0` to drop the host tier. The AgentX rules cap host DRAM per system; check that cap against this budget.
-  * **SSD** `ssdTBPerGalaxy` 32 TB (4 E1.S bays; shipped systems carry 4 × 7.68 TB Samsung PM9D3a, MZTL67T6HBLC = 30.7 TB): 3.2B tokens at 8 galaxies. Bandwidth `ssdReadGBsPerGalaxy` 31.5, `ssdWriteGBsPerGalaxy` 27.2 GB/s: the [PM9D3a](https://semiconductor.samsung.com/ssd/datacenter-ssd/pm9d3a/) reads up to 12,000 MB/s and writes up to 6,800 MB/s at PCIe 5.0 x4, but Rev C chassis run the E1.S links at Gen4 x4 (a BIOS setting in the Exabox provisioning runbook), which caps a read at 7.88 GB/s per drive. Reads and writes share the drives.
+    That leaves about **371 GB of KV per galaxy at 8 galaxies** (40M tokens per pipeline at 73.4 KB/token off device, next to 77M of device pool) and 337 GB at 4 galaxies (18M tokens, next to 29M). Set `hostDramGBPerGalaxy: 0` to drop the host tier. The AgentX rules cap host DRAM per system; check that cap against this budget.
+  * **SSD** `ssdTBPerGalaxy` 16 TB (planned hardware; 4 E1.S bays, shipped systems carry 4 × 7.68 TB Samsung PM9D3a, MZTL67T6HBLC = 30.7 TB): 1.7B tokens at 8 galaxies. Bandwidth `ssdReadGBsPerGalaxy` 31.5, `ssdWriteGBsPerGalaxy` 27.2 GB/s: the [PM9D3a](https://semiconductor.samsung.com/ssd/datacenter-ssd/pm9d3a/) reads up to 12,000 MB/s and writes up to 6,800 MB/s at PCIe 5.0 x4, but Rev C chassis run the E1.S links at Gen4 x4 (a BIOS setting in the Exabox provisioning runbook), which caps a read at 7.88 GB/s per drive. Reads and writes share the drives.
   * **PCIe** `pcieGBsPerGalaxy` 63 GB/s each way, full duplex (fetches and write-backs do not share it). Per tray, one chip has a Gen5 x8 host link and seven have x1 links that train at Gen4 (user guide: "PCIe Gen5 1x8 and 7x1"; Quanta S7TK product spec: "7x1 PCIe G4"). KV is spread evenly over the chips and each chip moves its own share over its own link, so the x1 chips set the pace: 32 × 1.97 GB/s. Relaying through each tray's x8 chip over Ethernet would allow up to 4 × (31.5 + 7 × 1.97) = 181 GB/s; no software does that today.
   * Not modelled: host DRAM bandwidth (6 channels of DDR5-4800, about 230 GB/s, above the links' combined peak), SSD endurance and per-IO latency. A device page counts as free as soon as its write-back is queued. Runs report `hostReadTps`, `ssdReadTps` and the busy share of each link (`pcieH2DUtil`, `pcieD2HUtil`, `ssdUtil`).
 * **`inf`**: infinite cache.
@@ -234,11 +238,16 @@ Every buffer that must hold a whole request (slots, fixed lanes, the lane arena)
   * Copy-in: a request whose lane still holds its context, i.e. no other request has used that lane since its last turn, skips the copy-in. On a miss it takes a free lane (an empty one first, else the least recently used) and copies its whole context so far in. Arena lanes always copy in. Results report `rrLaneReuse` (share of continuation turns that skipped the copy-in) and `rrCopyInTps`. Copying in every turn instead made no measurable difference to goodput (≤0.5%, even with sequential copies), so it is not an option.
   * Round robin on the pool, and paging under rr, pin the cached prefix of every request in progress. A request is admitted only while the pool can hold all in-progress requests in full; until then it waits in the queue. This matches tt-d-gen, where admission needs a free slot, a full pool queues the request rather than rejecting it, and in-flight slots are never evicted.
 
-## Findings (study of Oct 7 2026: KV offload tiers (host DRAM + 32 TB SSD per galaxy) behind static slots, round-robin scheduling, sequential pool copies, derived lane counts, unaligned resume in the baseline; decode 180 tok/s, AIPerf-exact replay, `results/study.json`)
+## Findings (study of Oct 8 2026: deployed memory defaults (bf8 index_k, 1 GB reserve), KV offload tiers (host DRAM + 16 TB SSD per galaxy) behind static slots, round-robin scheduling, sequential pool copies, derived lane counts, unaligned resume in the baseline; decode 180 tok/s, AIPerf-exact replay, `results/study.json`)
 
 Goodput in useful tok/s at p90 TTFT ≤ 10 s. "Today" = 16×[2,4] (or 32×[2,4]), chunk 2048, auto split, static 1M slots, round-robin scheduling, unaligned resume.
 
 **Changes from the previous study (Oct 1):**
+* **Memory defaults match the deployment.**
+  * index_k is bf8, the dtype the runner deploys; bf16 is rejected. "index_k bf8" is no longer a roadmap feature; the bf16 sensitivity row shows what it would cost.
+  * The per-chip reserve is 1 GB instead of 3. That reproduces the hardware slot fit: 35 × 1M slots on 16×[2,4] with an even split (Sep 30 2026), 70 on 8 galaxies.
+  * Today's auto split (up to 5 layers per stage) fits 28 slots on 4 galaxies, where the old defaults gave 20.
+  * The #57827 calibration replays keep bf16 index_k, as those runs used. Validation is unchanged.
 * **The KV offload tiers replace the 1 TB SSD tier.** The Oct 1 study had one 1 TB tier per galaxy at 64 GB/s, shared by reads and writes. Now device evictions go to host DRAM (about 337 GB of KV per galaxy at 4 galaxies, 371 GB at 8) over PCIe (63 GB/s each way), and host DRAM evicts to a 32 TB SSD (31.5 / 27.2 GB/s read / write). Today's baselines have no tier and are unchanged.
 * **The best grid configs rise ×1.35–1.79:** 45.1k → 60.7k, 82.6k → 129k, 104k → 150k, 161k → 289k. The greedy full stacks rise 39.8k / 78.3k / 94.8k / 158k → 48.6k / 122k / 131k / 277k.
   * Re-prefill in the full stack drops from 18–59% of prefilled tokens to 2–4%. The best configs reach 88–99% of their own ∞-cache goodput (Oct 1: 40–75%).
@@ -246,6 +255,28 @@ Goodput in useful tok/s at p90 TTFT ≤ 10 s. "Today" = 16×[2,4] (or 32×[2,4])
 * **With capacity no longer binding, compute features gain.** Batching becomes P0 (×1.44 / ×1.63 at 8 gx today), variable chunk P1 (×1.14 / ×1.17) and the arena P1 (×1.08 leave-one-out at 8 gx today, but ×0.91 at 4 gx today). index_k stored once and bf8 drop to P2: ×1.00–1.01 with today's kernels, though still ×1.04–1.17 with roofline kernels, where tier bandwidth binds.
 * **At 4 gx with roofline kernels the best topology is 4×[8,4]** (129.0k vs 125.3k for 16×[4,2]). The other three best configs are [4,2] stages, as before.
 * The sensitivity runs now vary the tiers: no host DRAM tier, 8 TB SSD per galaxy, PCIe 181 GB/s per galaxy (x8 relay), half SSD bandwidth (they used to vary 0.5 / 2 TB and 16 / 256 GB/s of SSD).
+
+**Changes in the Oct 1 study (from Sep 29 b):**
+* **Unaligned resume is part of today's baseline** (tt-metal #57636, merged): a conversation resumes at any 32-token boundary instead of rounding its cached prefix down to a chunk multiple. It is no longer a roadmap feature.
+  * On top of round robin, today's baselines move 3.3k → 3.4k and 10.9k → 11.1k with today's kernels, 4.6k → 4.8k (15.0k unchanged) with roofline kernels: on static slots the goodput point is set by capacity.
+  * Variable chunk loses the part of its gain that was the rounding loss: at 4 gx today ×1.20 (step #3) → ×1.08 (step #6). It drops to P2, and batching to P1 (×1.19 / ×1.24 at 8 gx today, just under the 1.25 cut).
+  * The best stacks use the variable layout, which unaligned resume does not touch: full stacks, grids and sensitivity rows are unchanged.
+  * Still open on the tt-metal side: #57636 was validated on the first 5 layers (8x4, against a one-pass prefill); the end-to-end two-turn 60-layer PCC check against the CPU reference has not been run yet.
+* **Round-robin scheduling is the base** (the simulator's default, as tt-d-gen) instead of run to completion.
+  * Today's baselines rise: 3.1k → 3.3k and 8.2k → 10.9k with today's kernels, 4.0k → 4.6k and 11.4k → 15.0k with roofline kernels.
+  * Shortest-first run to completion is now ×0.97–1.02 on top of it, where shortest-first scored ×1.01–1.08 over run to completion. Round robin already keeps short requests from waiting behind long ones.
+* **The SSD tier works behind static slots** (a reclaimed slot is written to SSD and read back when its conversation returns), so it no longer needs the pool. It is now the first roadmap step in every scenario (×3.7–6.7), and the pool comes second or third (×1.23–1.52 at its step, ×1.71–1.83 leave-one-out).
+  * **Why the pool still adds on top** (`tools/tier_diag.js`, `results/tier_diag.txt`: today's 4-gx config, round robin, chunk 2048). Behind slots, SSD capacity stops mattering at 1 TB/gx: 1, 8 and 64 TB all give 16.4k at C=144. Two structural losses remain:
+    * **No prefix sharing across streams.** A slot, and its SSD copy, holds one stream's KV, so a request can only reuse the prefix of its *own* previous request. Sub-agents (42% of requests) re-prefill the context they share with their parent and siblings: hit 94.8–95.4% vs 96.1–96.4% possible. That is 22–26% of all prefill work. The content-addressed pool shares those pages.
+    * **Slot churn.** About 20 slots of 1M tokens fit on device, so almost every request swaps a slot: it writes the evicted stream's whole KV to SSD and reads its own whole prefix back.
+      * SSD reads in the window: 494M tokens vs 14M with pool + SSD at C=128 (504M vs 104M at each one's goodput point).
+      * In-flight prefill is capped at the slot count.
+      * The admission waits push p90 TTFT up early (21–29 s vs 9–10 s at C=256).
+    * Result: pool + SSD reaches 24.9k (1 TB/gx) to 25.2k (8 TB/gx) at C≈250, essentially the infinite-cache 25.7k, vs 16.4k for slots + SSD.
+    * At the same concurrency it also processes fewer tokens for the same useful work: at C=128, 19.4k vs 23.5k processed for 15.3k useful. Its higher processed rate at the goodput point comes from running at higher load, not from waste.
+* **Pool copies are sequential by default, and lanes per stage are derived** (1 per stage without batching). With batching the study keeps 4 lanes, and the grid tries 2/4/6.
+* **A global lane table allows only sequential copies.** It now costs more: at 8 gx with roofline kernels the best config drops 161k → 46k.
+* The best grid configs move by at most 3%: 45.1k / 82.6k / 104k / 161k. All four are [4,2] stages.
 
 Earlier studies are kept on exabox under `/data/philei/m3_traffic_sim/results/`, which is not in git. The tables below are printed by `node tools/feature_table.js`.
 
@@ -321,7 +352,7 @@ Complexity is a rough judgement of how much of the stack a feature touches:
 
 It is not a time estimate and has not been checked with the code owners.
 
-| tier | feature | 4gx today | 4gx roofline | 8gx today (ranking) | 8gx roofline | complexity |
+| tier | feature | 4 galaxies, today's kernels | 4 galaxies, roofline kernels | 8 galaxies, today's kernels (ranking) | 8 galaxies, roofline kernels | complexity |
 |---|---|---|---|---|---|---|
 | P0 | KV offload tiers (host DRAM + 32 TB SSD/gx) | ×4.83 #1 / ×2.31 | ×9.91 #1 / ×2.60 | ×3.99 #1 / ×2.23 | ×5.51 #1 / ×2.79 | high |
 | P0 | slot lanes + paged KV pool | ×1.54 #2 / ×1.90 | ×1.24 #3 / ×1.76 | ×1.22 #3 / ×2.22 | ×1.38 #3 / ×2.27 | high |

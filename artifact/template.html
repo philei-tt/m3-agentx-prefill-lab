@@ -500,7 +500,19 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
 
     <h2 id="m-kv">KV cache</h2>
     <ul>
-      <li><b>KV size.</b> Per token per layer: K and V cost 1088 B (bf8). The index-key cache costs 128 values × 2 B (bf16) and is today stored on all 4 TP columns, so 1024 B. Total 2112 B per token per layer, about 127 KB per token over 60 layers, about 133 GB for one 1M-token context. Four galaxies hold about 21.5M tokens of KV after weights and reserves, which is <b>20 static 1M slots</b>.</li>
+      <li><b>KV size.</b> Per token per layer:
+        <ul>
+          <li>K and V cost 1088 B (bf8).</li>
+          <li>The index-key cache costs 128 values × 1.0625 B (bf8, the deployed dtype) and is today stored on all 4 TP columns, so 544 B.</li>
+          <li>Total 1632 B per token per layer: about 98 KB per token over 60 layers, about 103 GB for one 1M-token context.</li>
+        </ul>
+        Capacity is set by the stage holding the most layers.
+        <ul>
+          <li>Four galaxies with an even split (4 layers per stage) hold <b>35 static 1M slots</b>, matching the hardware measurement.</li>
+          <li>With the default auto split (up to 5 layers per stage) they hold <b>28</b>.</li>
+          <li>The calibration runs used bf16 index_k (1024 B), which the model keeps for replaying them.</li>
+        </ul>
+      </li>
       <li><b>Static slots</b> (today). A conversation owns one 1M slot while it is resident. A new conversation takes a free slot or evicts the least recently used idle one. A hit is the prefix shared with that conversation's previous request, resumed at any 32-token boundary (unaligned resume, tt-metal #57636). Slots are never shared across conversations.</li>
       <li><b>Slot lanes + paged pool.</b> A few <b>lanes</b> per stage are the contiguous KV buffers the attention kernels run on (fixed 1M each, or sized per request in an arena). All other memory is a <b>paged pool</b>: content-addressed pages shared by every conversation that has the same prefix, evicted by exact least-recently-used order. Before a request runs, its cached prefix is copied from the pool into its lane; afterwards the new tokens are copied back. The copies are DRAM-bound. By default they run on the stage before the chunk (sequential); double or triple buffering overlaps them with compute and charges 25% of their time for bandwidth contention.
         <ul>
@@ -527,8 +539,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
         <ul>
           <li><b>Mechanism (pool and paging).</b> When the device pool evicts a page, it moves to host DRAM over PCIe; when host DRAM is full, its least recently used pages move to SSD; when SSD is full, they are dropped. The tiers are exclusive. A later hit is read back into the request's lane while the request waits in the queue: host pages over PCIe, SSD pages from the drives and then over PCIe. Index keys are stored once off device, not per TP column.</li>
           <li><b>Static slots.</b> When a slot is reclaimed, its conversation's KV goes to host DRAM (the new occupant waits for the PCIe write-back), overflowing to SSD, and that conversation's next request reads the prefix it shares back before it is admitted. One copy per conversation: nothing is shared between conversations, unlike pool pages.</li>
-          <li><b>Host DRAM for KV.</b> The Galaxy Blackhole host has 576 GB (6 × 96 GB DDR5-4800). Kept back: 10% headroom, 16 GB for the OS and services, 32 GB for the model's runtime (tt-metal, inference server, program caches), 32 GB of staging for KV migration to decode, 1 GiB of pinned memory per chip (tt-metal's PCIe host channel, 32 GiB), and this galaxy's share of the model weights (about 33 GB at 8 galaxies, 67 GB at 4). That leaves about 370 GB of KV per galaxy at 8 galaxies, 340 GB at 4: about 37M and 17M tokens per pipeline, against 56M and 20M tokens of device pool.</li>
-          <li><b>SSD.</b> 32 TB per galaxy by default (shipped systems: 4 × 7.68 TB Samsung PM9D3a E1.S = 30.7 TB): 3.2B tokens at 8 galaxies.</li>
+          <li><b>Host DRAM for KV.</b> The Galaxy Blackhole host has 576 GB (6 × 96 GB DDR5-4800). Kept back: 10% headroom, 16 GB for the OS and services, 32 GB for the model's runtime (tt-metal, inference server, program caches), 32 GB of staging for KV migration to decode, 1 GiB of pinned memory per chip (tt-metal's PCIe host channel, 32 GiB), and this galaxy's share of the model weights (about 33 GB at 8 galaxies, 67 GB at 4). That leaves about 370 GB of KV per galaxy at 8 galaxies, 340 GB at 4: about 40M and 18M tokens per pipeline at 73.4 KB per token, against 77M and 29M tokens of device pool.</li>
+          <li><b>SSD.</b> 16 TB per galaxy by default, the planned hardware (shipped systems carry 4 × 7.68 TB Samsung PM9D3a E1.S = 30.7 TB): about 1.7B tokens at 8 galaxies.</li>
           <li><b>Bandwidth.</b> PCIe is full duplex, so fetches (host → device) and write-backs (device → host) each get 63 GB/s per galaxy: per tray, one chip has a Gen5 x8 link and seven have x1 links at Gen4 (1.97 GB/s), and since KV is spread evenly over the chips, the x1 chips set the pace (32 × 1.97). Relaying through each tray's x8 chip over Ethernet would allow up to 181 GB/s; no software does that today. The drives give 31.5 GB/s read (Rev C runs them at Gen4 x4, 7.88 GB/s each, below the drive's 12 GB/s) and 27.2 GB/s write (6.8 GB/s each); reads and writes share them.</li>
           <li><b>Not modelled:</b> SSD write endurance and per-IO latency; host DRAM bandwidth (6 channels of DDR5-4800, about 230 GB/s, above the links' combined peak); a device page is assumed free as soon as its write-back is queued.</li>
           <li><b>AgentX.</b> The methodology caps host <i>DRAM</i> per system; check how it treats SSD-backed KV before relying on large tiers.</li>
@@ -607,9 +619,10 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Sensitivity.</b> The best configuration re-run with:
         <ul>
           <li>other seeds (about ±5% noise);</li>
-          <li>no host DRAM tier, 8 TB of SSD per galaxy, PCIe at 181 GB/s per galaxy (x8 relay), or half the SSD bandwidth;</li>
+          <li>no host DRAM tier; 1, 4 or 64 TB of SSD per galaxy; PCIe at 181 GB/s per galaxy (x8 relay); or half the SSD bandwidth;</li>
           <li>decode at 90 or 360 tok/s;</li>
-          <li>a 6 GB reserve per chip;</li>
+          <li>a 3 GB reserve per chip;</li>
+          <li>index_k in bf16, as in the calibration runs;</li>
           <li>a TP=4-only mesh.</li>
         </ul>
         With roofline kernels faster decode raises prefill goodput, because requests finish sooner and less KV is live; with today's kernels it moves goodput within seed noise.</li>
@@ -648,7 +661,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Torus rings.</b> Every measurement used line (mesh) collectives, so the ring speed-ups are textbook link-load ratios, not measurements. [4,4] has no profile at all (geometric midpoint of [2,4] and [8,4]).</li>
       <li><b>Decode.</b> A fixed per-request speed, whatever the number of sessions decoding. Decode capacity is a slot count only (Decode KV slots, default unlimited), not KV bytes per context length. KV migration to decode is not modelled.</li>
       <li><b>Extrapolation.</b> Batched chunks above 5120 tokens, meshes without a profile, and stage counts other than 16 are extrapolated. [4,2] stage costs come from a single-stage profile.</li>
-      <li><b>Memory figures are approximate.</b> The 3 GB per-chip reserve and the activation-buffer estimate are approximations.</li>
+      <li><b>Memory is calibrated to one measurement.</b> The 1 GB per-chip reserve reproduces the measured slot fit: 35 × 1M slots on 16×[2,4] with bf8 index_k and an even layer split, where stages with 4 MoE layers bind. The default auto split puts 5 MoE layers on some stages and fits 28. Weights and activation buffers are estimates.</li>
       <li><b>Complexity bins are rough</b> and not checked with the code owners.</li>
     </ul>
 

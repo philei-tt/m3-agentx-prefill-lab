@@ -354,7 +354,9 @@
     asyncHandoff: false,   // stage-to-stage D2D overlapped with compute (no blocking send), link-rate transfer
     boundedDense: true,    // dense ring-joint gathers [0, kv_len) (op-bounded since #47539); false = whole lane capacity
     msaLocal: false,       // MSA: SP-local indexer + top-k merge, fetch only selected K/V blocks (no prefix all-gather)
-    idxBf16: true, idxDerep: false, // index_k cache dtype / de-replicated over TP (today: bf16 x TP replicas)
+    // index_k cache dtype / de-replicated over TP. Today: bf8 x TP replicas (the deployed runner rejects bf16); the
+    // #57827 calibration runs used bf16, so the calibration and validation replays pin idxBf16: true
+    idxBf16: false, idxDerep: false,
     chunk: 5120, layout: 'fixed', batch: false, budget: 16384, attn: 'seq', policy: 'rr',
     // kvDedup: a request that takes several C-units of a batched fixed-layout chunk makes ONE attention call (one
     //   gather of its cached prefix); false = one call and one prefix gather per C-unit (today's kernels process
@@ -407,14 +409,16 @@
     //     per direction per galaxy (PCIe Gen4 x1 = 16 GT/s, 128b/130b). Full duplex: fetches (host -> device) and
     //     write-backs (device -> host) do not share it. Routing through each tray's x8 chip over Ethernet would
     //     allow up to 4 x (31.5 + 7 x 1.97) = 181 GB/s, which no software does today.
-    //   - SSD: 4x E1.S NVMe; 32 TB per galaxy (4x 7.68 TB Samsung PM9D3a MZTL67T6HBLC = 30.7 TB in shipped
-    //     systems). PM9D3a: up to 12,000 MB/s sequential read, 6,800 MB/s write (Samsung datasheet, PCIe 5.0 x4);
+    //   - SSD: 4x E1.S NVMe; 16 TB per galaxy (planned hardware; shipped systems carry 4x 7.68 TB Samsung PM9D3a
+    //     MZTL67T6HBLC = 30.7 TB). PM9D3a: up to 12,000 MB/s sequential read, 6,800 MB/s write (Samsung datasheet, PCIe 5.0 x4);
     //     Rev C chassis run the E1.S links at Gen4 x4 (7.88 GB/s, BIOS setting in the Exabox runbook), so 4x 7.88 =
     //     31.5 GB/s read and 4x 6.8 = 27.2 GB/s write. Reads and writes share the drives (one queue, conservative).
     hostTier: false, hostDramGBPerGalaxy: 576, hostHeadroom: 0.1, hostOsGB: 16, hostRuntimeGB: 32, hostKvStagingGB: 32,
     hostPinnedGBPerChip: 1.073741824, hostStageWeights: true,
-    ssdTBPerGalaxy: 32, ssdReadGBsPerGalaxy: 31.5, ssdWriteGBsPerGalaxy: 27.2, pcieGBsPerGalaxy: 63,
-    reserveGB: 3, expertImb: IMB0, maxInflight: 0,
+    ssdTBPerGalaxy: 16, ssdReadGBsPerGalaxy: 31.5, ssdWriteGBsPerGalaxy: 27.2, pcieGBsPerGalaxy: 63,
+    // reserveGB: per-chip DRAM kept free besides the modelled weights and activations; 1 GB reproduces the measured
+    // slot fit (35 x 1M slots on 16x[2,4], bf8 index_k, even split; CCL scratch + transient buffers)
+    reserveGB: 1, expertImb: IMB0, maxInflight: 0,
     // decodeSlots: KV slots on the decode side (0 = unlimited). A request takes one before it may start prefill (it
     //   waits in FIFO order, inside its TTFT, while all are held) and frees it when decode ends: prefill only runs
     //   requests decode has room for. As in tt-d-gen, which needs the decode slot up front to start KV migration
@@ -1560,7 +1564,8 @@
   // Matrix-cell replay (validation vs the #57827 tables): U users stream (cached, new) requests
   // ------------------------------------------------------------------------------------------------------
   function matrixCell(cal, cfgIn, cached, nnew, users, reqsPerUser) {
-    const plan = makePlan(Object.assign({ cache: 'inf', batch: false, layout: 'fixed' }, cfgIn), cal);
+    // the #57827 matrix runs used bf16 index_k (M3_INDEX_CACHE_BF16=1)
+    const plan = makePlan(Object.assign({ cache: 'inf', batch: false, layout: 'fixed', idxBf16: true }, cfgIn), cal);
     const S = plan.S, C = plan.cfg.chunk, out = new Float64Array(S);
     const cap = cached + 51200;
     const cachedA = Math.floor(cached / C) * C;
@@ -1601,7 +1606,7 @@
     const pts = { 5120: [], 2048: [] };
     for (const run of ['A', 'B', 'C']) {
       const r = data.pipeline[run]; const T = r.chunk; const counts = r.layers.split(',').map(Number);
-      const plan = makePlan({ chunk: T, split: counts, stages: 16, cache: 'inf' }, cal);
+      const plan = makePlan({ chunk: T, split: counts, stages: 16, cache: 'inf', idxBf16: true }, cal); // runs used bf16 index_k
       for (const row of data.tables[run]) {
         if (row.new > T || row.loaded_steady_processed_tps == null) continue;
         const cell = (r.cells || []).find((c) => c.cached === row.cached && c.new === row.new);

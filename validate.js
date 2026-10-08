@@ -32,7 +32,7 @@ console.log('== per-rank stage ms: model / measured  (16 x [2,4])');
 const out = { ranks: {}, cells: {} };
 for (const run of ['A', 'B', 'C']) {
   const r = data.pipeline[run]; const counts = r.layers.split(',').map(Number); const T = r.chunk;
-  const plan = SIM.makePlan({ chunk: T, split: counts, stages: 16, cache: 'inf' }, cal);
+  const plan = SIM.makePlan({ chunk: T, split: counts, stages: 16, cache: 'inf', idxBf16: true }, cal); // runs used bf16 index_k
   for (const row of r.rows) {
     const o = new Float64Array(16);
     SIM.chunkStageMs(plan, T, [{ n: T, k: Math.floor(row.cached / T) * T, cap: row.cached + 51200 }], o);

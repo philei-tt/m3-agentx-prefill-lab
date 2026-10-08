@@ -17,8 +17,8 @@ module.exports = {
     notes: 'Prerequisite for the KV offload tiers. The lane count limits how many requests can share a batched chunk.',
   },
   host: {
-    what: 'Two KV tiers behind the device pool or the static slots: host DRAM, then NVMe SSDs in the galaxy hosts. With the pool, pages the device evicts move to host DRAM over PCIe, host DRAM evicts to SSD, and SSD drops; with static slots, a reclaimed slot moves the same way and is read back when its conversation returns (one copy per conversation, no prefix sharing). When a request hits an offloaded prefix, those pages are read back into its lane while the request waits in the queue. Defaults per galaxy: about 370 GB of the 576 GB host DRAM (8 galaxies), 32 TB of SSD, PCIe 63 GB/s each way, SSD 31.5 GB/s read and 27.2 GB/s write.',
-    why: 'M3 KV is about 127 KB per token today (73 KB with the index-cache fixes). 4 galaxies hold about 21M tokens on device, but the live working set of AgentX near the throughput limit is several times larger, so the device pool alone still evicts conversations that come back minutes later. Host DRAM adds about 17M tokens per pipeline at 4 galaxies (37M at 8; tier copies store index_k once, about 81 KB per token), and 32 TB of SSD per galaxy adds billions. A hit costs a read: a 150k-token prefix is about 12 GB, about 50 ms over 4 × 63 GB/s of PCIe from host DRAM, or about 100 ms from SSD at 4 × 31.5 GB/s, done while the request is queued. In the Oct 7 study capacity beyond 8 TB per galaxy changes nothing on the best configs; bandwidth matters with roofline kernels (half the SSD bandwidth costs 22-24%, no host DRAM tier 16-17%) and barely with today\'s kernels (at most 2%).',
+    what: 'Two KV tiers behind the device pool or the static slots: host DRAM, then NVMe SSDs in the galaxy hosts. With the pool, pages the device evicts move to host DRAM over PCIe, host DRAM evicts to SSD, and SSD drops; with static slots, a reclaimed slot moves the same way and is read back when its conversation returns (one copy per conversation, no prefix sharing). When a request hits an offloaded prefix, those pages are read back into its lane while the request waits in the queue. Defaults per galaxy: about 370 GB of the 576 GB host DRAM (8 galaxies), 16 TB of SSD (planned), PCIe 63 GB/s each way, SSD 31.5 GB/s read and 27.2 GB/s write.',
+    why: 'M3 KV is about 98 KB per token on device today (bf8 index_k replicated over TP). 4 galaxies hold about 30M tokens on device, but the live working set of AgentX near the throughput limit is several times larger, so the device pool alone still evicts conversations that come back minutes later. Host DRAM adds about 18M tokens per pipeline at 4 galaxies (40M at 8; tier copies store index_k once, about 73 KB per token), and 16 TB of SSD per galaxy adds over a billion. A hit costs a read: a 150k-token prefix is about 11 GB, about 45 ms over 4 × 63 GB/s of PCIe from host DRAM, or about 100 ms from SSD at 4 × 31.5 GB/s, done while the request is queued. In the Oct 7 study capacity beyond 8 TB per galaxy changes nothing on the best configs; bandwidth matters with roofline kernels (half the SSD bandwidth costs 22-24%, no host DRAM tier 16-17%) and barely with today\'s kernels (at most 2%).',
     todo: [
       'SSD page store with its own LRU and an index from block hash to file offset.',
       'Asynchronous device→SSD write-back on eviction and SSD→device read before admission (GPUDirect-style or a pinned host bounce buffer).',
@@ -27,27 +27,18 @@ module.exports = {
       'Measure sustained PCIe and drive bandwidth per galaxy host: the model assumes each chip moves its own KV over its own link (x1 Gen4 for 28 of 32 chips, 63 GB/s each way per galaxy) and the drives run at Gen4 x4.',
       'Watch write endurance: evictions are written continuously under load.',
     ],
-    notes: 'Works behind the pool or static slots. With 32 TB of SSD, read bandwidth matters more than capacity (the Oct 1 study, with a 1 TB SSD tier at 64 GB/s, found the opposite). Check how the AgentX rules treat host-DRAM and SSD-backed KV (they cap host DRAM per system).',
+    notes: 'Works behind the pool or static slots. With 16 TB of SSD, read bandwidth matters more than capacity (the Oct 1 study, with a 1 TB SSD tier at 64 GB/s, found the opposite). Check how the AgentX rules treat host-DRAM and SSD-backed KV (they cap host DRAM per system).',
   },
   idxdedup: {
-    what: 'The index-key cache used by the MSA indexer (one 128-wide key per token per layer, bf16) is stored on all 4 TP columns. That is 1024 of the 2112 bytes per token per layer: 48% of all KV memory. Store it once per SP row and gather it inside the indexer. The dense layers also allocate a zero-filled index cache, which can be dropped.',
-    why: 'KV per token per layer drops from 2112 to 1344 bytes (−36%), so the same memory holds 57% more tokens. With the offload tiers the working set fits, so the gain is ×1.00-1.01 with today\'s kernels and ×1.11-1.17 with roofline kernels, where smaller KV means less to read back from the tiers. It used to look larger (×1.2-1.3), but part of that was second-tier capacity, and tier copies store index_k once anyway.',
+    what: 'The index-key cache used by the MSA indexer (one 128-wide key per token per layer, bf8) is stored on all 4 TP columns. That is 544 of the 1632 bytes per token per layer: a third of all KV memory. Store it once per SP row and gather it inside the indexer. The dense layers also allocate a zero-filled index cache, which can be dropped.',
+    why: 'KV per token per layer drops from 1632 to 1224 bytes (−25%), so the same device memory holds a third more tokens (more slots, or a bigger pool). KV capacity is what limits goodput on this traffic; the gain is in the Roadmap table. SSD copies already store index_k once.',
     todo: [
       'Allocate index_k sharded over TP (by token blocks) or on one TP column, instead of replicated.',
       'In the indexer, all-gather index keys over TP before scoring, or score per TP shard and merge top-k. The extra traffic is small next to the K/V gather.',
       'Update the KV migration table and the decode-side layout.',
       'PCC.',
     ],
-    notes: 'Stacks with index_k bf8. Its value grows with more lanes (more concurrent contexts).',
-  },
-  idxbf8: {
-    what: 'Store the index-key cache in bf8 (1.0625 B per value) instead of bf16 (2 B).',
-    why: 'KV per token per layer drops from 2112 to 1632 bytes (from 1344 to 1224 with de-replication): about 10-30% more capacity, for ×1.04-1.11 goodput with roofline kernels (×1.00-1.01 with today\'s kernels).',
-    todo: [
-      'bf8 is already the runner\'s default; the measured runs opt into bf16 with M3_INDEX_CACHE_BF16=1.',
-      'Validate that top-k block selection and end-to-end PCC hold at long contexts with bf8 index keys.',
-    ],
-    notes: 'Mostly an accuracy sign-off, not implementation work.',
+    notes: 'Its value grows with more lanes (more concurrent contexts).',
   },
   async: {
     what: 'Today each stage receives a chunk, computes it, then sends the activation to the next stage (about 63 MB for a 5120-token chunk), and the send blocks the stage. Fitted from runs A/B/C: about 23 ms per chunk at 5120 (8 ms at 2048) of blocking send, plus 14-19 ms of hop latency. With async handoff the send overlaps with computing the next chunk.',
