@@ -192,7 +192,7 @@ Each layer is decomposed into the ops the implementation runs.
 KV capacity is the minimum over stages. Defaults:
 * bf8 index_k replicated ×4, as deployed (1632 B/token/layer);
 * a 1 GB reserve, calibrated so that 16×[2,4] with an even split fits 35 × 1M slots, as measured on hardware (Sep 30 2026, 4-MoE-layer stages bind);
-* the default auto split puts 5 layers on some stages and fits 28;
+* the default auto split ([2,3,4×13,3] on 16×[2,4]) also puts at most 4 layers on a stage and fits the same (the split before Oct 8, [1,1,1,4×8,5×5], fit 28);
 * the #57827 calibration replays keep bf16 index_k, as those runs used.
 
 Every buffer that must hold a whole request (slots, fixed lanes, the lane arena) must be at least 990,016 tokens, the largest AgentX request; `makePlan` rejects smaller ones.
@@ -243,6 +243,8 @@ Every buffer that must hold a whole request (slots, fixed lanes, the lane arena)
 ## Findings (study of Oct 8 2026: deployed memory defaults (bf8 index_k, 1 GB reserve), KV offload tiers (host DRAM + 16 TB SSD per galaxy) behind static slots, round-robin scheduling, sequential pool copies, derived lane counts, unaligned resume in the baseline; decode 180 tok/s, AIPerf-exact replay, `results/study.json`)
 
 Goodput in useful tok/s at p90 TTFT ≤ 10 s. "Today" = 16×[2,4] (or 32×[2,4]), chunk 2048, auto split, static 1M slots, round-robin scheduling, unaligned resume.
+
+This study predates the Oct 8 auto split: it ran the old one (each dense layer on its own stage, [1,1,1,4×8,5×5] on 16 stages), which under-rates topologies with fewer stages. Re-run it before reading the topology ranking.
 
 **Changes from the previous studies** (Oct 7: host DRAM + 32 TB SSD, bf16 index_k, 3 GB reserve per chip; Oct 1: one 1 TB SSD tier at 64 GB/s):
 * **Memory defaults match the deployment.**

@@ -460,30 +460,45 @@
     return 2 * M3.Hkv * M3.d * BF8 + M3.di * (cfg.idxBf16 ? BF16 : BF8) * (cfg.idxDerep ? 1 : tp);
   }
 
-  function splitLayers(cfg, S, stageCostFn) {
+  // Layer split over S stages (one entry per stage, summing to L). 'auto' minimises the bottleneck: the most time any
+  //   stage spends per chunk, with model = { tm, td, ov, embed } (ms per MoE / dense layer averaged over the chunks'
+  //   KV lengths, per-stage overhead, stage 0's embedding). In a pipeline each stage's busy time adds up over the
+  //   chunk stream, so throughput follows the stage with the most mean time per chunk. Dense layers (the first
+  //   nDense) may share a stage with each other and with MoE layers. A DP over contiguous partitions finds the least
+  //   bottleneck B; a second DP picks, among the splits with every stage <= B, the one with the least sum of squared
+  //   stage times, so the stages off the bottleneck stay balanced too. O(S L^2) each, about a millisecond.
+  function splitLayers(cfg, S, model) {
     const L = M3.L, D = M3.nDense;
     if (Array.isArray(cfg.split)) return cfg.split.slice();
     const even = () => { const b = Math.floor(L / S), r = L % S; return Array.from({ length: S }, (_, i) => b + (i < r ? 1 : 0)); };
-    if (cfg.split === 'even' || S === 1) return even();
-    // auto: enumerate heads for the first m<=3 stages (they hold the dense layers), rest even; minimise weighted bottleneck
-    let best = null; const seen = new Set();
-    const consider = (c) => {
-      const key = c.join(','); if (seen.has(key)) return; seen.add(key);
-      const v = stageCostFn(c); if (!best || v < best.v) best = { v, c };
-    };
-    consider(even());
-    for (let m = 1; m <= Math.min(3, S - 1); m++) {
-      const heads = []; const rec = (pre) => { if (pre.length === m) { heads.push(pre.slice()); return; } for (let x = 1; x <= 8; x++) { pre.push(x); rec(pre); pre.pop(); } };
-      rec([]);
-      for (const h of heads) {
-        const hs = h.reduce((a, b) => a + b, 0); const rest = L - hs, k = S - m;
-        if (rest < k || (m === 3 && hs < D) || hs > 24) continue;
-        const b = Math.floor(rest / k), r = rest % k;
-        consider(h.concat(Array.from({ length: k }, (_, i) => b + (i >= k - r ? 1 : 0))));
-        consider(h.concat(Array.from({ length: k }, (_, i) => b + (i < r ? 1 : 0))));
-      }
+    if (cfg.split === 'even' || S === 1 || S > L) return even();
+    const { tm, td, ov, embed } = model;
+    const pre = new Float64Array(L + 1);
+    for (let l = 0; l < L; l++) pre[l + 1] = pre[l] + (l < D ? td : tm);
+    const sc = (i, j) => pre[j] - pre[i] + ov + (i === 0 ? embed : 0); // stage holding layers [i, j)
+    // pass 1: f[j] = least bottleneck of s stages over layers [0, j)
+    let f = new Float64Array(L + 1).fill(Infinity); f[0] = 0;
+    for (let s = 1; s <= S; s++) {
+      const g = new Float64Array(L + 1).fill(Infinity);
+      for (let j = s; j <= L - (S - s); j++) for (let i = s - 1; i < j; i++) g[j] = Math.min(g[j], Math.max(f[i], sc(i, j)));
+      f = g;
     }
-    return best.c;
+    const B = f[L] * (1 + 1e-9);
+    // pass 2: least sum of squared stage times with every stage <= B, with back pointers; the tiny s * c term breaks
+    // ties between equal-cost orderings towards the lighter stages at the end (the last stage also holds the LM head)
+    let q = new Float64Array(L + 1).fill(Infinity); q[0] = 0;
+    const from = [];
+    for (let s = 1; s <= S; s++) {
+      const g = new Float64Array(L + 1).fill(Infinity), bp = new Int32Array(L + 1);
+      for (let j = s; j <= L - (S - s); j++) for (let i = s - 1; i < j; i++) {
+        const c = sc(i, j); if (c > B) continue;
+        const v = q[i] + c * c + 1e-6 * s * c; if (v < g[j]) { g[j] = v; bp[j] = i; }
+      }
+      q = g; from.push(bp);
+    }
+    const counts = new Array(S);
+    for (let s = S - 1, j = L; s >= 0; s--) { const i = from[s][j]; counts[s] = j - i; j = i; }
+    return counts;
   }
 
   function makePlan(cfgIn, cal) {
@@ -543,25 +558,19 @@
       const t = layerMs(kind, c, segs, eff[kind], lat, cfg.attn);
       return kind === 'moe' ? t * moeMult(T) : t;
     };
-    // representative-chunk objective for the auto split
-    const repPts = [[60e3, 0.3], [140e3, 0.3], [310e3, 0.25], [550e3, 0.15]];
+    // auto split objective: layer costs averaged over the KV lengths chunks see in the AgentX replay, one point per
+    // decile of prefilled tokens (the decile midpoints, mean ~140k; measured with cache 'inf' at 16 and 32 stages
+    // and with static slots, which all agree within ~10%)
+    const repKv = [5e3, 24e3, 40e3, 60e3, 80e3, 105e3, 140e3, 190e3, 270e3, 460e3];
     const Trep = Tchunk;
     // capacity the dense ring-joint scans: fixed-size slots/lanes; 0 = request-sized (arena, paging, inf) -> kv_len
     const laneCap = cfg.cache === 'slots' ? cfg.slotLen : cfg.cache === 'pool' && !cfg.laneArena ? cfg.laneLen : 0;
-    const repCost = repPts.map(([kv, w]) => {
+    let tmRep = 0, tdRep = 0;
+    for (const kv of repKv) {
       const segs = [{ n: Trep, k: kv, cap: laneCap }];
-      return { w, tm: layer('moe', Trep, segs), td: layer('dense', Trep, segs) };
-    });
-    const stageTimes = (counts, tm, td) => {
-      const out = []; let st = 0;
-      for (let s = 0; s < counts.length; s++) {
-        const n = counts[s]; const nd = Math.max(0, Math.min(M3.nDense, st + n) - st); st += n;
-        out.push(nd * td + (n - nd) * tm + stageOv(Trep) + (s === 0 ? embedMs : 0));
-      }
-      return out;
-    };
-    const splitCost = (counts) => repCost.reduce((acc, r) => acc + r.w * Math.max(...stageTimes(counts, r.tm, r.td)), 0);
-    const counts = splitLayers(cfg, S, splitCost);
+      tmRep += layer('moe', Trep, segs) / repKv.length; tdRep += layer('dense', Trep, segs) / repKv.length;
+    }
+    const counts = splitLayers(cfg, S, { tm: tmRep, td: tdRep, ov: stageOv(Trep), embed: embedMs });
     if (counts.length !== S || counts.reduce((x, y) => x + y, 0) !== M3.L) errors.push('split must have one entry per stage summing to 60');
     // per-stage layer kinds + memory
     const stages = []; let st = 0;
@@ -1707,6 +1716,6 @@
     return { revenue, inUsd: h.usd, outUsd: h.outUsd, cost: costUsd, prefillUsd, decodeUsd, margin: revenue - costUsd, marginFrac: (revenue - costUsd) / revenue };
   }
 
-  const API = { M3, HW, DEFAULTS, PRICE, COST, calibrate: calibrateAll, makePlan, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, economics, layerMs, roofTok, roofSeg };
+  const API = { M3, HW, DEFAULTS, PRICE, COST, calibrate: calibrateAll, makePlan, splitLayers, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, economics, layerMs, roofTok, roofSeg };
   if (typeof module !== 'undefined' && module.exports) module.exports = API; else root.M3SIM = API;
 })(typeof self !== 'undefined' ? self : this);
