@@ -131,6 +131,11 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
   what tt-d-gen does: it needs the decode slot up front to start KV migration eagerly. Every run reports the slots held (mean and max over
   the window), how many of them are decoding, and the share of requests that waited and their mean wait. M3 decode
   today holds about 64 sessions, one per pipeline stage (tt-blaze #4220); batched decode (m = 8) targets about 504.
+* **Decode concurrency.** `decodeConcurrency` (default 0 = unlimited) caps the sessions decode generates for at once,
+  separately from the KV slots: a 64-stage decode ring carries one session per stage, while its memory holds about 85
+  slots of 1M tokens per stage (tt-blaze: K/V sharded by head over the 4 mesh rows and replicated over the 2 columns,
+  index-K split over the columns, bf8, 340 B per token per chip). A request whose prefill is done waits for a decode
+  position in FIFO order, holding its slot; runs report the share that waited and the mean wait.
 * **Window.** The profiling window is 1800 s.
 
 **Consequence:** an AgentX lane is mostly idle. Saturating a pipeline therefore takes hundreds to thousands of lanes. The KV working set then grows with concurrency, and throughput is limited by a **cache cliff**: past it, evictions turn into re-prefill, which raises TTFT, which leaves more KV idle and evicted.

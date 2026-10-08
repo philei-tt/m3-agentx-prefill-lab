@@ -109,6 +109,16 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
     `limit 8: max ${l.decSlotsMax} mean ${l.decSlotsMean} waits ${l.decWaitPerS} req ${l.reqPerS} vs ${u.reqPerS}`);
 }
 
+// 10b. decodeConcurrency: never more requests decoding than the cap; requests wait for a position holding their
+//      slot; slots <= concurrency changes nothing
+{
+  const cfg = Object.assign({ cache: 'pool', chunk: 512, batch: true, budget: 8192 }, base, { concurrency: 128 });
+  const a = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 8 }, cfg)), b = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 8, decodeConcurrency: 8 }, cfg));
+  const c = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 16, decodeConcurrency: 4 }, cfg));
+  assert.ok(a.usefulTps === b.usefulTps && b.runWaitPerS === 0, 'slots <= concurrency is unchanged');
+  assert.ok(c.decodingMean <= 4 + 1e-9 && c.runWaitPerS > 0 && c.runWaitMean > 0 && c.decSlotsMax <= 16, `decoding ${c.decodingMean} runWait ${c.runWaitPerS}`);
+}
+
 // 11. batchMaxChunks: a request never takes more than that many chunk units of one batch; 0 is the default (no
 //     limit) and leaves results unchanged; with a cap of 1, unloaded TTFT matches no batching closely
 {

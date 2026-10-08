@@ -229,6 +229,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <legend>Traffic &amp; SLO</legend>
     <div class="row"><label for="decodeTps">Decode tok/s per request</label><input id="decodeTps" type="number" min="5" step="5"></div>
     <div class="row"><label for="decodeSlots">Decode KV slots (0 = unlimited)</label><input id="decodeSlots" type="number" min="0" step="1"></div>
+    <div class="row"><label for="decodeConcurrency">Decode sessions at once (0 = unlimited)</label><input id="decodeConcurrency" type="number" min="0" step="1"></div>
+    <div class="hint">KV slots and decode positions are separate: a 64-stage decode ring generates for at most 64 sessions at once (one per stage), while its memory holds about 85 slots of 1M tokens. A request whose prefill is done waits for a decode position while holding its slot.</div>
     <div class="hint">A request needs a free decode slot before its prefill may start (tt-d-gen reserves it up front to start KV migration eagerly), and holds it until decode ends; waiting for one counts in TTFT. M3 decode today holds about 64 sessions (one per pipeline stage).</div>
     <div class="row"><label for="slo">p90 TTFT SLO (s)</label><input id="slo" type="number" min="0.5" step="0.5"></div>
     <div class="row"><label for="sloR">SLO slider <span class="mono" id="sloV"></span></label><input id="sloR" type="range" min="0" max="100" step="1" aria-label="p90 TTFT SLO, log scale, right end = no SLO"></div>
@@ -719,7 +721,7 @@ function slim(r, c) {
   return { conc: c, usefulTps: r.usefulTps, processedTps: r.processedTps, newTps: r.newTps, inTps: r.inTps, hitTps: r.hitTps, outTps: r.outTps, reqPerS: r.reqPerS, ttftP50: r.ttftP50, ttftP90: r.ttftP90, ttftP99: r.ttftP99,
     hitRate: r.hitRate, infHitRate: r.infHitRate, reprefillFrac: r.reprefillFrac, padFrac: r.padFrac, maxUtil: r.maxUtil, avgChunkTok: r.avgChunkTok,
     avgSegsPerChunk: r.avgSegsPerChunk, done: r.done, warmupS: r.warmupS,
-    decSlotsMean: r.decSlotsMean, decSlotsMax: r.decSlotsMax, decodingMean: r.decodingMean, decWaitPerS: r.decWaitPerS, decWaitMean: r.decWaitMean };
+    decSlotsMean: r.decSlotsMean, decSlotsMax: r.decSlotsMax, decodingMean: r.decodingMean, decWaitPerS: r.decWaitPerS, decWaitMean: r.decWaitMean, runWaitPerS: r.runWaitPerS, runWaitMean: r.runWaitMean };
 }
 onmessage = (e) => {
   const m = e.data;
@@ -751,8 +753,8 @@ function mkWorker() {
 
 // ---------------------------------------------------------------- form <-> cfg
 const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'batchDynShape', 'batchMaxChunks', 'attn', 'kvDedup', 'prefetchKV', 'policy',
-  'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'decodeSlots', 'duration', 'seed'];
-const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchMaxChunks', 'lanes', 'arenaTokens', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeSlots', 'duration', 'seed']);
+  'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeConcurrency', 'duration', 'seed'];
+const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchMaxChunks', 'lanes', 'arenaTokens', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeConcurrency', 'duration', 'seed']);
 function setForm(cfg) {
   const c = Object.assign({}, SIM.DEFAULTS, cfg);
   for (const f of FIELDS) {
@@ -1078,7 +1080,7 @@ function render() {
     ].join('<br>') : ''],
     ['Peak useful', R && R.peak ? fmtK(R.peak.usefulTps) : '–', 'any TTFT', R && R.peak ? `C = ${R.peak.conc}, p90 ${fmtS(R.peak.ttftP90)} s` : ''],
     ['Wasted compute', sp && sp.proc ? pct((sp.rep + sp.pad) / sp.proc, 1) : '–', at('of processed tokens'), sp && sp.proc ? `re-prefill ${pct(sp.rep / sp.proc, 1)} · padding ${pct(sp.pad / sp.proc, 1)}` : ''],
-    ['Decode slots', v && v.decSlotsMean != null ? `${Math.round(v.decSlotsMean)}<small> / ${v.decSlotsMax} max</small>` : '–', at('held, mean / max'), v && v.decSlotsMean != null ? `decoding ${Math.round(v.decodingMean)}` + (v.decWaitPerS > 0 ? ` · ${pct(v.decWaitPerS / v.reqPerS)} waited ${fmtS(v.decWaitMean)} s` : '') : ''],
+    ['Decode slots', v && v.decSlotsMean != null ? `${Math.round(v.decSlotsMean)}<small> / ${v.decSlotsMax} max</small>` : '–', at('held, mean / max'), v && v.decSlotsMean != null ? `decoding ${Math.round(v.decodingMean)}` + (v.decWaitPerS > 0 ? ` · ${pct(v.decWaitPerS / v.reqPerS)} waited ${fmtS(v.decWaitMean)} s` : '') + (v.runWaitPerS > 0 ? ` · ${pct(v.runWaitPerS / v.reqPerS)} waited ${fmtS(v.runWaitMean)} s to decode` : '') : ''],
     ['Requests per batch', v ? v.avgSegsPerChunk.toFixed(2) : '–', at('average (1 without batching)'), v ? `batch ${Math.round(v.avgChunkTok)} tok, busy ${pct(v.maxUtil)}` + (R.peak && R.peak !== v ? ` · at peak ${R.peak.avgSegsPerChunk.toFixed(2)}` : '') : ''],
   ];
   $('tiles').innerHTML = tiles.map(([k, v, s, d]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="k">${s}</div><div class="d">${d}</div></div>`).join('');

@@ -398,6 +398,11 @@
     //   requests decode has room for. As in tt-d-gen, which needs the decode slot up front to start KV migration
     //   eagerly. M3 decode today holds ~62-64 sessions (one per pipeline stage, tt-blaze #4220) on 16 galaxies.
     decodeSlots: 0,
+    // decodeConcurrency: sessions decode generates for at once (0 = unlimited); a pipelined decode ring carries one
+    //   session per stage per step, so 64 stages = 64 (m x 64 with m-row batched decode). A request whose prefill
+    //   is done while all are busy waits in FIFO order, still holding its decode KV slot, so decodeSlots above the
+    //   concurrency lets requests in prefill hold slots without taking decode positions.
+    decodeConcurrency: 0,
     concurrency: 64, decodeTps: 180, duration: 1800, seed: 1, idleCap: 10, startMin: 0, startMax: 1, maxWarmup: 1e6,
     gapCap: Infinity,      // AgentX forbids capping recorded idle gaps (only the 10 s system-idle cap applies)
     // policy: 'rr' (default) = round robin, see below; 'rtc' = run to completion (no preemption), oldest first
@@ -571,6 +576,7 @@
     if (cfg.lanesOverride && cfg.cache === 'pool' && !cfg.batch) errors.push('overriding the lane count needs batching (without it the count is derived)');
     if (fixedLanes && cfg.batch && reqsPerBatch === 0 && !cfg.lanesOverride) errors.push('variable-layout batching on the pool needs the lane count set (lanesOverride)');
     if (cfg.lanesOverride && !(cfg.lanes >= 1)) errors.push('the lane count must be at least 1');
+    if (!(cfg.decodeConcurrency >= 0)) errors.push('decode concurrency must be >= 0 (0 = unlimited)');
     if (!(cfg.batchMaxChunks >= 0) || cfg.batchMaxChunks !== Math.floor(cfg.batchMaxChunks)) errors.push('max chunks per request per batch must be a whole number >= 0 (0 = no limit)');
     // every buffer that must hold a whole request has to fit the largest AgentX request (990,016 tokens)
     if (cfg.cache === 'slots' && cfg.slotLen < MAX_REQ) errors.push(`slots must hold the largest request (${MAX_REQ} tokens)`);
@@ -852,10 +858,10 @@
     const st = { done: 0, useful: 0, newTok: 0, processed: 0, hitTok: 0, inTok: 0, infHitTok: 0, hostTok: 0, reprefill: 0, alignLoss: 0,
       ttft: [], chunks: 0, segs: 0, laneWait: 0, reqs: 0, primers: 0, warmupS: 0, idleWarps: 0, primerTok: 0,
       gated: 0, gateWait: 0, legacyStarts: 0, skippedTraces: 0, rrSegs: 0, rrReuse: 0, rrCopyIn: 0,
-      outTok: 0, decArea: 0, decingArea: 0, decMax: 0, decWaits: 0, decWait: 0, decWaited: 0 };
+      outTok: 0, decArea: 0, decingArea: 0, decMax: 0, decWaits: 0, decWait: 0, decWaited: 0, runWait: 0, runWaited: 0 };
     // decode slots: held from admission to prefill (TTFT clock already running) until decode ends; time-weighted
     // occupancy over the window, for slots held and for requests actually decoding (prefill done, not yet ended)
-    let decHeld = 0, decoding = 0, decT = 0; const decQ = [];
+    let decHeld = 0, decoding = 0, decT = 0; const decQ = [], runQ = [];
     function decTick() {
       if (warmDone) { const a = Math.max(decT, t0), b = Math.min(now, tEnd); if (b > a) { st.decArea += decHeld * (b - a); st.decingArea += decoding * (b - a); } }
       decT = now;
@@ -1320,14 +1326,23 @@
         if (cfg.logRequests) (st.reqLog || (st.reqLog = [])).push(r); // opt-in: request ids completed in the window
         st.ttft.push(now - q.tReady);
       }
+      if (q.decSlot && cfg.decodeConcurrency > 0 && decoding >= cfg.decodeConcurrency) { q.runWaitAt = now; runQ.push(q); return; }
+      decodeStart(q);
+    }
+    function decodeStart(q) {
       if (q.decSlot) { decTick(); decoding++; }
-      ev.push(now + TR.req_out[r] / cfg.decodeTps, { e: EV_END, q });
+      ev.push(now + TR.req_out[q.r] / cfg.decodeTps, { e: EV_END, q });
     }
     function onEnd(q) {
       const tree = q.tree, r = q.r;
       inflightReqs--; tree.live--;
       if (q.decSlot) {
         decTick(); decHeld--; decoding--; q.decSlot = false;
+        if (runQ.length) { // a decode position is free: the oldest request waiting for one starts decoding
+          const w = runQ.shift();
+          if (warmDone && now >= t0 && now <= tEnd) { st.runWaited++; st.runWait += now - w.runWaitAt; }
+          decodeStart(w);
+        }
         while (decQ.length && (cfg.decodeSlots <= 0 || decHeld < cfg.decodeSlots)) {
           const w = decQ.shift();
           if (warmDone && now >= t0 && now <= tEnd) { st.decWaited++; st.decWait += now - w.decWaitAt; }
@@ -1422,6 +1437,8 @@
       // that waited for a slot (count per second, mean wait)
       decSlotsMean: st.decArea / D, decSlotsMax: st.decMax, decodingMean: st.decingArea / D,
       decWaitPerS: st.decWaited / D, decWaitMean: st.decWaited ? st.decWait / st.decWaited : 0, decQueuedAtEnd: decQ.length,
+      // requests that finished prefill and waited for a decode position (decodeConcurrency), and their mean wait
+      runWaitPerS: st.runWaited / D, runWaitMean: st.runWaited ? st.runWait / st.runWaited : 0,
       gated: st.gated, gateWaitMean: st.gated ? st.gateWait / st.gated : 0, legacyStarts: st.legacyStarts, skippedTraces: st.skippedTraces,
       gatedAtEnd: trees.reduce((a, tr) => { const u = new Set(); if (tr) for (const w of tr.waiters.values()) for (const g of w) u.add(g); return a + u.size; }, 0),
       warmupTimeout: !!st.warmupTimeout, eventCap: !!st.eventCap, events: evCount, duration: D,
