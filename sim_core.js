@@ -390,7 +390,8 @@
     reserveGB: 3, expertImb: IMB0, maxInflight: 0,
     // decodeSlots: KV slots on the decode side (0 = unlimited). A request takes one before it may start prefill (it
     //   waits in FIFO order, inside its TTFT, while all are held) and frees it when decode ends: prefill only runs
-    //   requests decode has room for. M3 decode today holds ~62-64 sessions (one per pipeline stage, tt-blaze #4220).
+    //   requests decode has room for. As in tt-d-gen, which needs the decode slot up front to start KV migration
+    //   eagerly. M3 decode today holds ~62-64 sessions (one per pipeline stage, tt-blaze #4220) on 16 galaxies.
     decodeSlots: 0,
     concurrency: 64, decodeTps: 180, duration: 1800, seed: 1, idleCap: 10, startMin: 0, startMax: 1, maxWarmup: 1e6,
     gapCap: Infinity,      // AgentX forbids capping recorded idle gaps (only the 10 s system-idle cap applies)
@@ -845,7 +846,7 @@
     const st = { done: 0, useful: 0, newTok: 0, processed: 0, hitTok: 0, inTok: 0, infHitTok: 0, hostTok: 0, reprefill: 0, alignLoss: 0,
       ttft: [], chunks: 0, segs: 0, laneWait: 0, reqs: 0, primers: 0, warmupS: 0, idleWarps: 0, primerTok: 0,
       gated: 0, gateWait: 0, legacyStarts: 0, skippedTraces: 0, rrSegs: 0, rrReuse: 0, rrCopyIn: 0,
-      decArea: 0, decingArea: 0, decMax: 0, decWaits: 0, decWait: 0, decWaited: 0 };
+      outTok: 0, decArea: 0, decingArea: 0, decMax: 0, decWaits: 0, decWait: 0, decWaited: 0 };
     // decode slots: held from admission to prefill (TTFT clock already running) until decode ends; time-weighted
     // occupancy over the window, for slots held and for requests actually decoding (prefill done, not yet ended)
     let decHeld = 0, decoding = 0, decT = 0; const decQ = [];
@@ -1306,7 +1307,7 @@
       if (q.primer) { st.primerTok += inTok - q.hitTok; primersLeft--; if (primersLeft === 0 && !warmDone) startProfiling(now); ev.push(now, { e: EV_END, q }); return; }
       if (warmDone && now >= t0 && now <= tEnd) {
         const useful = (TR.req_blocks[r] - TR.req_lcp_best[r]) * B;
-        st.done++; st.laneWait += q.waitS || 0; st.useful += Math.min(useful, inTok - q.hitTok); st.newTok += inTok - q.hitTok; st.hitTok += q.hitTok; st.inTok += inTok;
+        st.done++; st.laneWait += q.waitS || 0; st.useful += Math.min(useful, inTok - q.hitTok); st.newTok += inTok - q.hitTok; st.hitTok += q.hitTok; st.inTok += inTok; st.outTok += TR.req_out[r];
         st.infHitTok += TR.req_lcp_best[r] * B; st.reprefill += Math.max(0, (inTok - q.hitTok) - useful);
         if (cfg.logRequests) (st.reqLog || (st.reqLog = [])).push(r); // opt-in: request ids completed in the window
         st.ttft.push(now - q.tReady);
@@ -1401,7 +1402,7 @@
       plan: planSummary(plan), cfg,
       usefulTps: st.useful / D, processedTps: st.processed / D, newTps: st.newTok / D, reqPerS: st.done / D,
       // input tokens of the requests completed in the window: cached (prefix hit) + new (prefilled, incl. re-prefill)
-      inTps: st.inTok / D, hitTps: st.hitTok / D,
+      inTps: st.inTok / D, hitTps: st.hitTok / D, outTps: st.outTok / D, // + output tokens they will decode
       ttftP50: pct(0.5), ttftP90: pct(0.9), ttftP99: pct(0.99), ttftMean: tt.length ? tt.reduce((a, b) => a + b, 0) / tt.length : NaN,
       hitRate: st.inTok ? st.hitTok / st.inTok : NaN, infHitRate: st.inTok ? st.infHitTok / st.inTok : NaN,
       reprefillFrac: st.newTok ? st.reprefill / st.newTok : 0, padFrac: st.processed ? 1 - st.newTok / st.processed : 0,
@@ -1500,16 +1501,20 @@
 
   function calibrateAll(data) { const cal = calibrate(data); fitHandoff(cal, data); return cal; }
 
-  // Input-token list prices, USD per million tokens: OpenRouter minimax/minimax-m3 (the model-level price, also
-  // MiniMax's own endpoint and most providers'), read 2026-10-07 from openrouter.ai/api/v1/models. A cache miss
-  // (re-prefill included) is billed at the input price, a prefix hit at the cache-read price; there is no cache-write
-  // charge. Output tokens ($1.20/M) are left out: decode generates them, so their revenue pays for the decode pool.
-  const PRICE = { inUsdPerM: 0.30, cachedUsdPerM: 0.06 };
+  // List prices, USD per million tokens: OpenRouter minimax/minimax-m3 (the model-level price, also MiniMax's own
+  // endpoint and most providers'), read 2026-10-07 from openrouter.ai/api/v1/models. A cache miss (re-prefill
+  // included) is billed at the input price, a prefix hit at the cache-read price; there is no cache-write charge.
+  // Prefill revenue is input tokens only; output tokens are decode's, and count only in the margin (economics()),
+  // which also pays for the decode galaxies.
+  const PRICE = { inUsdPerM: 0.30, cachedUsdPerM: 0.06, outUsdPerM: 1.20 };
+  // Operating cost: a rough USD per galaxy-hour, and the decode galaxies paired with the prefill: one M3 decode
+  // instance, 64 sessions (decodeSlots) on 16 galaxies.
+  const COST = { galaxyUsdPerH: 12, decodeGalaxies: 16 };
 
   // Hourly volume of one sweep point: input tokens of the completed requests, split into new (prefilled) and cached
-  // (prefix hit), requests completed, and the input revenue they bill at `price` (USD per hour). Points from studies
-  // run before inTps/hitTps existed are derived from newTps and hitRate (newTok = inTok - hitTok, hitRate = hitTok /
-  // inTok), which is exact.
+  // (prefix hit), requests completed, the input revenue they bill at `price` (USD per hour), and their output tokens
+  // and output revenue (NaN for points that predate outTps). Points from studies run before inTps/hitTps existed are
+  // derived from newTps and hitRate (newTok = inTok - hitTok, hitRate = hitTok / inTok), which is exact.
   function hourly(p, price) {
     if (!p) return null;
     const pr = Object.assign({}, PRICE, price);
@@ -1517,9 +1522,21 @@
     const hitTps = p.hitTps != null ? p.hitTps : inTps * p.hitRate;
     const newTok = 3600 * (inTps - hitTps), cachedTok = 3600 * hitTps;
     const newUsd = newTok * pr.inUsdPerM / 1e6, cachedUsd = cachedTok * pr.cachedUsdPerM / 1e6;
-    return { inTok: 3600 * inTps, newTok, cachedTok, req: 3600 * p.reqPerS, usd: newUsd + cachedUsd, newUsd, cachedUsd };
+    const outTok = p.outTps != null ? 3600 * p.outTps : NaN;
+    return { inTok: 3600 * inTps, newTok, cachedTok, req: 3600 * p.reqPerS, usd: newUsd + cachedUsd, newUsd, cachedUsd, outTok, outUsd: outTok * pr.outUsdPerM / 1e6 };
   }
 
-  const API = { M3, HW, DEFAULTS, PRICE, calibrate: calibrateAll, makePlan, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, layerMs, roofTok, roofSeg };
+  // Hourly margin of one sweep point on `galaxies` prefill galaxies plus the decode galaxies: input + output revenue
+  // minus the galaxy-hours of both (USD per hour).
+  function economics(p, galaxies, price, cost) {
+    const h = hourly(p, price);
+    if (!h) return null;
+    const c = Object.assign({}, COST, cost);
+    const revenue = h.usd + h.outUsd, prefillUsd = galaxies * c.galaxyUsdPerH, decodeUsd = c.decodeGalaxies * c.galaxyUsdPerH;
+    const costUsd = prefillUsd + decodeUsd;
+    return { revenue, inUsd: h.usd, outUsd: h.outUsd, cost: costUsd, prefillUsd, decodeUsd, margin: revenue - costUsd, marginFrac: (revenue - costUsd) / revenue };
+  }
+
+  const API = { M3, HW, DEFAULTS, PRICE, COST, calibrate: calibrateAll, makePlan, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, economics, layerMs, roofTok, roofSeg };
   if (typeof module !== 'undefined' && module.exports) module.exports = API; else root.M3SIM = API;
 })(typeof self !== 'undefined' ? self : this);

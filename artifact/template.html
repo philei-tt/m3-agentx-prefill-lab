@@ -227,7 +227,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <legend>Traffic &amp; SLO</legend>
     <div class="row"><label for="decodeTps">Decode tok/s per request</label><input id="decodeTps" type="number" min="5" step="5"></div>
     <div class="row"><label for="decodeSlots">Decode KV slots (0 = unlimited)</label><input id="decodeSlots" type="number" min="0" step="1"></div>
-    <div class="hint">A request needs a free decode slot before its prefill may start, and holds it until decode ends; waiting for one counts in TTFT. M3 decode today holds about 64 sessions (one per pipeline stage).</div>
+    <div class="hint">A request needs a free decode slot before its prefill may start (tt-d-gen reserves it up front to start KV migration eagerly), and holds it until decode ends; waiting for one counts in TTFT. M3 decode today holds about 64 sessions (one per pipeline stage).</div>
     <div class="row"><label for="slo">p90 TTFT SLO (s)</label><input id="slo" type="number" min="0.5" step="0.5"></div>
     <div class="row"><label for="sloR">SLO slider <span class="mono" id="sloV"></span></label><input id="sloR" type="range" min="0" max="100" step="1" aria-label="p90 TTFT SLO, log scale, right end = no SLO"></div>
     <div class="hint">Log scale from 1 s to 10 min; the right end means no SLO (goodput = peak). Results update live; a run sweeps up to about 4× the SLO it was started with, so for a much looser SLO, run again.</div>
@@ -237,10 +237,14 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row check"><input id="compareInf" type="checkbox" checked><label for="compareInf">Also run with an infinite cache</label></div>
   </fieldset>
   <fieldset>
-    <legend>Revenue (input tokens)</legend>
+    <legend>Revenue &amp; cost</legend>
     <div class="row"><label for="priceIn">Input $ / M tokens</label><input id="priceIn" type="number" min="0" step="0.01"></div>
     <div class="row"><label for="priceCached">Cached input $ / M tokens</label><input id="priceCached" type="number" min="0" step="0.01"></div>
-    <div class="hint">Defaults: OpenRouter's MiniMax-M3 list price (Oct 2026). New tokens (cache misses, re-prefill included) bill at the input price, prefix hits at the cached price. Output tokens are left out: decode generates them. Changes apply without re-running.</div>
+    <div class="row"><label for="priceOut">Output $ / M tokens</label><input id="priceOut" type="number" min="0" step="0.01"></div>
+    <div class="hint">Defaults: OpenRouter's MiniMax-M3 list price (Oct 2026). New tokens (cache misses, re-prefill included) bill at the input price, prefix hits at the cached price. Revenue per hour is input tokens only (prefill's); the margin adds output tokens, since it also pays for decode.</div>
+    <div class="row"><label for="galaxyUsd">$ / galaxy-hour</label><input id="galaxyUsd" type="number" min="0" step="0.5"></div>
+    <div class="row"><label for="decodeGalaxies">Decode galaxies</label><input id="decodeGalaxies" type="number" min="0" step="1"></div>
+    <div class="hint">One M3 decode instance: 64 sessions on 16 galaxies; set Decode KV slots to match. Margin = input + output revenue − (prefill + decode galaxies) × $/galaxy-hour. Changes apply without re-running.</div>
   </fieldset>
   <div class="btns">
     <button class="primary" id="runBtn" type="button">Run sweep</button>
@@ -620,10 +624,11 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
         "Pin as comparison" keeps a run as a third line.</li>
       <li><b>Revenue per hour.</b> What the input tokens of the requests completed per hour would bill: new tokens (cache misses, re-prefill included) at the input price, cached prefix hits at the cache-read price. The defaults are OpenRouter's list price for <span class="mono">minimax/minimax-m3</span> on Oct 7 2026: $0.30 per M input tokens and $0.06 per M cache reads, which is the model-level price, MiniMax's own endpoint and most providers' (the cheapest provider is about 20% lower). There is no cache-write charge. Set other prices in the Revenue fields; the tiles, the points table and the Roadmap hourly table update without re-running, and Copy link keeps them.
         <ul>
-          <li><b>Output tokens are not counted.</b> This system only prefills; decode generates the output tokens, so their revenue ($1.20 per M) pays for the decode pool, which is not modelled. AgentX requests average about 1.1k output tokens against 120k-150k input tokens at the study's goodput points, so at list price output would add roughly 10-15% to a request's bill.</li>
+          <li><b>Output tokens are not counted here.</b> This system only prefills; decode generates the output tokens, so their revenue ($1.20 per M) counts in the margin, next to the decode galaxies' cost. AgentX requests average about 1.1k output tokens against 120k-150k input tokens at the study's goodput points, so at list price output would add roughly 10-15% to a request's bill.</li>
           <li><b>A better cache bills less per token.</b> A hit pays a fifth of a miss, so at a fixed request rate a higher hit rate lowers revenue; it raises revenue by letting the same hardware serve more requests.</li>
         </ul></li>
-      <li><b>Copy link.</b> Copies a URL holding every setting that differs from the defaults (plus SLO, concurrency grid, the infinite-cache option and the prices); the address bar also tracks it. Opening the link loads that configuration and runs the sweep.</li>
+      <li><b>Margin per hour.</b> Input and output revenue of the requests completed per hour, minus the galaxy-hours of the prefill galaxies of the run and of the decode galaxies, at $12 per galaxy-hour by default (a rough operating cost). Output tokens count here, unlike in revenue per hour, because the decode galaxies are in the cost; they bill at $1.20 per M (OpenRouter's list price). The default decode is one M3 instance, 64 sessions on 16 galaxies, so set Decode KV slots to 64 to match it (unlimited slots overstate what 16 decode galaxies serve). The precomputed baseline has no output counts, so its margin needs a live run.</li>
+      <li><b>Copy link.</b> Copies a URL holding every setting that differs from the defaults (plus SLO, concurrency grid, the infinite-cache option, the prices and costs); the address bar also tracks it. Opening the link loads that configuration and runs the sweep.</li>
       <li><b>Where processed tokens go.</b> At the goodput point (or the concurrency picked in Metrics at), splits the pipeline's processed tokens into useful, re-prefill and padding.</li>
       <li><b>Plan.</b> Updates without simulating. It shows chips, KV capacity, slots or pool and lane sizes, KV bytes per token, and the modelled time of one chunk (at 140k cached) on each stage. Orange bars are stages holding a dense layer; the outlined bar is the bottleneck. The ceiling line is that chunk's tokens divided by the bottleneck time plus the send.</li>
     </ul>
@@ -667,13 +672,15 @@ const fmtK = (x) => (x == null || !isFinite(x) ? '–' : x >= 1e4 ? (x / 1000).t
 const fmtS = (x) => (x == null || !isFinite(x) ? '–' : x >= 100 ? x.toFixed(0) : x >= 10 ? x.toFixed(1) : x.toFixed(2));
 // large counts (tokens or requests per hour): 1.23B, 45.6M, 789k
 const fmtBig = (x) => (x == null || !isFinite(x) ? '–' : x >= 1e9 ? (x / 1e9).toFixed(2) + 'B' : x >= 1e6 ? (x / 1e6).toFixed(1) + 'M' : fmtK(x));
-// dollars per hour: $1,290 or $42.55
-const fmtUsd = (x) => (x == null || !isFinite(x) ? '–' : '$' + (x >= 100 ? Math.round(x).toLocaleString('en-US') : x.toFixed(2)));
-// input-token prices from the Revenue fields (an empty or invalid field falls back to SIM.PRICE)
-function price() {
-  const v = (id, d) => { const x = Number($(id).value); return $(id).value !== '' && x >= 0 ? x : d; };
-  return { inUsdPerM: v('priceIn', SIM.PRICE.inUsdPerM), cachedUsdPerM: v('priceCached', SIM.PRICE.cachedUsdPerM) };
-}
+// dollars per hour: $1,290, $42.55, −$35.10
+const fmtUsd = (x) => (x == null || !isFinite(x) ? '–' : (x < 0 ? '−$' : '$') + (Math.abs(x) >= 100 ? Math.round(Math.abs(x)).toLocaleString('en-US') : Math.abs(x).toFixed(2)));
+// Revenue & cost fields: field id -> [SIM.PRICE or SIM.COST, key]; an empty or invalid field falls back to the default
+const ECON = { priceIn: [SIM.PRICE, 'inUsdPerM'], priceCached: [SIM.PRICE, 'cachedUsdPerM'], priceOut: [SIM.PRICE, 'outUsdPerM'], galaxyUsd: [SIM.COST, 'galaxyUsdPerH'], decodeGalaxies: [SIM.COST, 'decodeGalaxies'] };
+const econVal = (id) => { const x = Number($(id).value), [o, k] = ECON[id]; return $(id).value !== '' && x >= 0 ? x : o[k]; };
+const price = () => ({ inUsdPerM: econVal('priceIn'), cachedUsdPerM: econVal('priceCached'), outUsdPerM: econVal('priceOut') });
+const cost = () => ({ galaxyUsdPerH: econVal('galaxyUsd'), decodeGalaxies: econVal('decodeGalaxies') });
+// prefill galaxies of the run on screen (its config, not the form's)
+const runGalaxies = () => Object.assign({}, SIM.DEFAULTS, run && run.cfg).galaxies;
 const pct = (x, d = 0) => (x == null || !isFinite(x) ? '–' : (100 * x).toFixed(d) + '%');
 const cssv = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -706,7 +713,7 @@ const GLUE = `
 let TR = null, CAL = null;
 function slim(r, c) {
   if (r.error) return { conc: c, error: r.error };
-  return { conc: c, usefulTps: r.usefulTps, processedTps: r.processedTps, newTps: r.newTps, inTps: r.inTps, hitTps: r.hitTps, reqPerS: r.reqPerS, ttftP50: r.ttftP50, ttftP90: r.ttftP90, ttftP99: r.ttftP99,
+  return { conc: c, usefulTps: r.usefulTps, processedTps: r.processedTps, newTps: r.newTps, inTps: r.inTps, hitTps: r.hitTps, outTps: r.outTps, reqPerS: r.reqPerS, ttftP50: r.ttftP50, ttftP90: r.ttftP90, ttftP99: r.ttftP99,
     hitRate: r.hitRate, infHitRate: r.infHitRate, reprefillFrac: r.reprefillFrac, padFrac: r.padFrac, maxUtil: r.maxUtil, avgChunkTok: r.avgChunkTok,
     avgSegsPerChunk: r.avgSegsPerChunk, done: r.done, warmupS: r.warmupS,
     decSlotsMean: r.decSlotsMean, decSlotsMax: r.decSlotsMax, decodingMean: r.decodingMean, decWaitPerS: r.decWaitPerS, decWaitMean: r.decWaitMean };
@@ -845,9 +852,7 @@ function shareUrl(hash) {
   const concs = $('concs').value.replace(/\s/g, ''); if (concs !== DEFAULT_CONCS) kv.push(['concs', concs]);
   if (!$('compareInf').checked) kv.push(['inf', '0']);
   if (viewC != null) kv.push(['at', String(viewC)]);
-  const pr = price();
-  if (pr.inUsdPerM !== SIM.PRICE.inUsdPerM) kv.push(['priceIn', String(pr.inUsdPerM)]);
-  if (pr.cachedUsdPerM !== SIM.PRICE.cachedUsdPerM) kv.push(['priceCached', String(pr.cachedUsdPerM)]);
+  for (const [id, [o, k]] of Object.entries(ECON)) if (econVal(id) !== o[k]) kv.push([id, String(econVal(id))]);
   const qs = kv.map(([k, v]) => k + '=' + encodeURIComponent(v).replace(/%2C/g, ',')).join('&');
   return location.href.split(/[?#]/)[0] + (qs ? '?' + qs : '') + hash;
 }
@@ -855,7 +860,7 @@ function syncUrl() { try { history.replaceState(null, '', shareUrl(location.hash
 // apply a shared link; returns null without parameters, else the list of parameters it had to ignore
 function applyUrl() {
   const q = new URLSearchParams(location.search);
-  if (![...FIELDS, 'slo', 'concs', 'inf', 'at', 'priceIn', 'priceCached'].some((k) => q.has(k))) return null;
+  if (![...FIELDS, 'slo', 'concs', 'inf', 'at', ...Object.keys(ECON)].some((k) => q.has(k))) return null;
   const cfg = {}, bad = [];
   for (const f of FIELDS) {
     if (!q.has(f)) continue;
@@ -873,7 +878,7 @@ function applyUrl() {
   if (q.has('concs')) { const v = q.get('concs'); if (/^\d+(,\d+)*$/.test(v)) $('concs').value = v; else bad.push('concs=' + v); }
   $('compareInf').checked = q.get('inf') !== '0';
   if (q.has('at')) { const v = Number(q.get('at')); if (v > 0) viewC = v; else bad.push('at=' + q.get('at')); }
-  for (const k of ['priceIn', 'priceCached']) if (q.has(k)) { const v = Number(q.get(k)); if (q.get(k) !== '' && v >= 0) $(k).value = v; else bad.push(`${k}=${q.get(k)}`); }
+  for (const k of Object.keys(ECON)) if (q.has(k)) { const v = Number(q.get(k)); if (q.get(k) !== '' && v >= 0) $(k).value = v; else bad.push(`${k}=${q.get(k)}`); }
   return bad;
 }
 $('shareBtn').addEventListener('click', async () => {
@@ -1050,7 +1055,7 @@ function render() {
   const stale = run && run.slo && slo > 4 * run.slo;
   // processed-token split at the viewed point, shared by the Wasted tile and the breakdown bar
   const bp = v, sp = bp && tokSplit(bp);
-  const h = v && SIM.hourly(v, price());
+  const h = v && SIM.hourly(v, price()), e = v && SIM.economics(v, runGalaxies(), price(), cost());
   const tiles = [
     showPick
       ? ['Useful throughput', fmtK(pickP.usefulTps), `useful tok/s at C = ${pickP.conc}`, '']
@@ -1063,6 +1068,8 @@ function render() {
     ['Input tokens per hour', h ? fmtBig(h.inTok) : '–', at('cached + new'), h ? `new ${fmtBig(h.newTok)} (${pct(h.newTok / h.inTok, 1)}) · cached ${fmtBig(h.cachedTok)}` : ''],
     ['Requests per hour', h ? fmtBig(h.req) : '–', at('completed'), h ? `${fmtK(h.inTok / h.req)} input tok per request` : ''],
     ['Revenue per hour', h ? fmtUsd(h.usd) : '–', at('input tokens billed'), h ? `new ${fmtUsd(h.newUsd)} · cached ${fmtUsd(h.cachedUsd)}` : ''],
+    ['Margin per hour', e && isFinite(e.margin) ? fmtUsd(e.margin) : '–', at('input + output revenue − galaxy cost'),
+      e && isFinite(e.margin) ? `${pct(e.marginFrac)} of ${fmtUsd(e.revenue)} (output ${fmtUsd(e.outUsd)}) · cost ${fmtUsd(e.cost)}: ${runGalaxies()} + ${cost().decodeGalaxies} gx${Object.assign({}, SIM.DEFAULTS, run && run.cfg).decodeSlots > 0 ? '' : ' · decode slots unlimited: set them to what these decode galaxies hold'}` : v ? 'needs a live run (output tokens)' : ''],
     ['Peak useful', R && R.peak ? fmtK(R.peak.usefulTps) : '–', 'any TTFT', R && R.peak ? `C = ${R.peak.conc}, p90 ${fmtS(R.peak.ttftP90)} s` : ''],
     ['Wasted compute', sp && sp.proc ? pct((sp.rep + sp.pad) / sp.proc, 1) : '–', at('of processed tokens'), sp && sp.proc ? `re-prefill ${pct(sp.rep / sp.proc, 1)} · padding ${pct(sp.pad / sp.proc, 1)}` : ''],
     ['Decode slots', v && v.decSlotsMean != null ? `${Math.round(v.decSlotsMean)}<small> / ${v.decSlotsMax} max</small>` : '–', at('held, mean / max'), v && v.decSlotsMean != null ? `decoding ${Math.round(v.decodingMean)}` + (v.decWaitPerS > 0 ? ` · ${pct(v.decWaitPerS / v.reqPerS)} waited ${fmtS(v.decWaitMean)} s` : '') : ''],
@@ -1080,8 +1087,8 @@ function render() {
   } else { $('bdBar').innerHTML = ''; $('bdLegend').innerHTML = ''; $('bdNote').textContent = ''; }
   // points table
   const rows = [];
-  for (const [nm, arr] of [['config', realAll.slice().sort((x, y) => x.conc - y.conc)], ['∞ cache', infAll.slice().sort((x, y) => x.conc - y.conc)]]) for (const p of arr) { const hp = SIM.hourly(p, price()); rows.push(`<tr><td>${nm}</td><td class="n">${p.conc}</td><td class="n">${fmtK(p.usefulTps)}</td><td class="n">${fmtK(p.processedTps)}</td><td class="n">${fmtS(p.ttftP50)}</td><td class="n">${fmtS(p.ttftP90)}</td><td class="n">${pct(p.hitRate, 1)}</td><td class="n">${fmtBig(hp.inTok)}</td><td class="n">${fmtBig(hp.newTok)}</td><td class="n">${fmtBig(hp.req)}</td><td class="n">${fmtUsd(hp.usd)}</td><td class="n">${pct(p.reprefillFrac)}</td><td class="n">${pct(p.padFrac)}</td><td class="n">${pct(p.maxUtil)}</td><td class="n">${Math.round(p.avgChunkTok)}</td><td class="n">${p.avgSegsPerChunk != null ? p.avgSegsPerChunk.toFixed(2) : '–'}</td></tr>`); }
-  $('ptsTable').innerHTML = rows.length ? `<table><thead><tr><th>run</th><th class="n">C</th><th class="n">useful</th><th class="n">processed</th><th class="n">TTFT p50</th><th class="n">p90</th><th class="n">hit</th><th class="n">input/h</th><th class="n">new/h</th><th class="n">req/h</th><th class="n">$/h</th><th class="n">re-prefill</th><th class="n">pad</th><th class="n">util</th><th class="n">chunk</th><th class="n">req/chunk</th></tr></thead><tbody>${rows.join('')}</tbody></table>` : '<p class="hint">No run yet.</p>';
+  for (const [nm, arr] of [['config', realAll.slice().sort((x, y) => x.conc - y.conc)], ['∞ cache', infAll.slice().sort((x, y) => x.conc - y.conc)]]) for (const p of arr) { const hp = SIM.hourly(p, price()), ep = SIM.economics(p, runGalaxies(), price(), cost()); rows.push(`<tr><td>${nm}</td><td class="n">${p.conc}</td><td class="n">${fmtK(p.usefulTps)}</td><td class="n">${fmtK(p.processedTps)}</td><td class="n">${fmtS(p.ttftP50)}</td><td class="n">${fmtS(p.ttftP90)}</td><td class="n">${pct(p.hitRate, 1)}</td><td class="n">${fmtBig(hp.inTok)}</td><td class="n">${fmtBig(hp.newTok)}</td><td class="n">${fmtBig(hp.req)}</td><td class="n">${fmtUsd(hp.usd)}</td><td class="n">${fmtUsd(ep.margin)}</td><td class="n">${pct(p.reprefillFrac)}</td><td class="n">${pct(p.padFrac)}</td><td class="n">${pct(p.maxUtil)}</td><td class="n">${Math.round(p.avgChunkTok)}</td><td class="n">${p.avgSegsPerChunk != null ? p.avgSegsPerChunk.toFixed(2) : '–'}</td></tr>`); }
+  $('ptsTable').innerHTML = rows.length ? `<table><thead><tr><th>run</th><th class="n">C</th><th class="n">useful</th><th class="n">processed</th><th class="n">TTFT p50</th><th class="n">p90</th><th class="n">hit</th><th class="n">input/h</th><th class="n">new/h</th><th class="n">req/h</th><th class="n">$/h</th><th class="n">margin/h</th><th class="n">re-prefill</th><th class="n">pad</th><th class="n">util</th><th class="n">chunk</th><th class="n">req/chunk</th></tr></thead><tbody>${rows.join('')}</tbody></table>` : '<p class="hint">No run yet.</p>';
 }
 function startRun() {
   if (!trafficBuf) decodeTraffic();
@@ -1129,7 +1136,7 @@ function syncSlo(from) {
 }
 $('slo').addEventListener('change', () => { syncSlo('n'); render(); syncUrl(); });
 $('sloR').addEventListener('input', () => { syncSlo('r'); render(); syncUrl(); });
-for (const id of ['priceIn', 'priceCached']) $(id).addEventListener('input', () => { render(); renderRoadmap(); });
+for (const id of Object.keys(ECON)) $(id).addEventListener('input', () => { render(); renderRoadmap(); });
 
 // ---------------------------------------------------------------- roadmap
 const FEAT = Object.fromEntries(STUDY.features.map((f) => [f.key, f]));
@@ -1254,7 +1261,7 @@ presetOptions();
 const startIdx = Math.max(0, PRESETS.findIndex((p) => p.name === 'today-C'));
 $('preset').value = String(startIdx); setForm(PRESETS[startIdx].cfg); $('presetDesc').textContent = PRESETS[startIdx].desc;
 $('slo').value = STUDY.slo; $('concs').value = DEFAULT_CONCS;
-$('priceIn').value = SIM.PRICE.inUsdPerM; $('priceCached').value = SIM.PRICE.cachedUsdPerM;
+for (const [id, [o, k]] of Object.entries(ECON)) $(id).value = o[k];
 const shared = applyUrl();
 syncSlo('n'); updatePlan(); renderRoadmap(); renderModel();
 // a shared link runs its configuration; otherwise show the study curves for the starting preset until the viewer runs one

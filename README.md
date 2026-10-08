@@ -50,12 +50,19 @@ those input tokens bill per hour.
 cache-read price. The defaults (`SIM.PRICE` in `sim_core.js`) are OpenRouter's list price for `minimax/minimax-m3` on
 Oct 7 2026: **$0.30 / M input, $0.06 / M cache read**, no cache-write charge. That is the model-level price, MiniMax's own
 endpoint and most providers' (the cheapest is about 20% lower). Override it with `--price-in` / `--price-cached` (USD per
-million tokens) on `run.js`, `analyze.js` and `tools/feature_table.js`, or with the Revenue fields on the web page.
-* **Output tokens are not counted.** This system only prefills; decode generates the output tokens, so their revenue
-  ($1.20 / M) pays for the decode pool, which is not modelled. AgentX requests average about 1.1k output tokens against
-  120k–150k input tokens at the goodput points, so output would add roughly 10–15% to a request's bill.
+million tokens) on `run.js`, `analyze.js` and `tools/feature_table.js`, or with the Revenue & cost fields on the web page.
+* **Output tokens are not counted in revenue.** This system only prefills; decode generates the output tokens, so their
+  revenue ($1.20 / M) counts only in the margin below, next to the decode galaxies' cost. AgentX requests average about
+  1.1k output tokens against 120k–150k input tokens at the goodput points, so output adds roughly 10–15% to a bill.
 * **A better cache bills less per token** (a hit costs a fifth of a miss); it raises revenue only through the extra
   requests the same hardware can then serve.
+
+**Margin per hour** (`economics()` in `sim_core.js`) is input + output revenue of the requests completed per hour, minus
+(prefill galaxies + decode galaxies) × USD per galaxy-hour. Defaults (`SIM.COST`): **$12 per galaxy-hour** (a rough
+operating cost) and **16 decode galaxies**, one M3 decode instance of 64 sessions, so pair it with `decodeSlots: 64`
+(unlimited slots overstate what 16 decode galaxies serve). Each run reports `outTps`, the output tokens of the requests
+completed in the window; study points from before it have no margin. Override with `--price-out`, `--galaxy-usd` and
+`--decode-galaxies` on `run.js`, or the Revenue & cost fields on the page.
 
 ## Files
 
@@ -74,7 +81,7 @@ million tokens) on `run.js`, `analyze.js` and `tools/feature_table.js`, or with 
 | `build_artifact.js`, `artifact/template.html` | Build the single-file page: the core, calibration, 4 MB of traffic as base64, the study summary and the presets. `--standalone` wraps it as a full HTML document for `server.js`. |
 | `server.js`, `package.json` | Zero-dependency local web server (see Quick start); `npm start` / `npm run build` / `npm run study` are shortcuts. |
 | `feature_details.js` | The per-feature explanations shown when a feature is expanded in the Roadmap table. |
-| `lib/price.js` | `--price-in` / `--price-cached` overrides of the revenue prices (`SIM.PRICE`) for the CLIs. |
+| `lib/price.js` | `--price-in` / `--price-cached` / `--price-out` / `--galaxy-usd` / `--decode-galaxies` overrides of `SIM.PRICE` and `SIM.COST` for the CLIs. |
 | `lib/paths.js` | Where data and results are read from: env `M3SIM_DATA` / `M3SIM_RESULTS`, else `./data` and `./results`, else the exabox scratch copies. |
 | `on_node.sh` | `JOB=<slurm id> ./on_node.sh <cmd>` runs on the compute node with soft ulimits raised to the hard limits. |
 | `tools/` | Helpers: `feature_table.js` (README tables), `study_detail.js`, `grid_by_topology.js`, `dump_cells.js` (per-cell stage medians), `traffic_stats.js`, `smoke.sh` (every feature path), `investigate.sh`. |
@@ -97,6 +104,7 @@ node run.js --study-preset g8_k0 --set decodeTps=90 --conc 512,1024
 node study.js --workers 36                                        # full study -> results/study.json (about 8 min on 36 threads, 12 on 14 cores)
 node analyze.js && node tools/feature_table.js                    # print results / README tables
 node tools/feature_table.js --price-in 0.6 --price-cached 0.06     # revenue at other prices
+node run.js --preset today-C --set decodeSlots=64 --galaxy-usd 12 --decode-galaxies 16   # margin per hour
 node build_artifact.js --standalone                               # rebuild dist/index.html (server.js does this itself)
 # regenerate the inputs (needs numpy, the AgentX traces and the #57827 run directories):
 python3 prep_traffic.py --traces <traces.jsonl> --procs 32        # data/traffic.bin + traffic.json
@@ -119,7 +127,8 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
 * **Decode.** A request ends at prefill done + `out / decodeTps` (default 180 tok/s).
 * **Decode slots (backpressure).** `decodeSlots` (default 0 = unlimited) caps the requests decode holds KV for. A request
   takes a slot before it may start prefill (waiting in FIFO order, inside its TTFT, while all are held) and frees it when
-  decode ends, so prefill only runs requests decode has room for. Every run reports the slots held (mean and max over
+  decode ends, so prefill only runs requests decode has room for. Taking the slot at admission, not at hand-off, is
+  what tt-d-gen does: it needs the decode slot up front to start KV migration eagerly. Every run reports the slots held (mean and max over
   the window), how many of them are decoding, and the share of requests that waited and their mean wait. M3 decode
   today holds about 64 sessions, one per pipeline stage (tt-blaze #4220); batched decode (m = 8) targets about 504.
 * **Window.** The profiling window is 1800 s.
@@ -259,6 +268,18 @@ Slots held count requests from admission to prefill until the end of their decod
 
 One 64-session decode keeps up with this prefill at 180 tok/s for a 7% loss, and at 100 tok/s for 18%. 128 slots
 is enough either way.
+
+Margin per hour of the same runs, at $12 per galaxy-hour, 16 decode galaxies per 64 slots, and either OpenRouter's
+prices ($0.30 / $0.06 / $1.20 per M input / cached / output) or 1.5× them ($0.45 / $0.09 / $1.80):
+
+| decode | slots | galaxies (prefill + decode) | cost/h | revenue/h, OpenRouter (in + out) | margin | revenue/h, 1.5× | margin |
+|---|---|---|---|---|---|---|---|
+| 180 tok/s | 64 | 8 + 16 | $288 | $225 + $28 = $253 | −$35 | $338 + $43 = $381 | +$93 (24%) |
+| 100 tok/s | 64 | 8 + 16 | $288 | $169 + $21 = $190 | −$98 | $254 + $32 = $286 | −$2 |
+| 180 tok/s | 128 | 8 + 32 | $480 | $248 + $31 = $279 | −$201 | $372 + $47 = $419 | −$61 |
+
+Decode is two thirds of the cost but bills only the output tokens: with a slot held from admission, about 40% of the
+64 slots hold requests still queued or in prefill rather than decoding.
 
 Each cell below is "G #step / LOO":
 * **G** is the gain at the greedy step where the feature was added (the step number is the build order);

@@ -87,6 +87,14 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   assert.ok(Math.abs(h.usd - (h.newTok * inUsdPerM + h.cachedTok * cachedUsdPerM) / 1e6) < 1e-9 * h.usd && h.usd === h.newUsd + h.cachedUsd);
   const o = SIM.hourly(r, { inUsdPerM: 2 * inUsdPerM });
   assert.ok(Math.abs(o.newUsd - 2 * h.newUsd) < 1e-9 * h.newUsd && o.cachedUsd === h.cachedUsd);
+  // output tokens: those of the requests completed in the window; points without outTps have no output revenue
+  const l = SIM.simulate(TR, cal, Object.assign({ cache: 'slots', chunk: 2048 }, base, { concurrency: 64, logRequests: true }));
+  let out = 0; for (const q of l.reqLog) out += TR.req_out[q];
+  const { outTps, ...noOut } = old;
+  assert.ok(Math.abs(l.outTps - out / l.duration) < 1e-9 * l.outTps && Number.isNaN(SIM.hourly(noOut).outUsd));
+  // margin: input + output revenue minus prefill and decode galaxy-hours
+  const e = SIM.economics(r, 8, null, { galaxyUsdPerH: 10, decodeGalaxies: 16 });
+  assert.ok(Math.abs(e.margin - (h.usd + h.outUsd - 240)) < 1e-9 && e.cost === 240 && e.decodeUsd === 160 && h.outUsd > 0);
 }
 
 // 10. decode slots: without a limit nothing waits and the results match the default exactly; with a limit, slots held
