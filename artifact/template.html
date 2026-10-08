@@ -194,10 +194,13 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row"><label for="copyMode">Pool copies</label><select id="copyMode"><option value="sequential">sequential</option><option value="double">double-buffered</option><option value="overlap3">triple-buffered</option></select></div>
     <div class="row check"><input id="laneArena" type="checkbox"><label for="laneArena">Variable-size lanes (arena)</label></div>
     <div class="row"><label for="arenaTokens">Arena (M tokens)</label><select id="arenaTokens"><option value="2000000">2</option><option value="4000000">4</option><option value="8000000">8</option></select></div>
-    <div class="row check"><input id="hostTier" type="checkbox"><label for="hostTier">SSD KV tier</label></div>
-    <div class="row"><label for="hostGBPerGalaxy">SSD capacity GB / galaxy</label><input id="hostGBPerGalaxy" type="number" min="0" step="1024"></div>
-    <div class="row"><label for="pcieGBsPerGalaxy">SSD bandwidth GB/s / galaxy</label><input id="pcieGBsPerGalaxy" type="number" min="1" step="4"></div>
-    <div class="hint">SSD bandwidth = the lower of the drives' and PCIe's, shared by fetches and write-backs.</div>
+    <div class="row check"><input id="hostTier" type="checkbox"><label for="hostTier">Host DRAM + SSD KV tiers</label></div>
+    <div class="row"><label for="hostDramGBPerGalaxy">Host DRAM GB / galaxy</label><input id="hostDramGBPerGalaxy" type="number" min="0" step="32"></div>
+    <div class="row"><label for="ssdTBPerGalaxy">SSD TB / galaxy</label><input id="ssdTBPerGalaxy" type="number" min="0" step="1"></div>
+    <div class="row"><label for="pcieGBsPerGalaxy">PCIe GB/s / galaxy (each way)</label><input id="pcieGBsPerGalaxy" type="number" min="1" step="1"></div>
+    <div class="row"><label for="ssdReadGBsPerGalaxy">SSD read GB/s / galaxy</label><input id="ssdReadGBsPerGalaxy" type="number" min="1" step="0.5"></div>
+    <div class="row"><label for="ssdWriteGBsPerGalaxy">SSD write GB/s / galaxy</label><input id="ssdWriteGBsPerGalaxy" type="number" min="1" step="0.5"></div>
+    <div class="hint">Device evicts to host DRAM, host DRAM to SSD. Host DRAM left for KV (Plan panel) = DRAM minus 10% headroom, OS, runtime, KV staging, pinned PCIe buffers and this galaxy's share of the weights. Defaults from the Galaxy Blackhole user guide (576 GB host DRAM; PCIe x1 Gen4 to 28 of 32 chips = 63 GB/s each way) and the drives (4x Samsung PM9D3a E1.S at Gen4: 31.5 GB/s read, 27.2 GB/s write).</div>
     <div class="row check"><input id="idxDerep" type="checkbox"><label for="idxDerep">index_k stored once (not ×TP)</label></div>
     <div class="row check"><input id="idxBf16" type="checkbox"><label for="idxBf16">index_k bf16 (off = bf8)</label></div>
     <div class="row"><label for="reserveGB">Reserve GB / chip</label><input id="reserveGB" type="number" min="0" step="0.5"></div>
@@ -520,13 +523,14 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li><b>How eviction is tracked.</b> Each session's prefix tree is compressed into pieces. Every request touches whole pieces, so LRU over pieces is exactly LRU over 64-token pages.</li>
         </ul>
       </li>
-      <li><b>SSD KV tier = offloading KV to NVMe drives on the galaxy hosts.</b>
+      <li><b>KV offload tiers: device DRAM → host DRAM → SSD.</b>
         <ul>
-          <li><b>Static slots.</b> When a slot is reclaimed, its conversation's KV is written to SSD (the new occupant waits for the write-back), and that conversation's next request reads the prefix it shares back before it is admitted. One copy per conversation: nothing is shared between conversations, unlike pool pages. On today-C (4 galaxies, unaligned, round robin), 1 TB per galaxy lifts goodput from 3.3k to 16.4k; the pool with one lane and the same SSD reaches 24.9k.</li>
-          <li><b>Mechanism (pool and paging).</b> When the device pool evicts a page, it is written to SSD instead of being dropped. A later hit on it is read back into the request's lane while the request waits in the queue. The SSD tier evicts least-recently-used too. Write-backs and fetches share one bandwidth per galaxy: the lower of the drives' and PCIe's. Index keys are stored once on SSD, not per TP column.</li>
-          <li><b>Defaults:</b> 1 TB and 64 GB/s per galaxy. These are placeholders carried over from the earlier host-DRAM tier, not SSD specs; set the real drive capacity and bandwidth.</li>
-          <li><b>What matters.</b> Capacity matters much more than bandwidth. At 8 TB per galaxy the results match an infinite cache; dropping bandwidth from 64 to 16 GB/s costs at most 13%.</li>
-          <li><b>Not modelled:</b> SSD write endurance, read/write asymmetry, and per-IO latency. The tier is an ideal page DMA at one bandwidth.</li>
+          <li><b>Mechanism (pool and paging).</b> When the device pool evicts a page, it moves to host DRAM over PCIe; when host DRAM is full, its least recently used pages move to SSD; when SSD is full, they are dropped. The tiers are exclusive. A later hit is read back into the request's lane while the request waits in the queue: host pages over PCIe, SSD pages from the drives and then over PCIe. Index keys are stored once off device, not per TP column.</li>
+          <li><b>Static slots.</b> When a slot is reclaimed, its conversation's KV goes to host DRAM (the new occupant waits for the PCIe write-back), overflowing to SSD, and that conversation's next request reads the prefix it shares back before it is admitted. One copy per conversation: nothing is shared between conversations, unlike pool pages.</li>
+          <li><b>Host DRAM for KV.</b> The Galaxy Blackhole host has 576 GB (6 × 96 GB DDR5-4800). Kept back: 10% headroom, 16 GB for the OS and services, 32 GB for the model's runtime (tt-metal, inference server, program caches), 32 GB of staging for KV migration to decode, 1 GiB of pinned memory per chip (tt-metal's PCIe host channel, 32 GiB), and this galaxy's share of the model weights (about 33 GB at 8 galaxies, 67 GB at 4). That leaves about 370 GB of KV per galaxy at 8 galaxies, 340 GB at 4: about 37M and 17M tokens per pipeline, against 56M and 20M tokens of device pool.</li>
+          <li><b>SSD.</b> 32 TB per galaxy by default (shipped systems: 4 × 7.68 TB Samsung PM9D3a E1.S = 30.7 TB): 3.2B tokens at 8 galaxies.</li>
+          <li><b>Bandwidth.</b> PCIe is full duplex, so fetches (host → device) and write-backs (device → host) each get 63 GB/s per galaxy: per tray, one chip has a Gen5 x8 link and seven have x1 links at Gen4 (1.97 GB/s), and since KV is spread evenly over the chips, the x1 chips set the pace (32 × 1.97). Relaying through each tray's x8 chip over Ethernet would allow up to 181 GB/s; no software does that today. The drives give 31.5 GB/s read (Rev C runs them at Gen4 x4, 7.88 GB/s each, below the drive's 12 GB/s) and 27.2 GB/s write (6.8 GB/s each); reads and writes share them.</li>
+          <li><b>Not modelled:</b> SSD write endurance and per-IO latency; host DRAM bandwidth (6 channels of DDR5-4800, about 230 GB/s, above the links' combined peak); a device page is assumed free as soon as its write-back is queued.</li>
           <li><b>AgentX.</b> The methodology caps host <i>DRAM</i> per system; check how it treats SSD-backed KV before relying on large tiers.</li>
         </ul>
       </li>
@@ -640,7 +644,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
 
     <h2 id="m-limits">Assumptions and limits</h2>
     <ul>
-      <li><b>SSD tier.</b> Capacity, bandwidth and the ideal page DMA are assumptions; endurance, read/write asymmetry and IO latency are not modelled. Capacity matters a lot for the result; bandwidth hardly does.</li>
+      <li><b>Offload tiers.</b> Capacities and bandwidths come from the Galaxy Blackhole documentation and the drive datasheet, but the host DRAM reserves (OS, runtime, KV staging) are estimates, and the transfers are ideal page DMAs. SSD endurance and IO latency are not modelled. The Roadmap study predates the host DRAM tier (it used a 1 TB SSD tier at 64 GB/s).</li>
       <li><b>Pool copies.</b> Assumed to be page-list gather kernels at 50% DRAM efficiency. Arena fragmentation is not modelled.</li>
       <li><b>Torus rings.</b> Every measurement used line (mesh) collectives, so the ring speed-ups are textbook link-load ratios, not measurements. [4,4] has no profile at all (geometric midpoint of [2,4] and [8,4]).</li>
       <li><b>Decode.</b> A fixed per-request speed, whatever the number of sessions decoding. Decode capacity is a slot count only (Decode KV slots, default unlimited), not KV bytes per context length. KV migration to decode is not modelled.</li>
@@ -718,7 +722,7 @@ const GLUE = `
 let TR = null, CAL = null;
 function slim(r, c) {
   if (r.error) return { conc: c, error: r.error };
-  return { conc: c, usefulTps: r.usefulTps, processedTps: r.processedTps, newTps: r.newTps, inTps: r.inTps, hitTps: r.hitTps, outTps: r.outTps, reqPerS: r.reqPerS, ttftP50: r.ttftP50, ttftP90: r.ttftP90, ttftP99: r.ttftP99,
+  return { conc: c, usefulTps: r.usefulTps, processedTps: r.processedTps, newTps: r.newTps, inTps: r.inTps, hitTps: r.hitTps, outTps: r.outTps, hostReadTps: r.hostReadTps, ssdReadTps: r.ssdReadTps, pcieH2DUtil: r.pcieH2DUtil, ssdUtil: r.ssdUtil, reqPerS: r.reqPerS, ttftP50: r.ttftP50, ttftP90: r.ttftP90, ttftP99: r.ttftP99,
     hitRate: r.hitRate, infHitRate: r.infHitRate, reprefillFrac: r.reprefillFrac, padFrac: r.padFrac, maxUtil: r.maxUtil, avgChunkTok: r.avgChunkTok,
     avgSegsPerChunk: r.avgSegsPerChunk, done: r.done, warmupS: r.warmupS,
     decSlotsMean: r.decSlotsMean, decSlotsMax: r.decSlotsMax, decodingMean: r.decodingMean, decWaitPerS: r.decWaitPerS, decWaitMean: r.decWaitMean, runWaitPerS: r.runWaitPerS, runWaitMean: r.runWaitMean };
@@ -753,8 +757,8 @@ function mkWorker() {
 
 // ---------------------------------------------------------------- form <-> cfg
 const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'batchDynShape', 'batchMaxChunks', 'attn', 'kvDedup', 'prefetchKV', 'policy',
-  'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeConcurrency', 'duration', 'seed'];
-const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchMaxChunks', 'lanes', 'arenaTokens', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeConcurrency', 'duration', 'seed']);
+  'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeConcurrency', 'duration', 'seed'];
+const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchMaxChunks', 'lanes', 'arenaTokens', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeConcurrency', 'duration', 'seed']);
 function setForm(cfg) {
   const c = Object.assign({}, SIM.DEFAULTS, cfg);
   for (const f of FIELDS) {
@@ -784,8 +788,8 @@ function syncUi() {
   $('splitRow').hidden = $('split').value !== 'custom';
   const pool = $('cache').value === 'pool', paged = pool || $('cache').value === 'paging';
   for (const id of ['lanes', 'laneArena', 'laneScope', 'copyMode']) $(id).disabled = !pool;
-  // the SSD tier works behind every finite cache: pool / paging pages, or whole static slots
-  for (const id of ['hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy']) $(id).disabled = $('cache').value === 'inf';
+  // the offload tiers work behind every finite cache: pool / paging pages, or whole static slots
+  for (const id of ['hostTier', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy']) $(id).disabled = $('cache').value === 'inf';
   // a global lane is reserved for the whole pipeline trip: buffering its copies gains nothing, so sequential only
   if (pool && $('laneScope').value === 'global') { $('copyMode').value = 'sequential'; $('copyMode').disabled = true; }
   $('arenaTokens').disabled = !pool || !$('laneArena').checked;
@@ -919,7 +923,8 @@ function updatePlan() {
   kvS.push(['KV capacity / replica', `${(plan.capTok / 1e6).toFixed(1)} M tokens`]);
   if (cfg.cache === 'slots') kvS.push(['Static 1M slots', `${plan.nSlots}`]);
   if (cfg.cache === 'pool') { kvS.push(['Paged pool', `${(plan.poolTok / 1e6).toFixed(1)} M tokens`]); kvS.push([cfg.laneArena ? 'Lane arena' : 'Lanes', cfg.laneArena ? `${(plan.arena / 1e6).toFixed(0)} M tokens` : `${plan.lanes} x 1M`]); }
-  if (plan.hostTok > 0) kvS.push(['SSD tier', `${(plan.hostTok / 1e6).toFixed(0)} M tokens`]);
+  if (plan.hostTok > 0) kvS.push(['Host DRAM tier', `${(plan.hostTok / 1e6).toFixed(0)} M tokens (${plan.hostBudget.kv.toFixed(0)} GB / galaxy)`]);
+  if (plan.ssdTok > 0) kvS.push(['SSD tier', `${(plan.ssdTok / 1e6).toFixed(0)} M tokens`]);
   kvS.push(['KV bytes / token', `${(plan.kvbL * 60 / 1000).toFixed(1)} KB`]);
   kvS.push(['Ceiling @140k cached', `${fmtK(ceiling)} processed tok/s`]);
   $('planKv').innerHTML = kvS.map(([k, v]) => `<div><span>${k}</span><br><b class="mono">${v}</b></div>`).join('');
@@ -1070,7 +1075,7 @@ function render() {
       ? ['With infinite cache', fmtK(infP.usefulTps), `useful tok/s at C = ${pickP.conc}, nothing evicted`, `real = ${pct(pickP.usefulTps / infP.usefulTps)} of ∞`]
       : ['With infinite cache', I ? (I.atEdge ? '≥ ' : '') + fmtK(I.goodput) : '–', 'same config, nothing evicted', R && I && I.goodput ? `real = ${I.atEdge ? '≤ ' : ''}${pct(R.goodput / I.goodput)} of ∞` : ''],
     ['TTFT', v ? `${fmtS(v.ttftP50)}<small> / ${fmtS(v.ttftP90)} s</small>` : '–', at('p50 / p90'), v ? `C = ${v.conc} lanes` : ''],
-    ['Hit rate', v ? pct(v.hitRate, 1) : '–', at('prefix-cache hit, token-weighted'), v ? `∞-cache ${pct(v.infHitRate, 1)}` : ''],
+    ['Hit rate', v ? pct(v.hitRate, 1) : '–', at('prefix-cache hit, token-weighted'), v ? `∞-cache ${pct(v.infHitRate, 1)}` + (v.hostReadTps > 0 || v.ssdReadTps > 0 ? ` · read back: host ${fmtK(v.hostReadTps)}, SSD ${fmtK(v.ssdReadTps)} tok/s` : '') : ''],
     ['Input tokens per hour', h ? fmtBig(h.inTok) : '–', at('cached + new'), h ? `new ${fmtBig(h.newTok)} (${pct(h.newTok / h.inTok, 1)}) · cached ${fmtBig(h.cachedTok)}` : ''],
     ['Requests per hour', h ? fmtBig(h.req) : '–', at('completed'), h ? `${fmtK(h.inTok / h.req)} input tok per request` : ''],
     ['Net Revenue', e && isFinite(e.margin) ? fmtUsd(e.margin) : '–', at('per hour'), e ? [

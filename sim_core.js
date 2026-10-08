@@ -391,7 +391,29 @@
     //   'overlap3'   = static triple buffering: next batch copying in, current computing, previous copying out, each
     //                  for a whole chunk period (peak 3x)
     copyMode: 'sequential', copyContention: 0.25,
-    hostTier: false, hostGBPerGalaxy: 1024, pcieGBsPerGalaxy: 64,
+    // KV offload tiers (hostTier): device DRAM -> host DRAM -> SSD, exclusive LRU tiers. A page or slot evicted
+    //   from device goes to host DRAM (over PCIe, device -> host), host DRAM evicts to SSD, SSD drops. Hits are read
+    //   back before admission: host parts over PCIe (host -> device), SSD parts from the drives then over PCIe.
+    //   Per galaxy, from Tenstorrent Galaxy Blackhole Server User Guide v1.8 (docs.tenstorrent.com) unless noted:
+    //   - host DRAM 576 GB (6x 96 GB DDR5-4800 RDIMM). The share left for KV is derived in makePlan from the
+    //     reserves below: hostHeadroom (fraction kept free), OS and services, the model's runtime (tt-metal,
+    //     inference server, program caches), staging for KV migration to decode, UMD's pinned host memory (1 GiB
+    //     hugepage channel per PCIe chip: tt-metal asks for min(4, chips per MMIO device) = 1 on a Galaxy, where
+    //     every chip has its own PCIe link), and, with hostStageWeights, this galaxy's share of the model weights
+    //     (host copies while loading / reloading). About 370 GB of KV per galaxy at 8 galaxies.
+    //   - PCIe host <-> chips: per tray one chip on Gen5 x8 and seven on x1 links that train at Gen4 (User Guide
+    //     "PCIe Gen5 1x8 and 7x1"; Quanta S7TK product spec "7x1 PCIe G4"). KV is spread evenly over the chips and
+    //     each chip moves its own share over its own link, so the x1 chips set the pace: 32 x 1.97 GB/s = 63 GB/s
+    //     per direction per galaxy (PCIe Gen4 x1 = 16 GT/s, 128b/130b). Full duplex: fetches (host -> device) and
+    //     write-backs (device -> host) do not share it. Routing through each tray's x8 chip over Ethernet would
+    //     allow up to 4 x (31.5 + 7 x 1.97) = 181 GB/s, which no software does today.
+    //   - SSD: 4x E1.S NVMe; 32 TB per galaxy (4x 7.68 TB Samsung PM9D3a MZTL67T6HBLC = 30.7 TB in shipped
+    //     systems). PM9D3a: up to 12,000 MB/s sequential read, 6,800 MB/s write (Samsung datasheet, PCIe 5.0 x4);
+    //     Rev C chassis run the E1.S links at Gen4 x4 (7.88 GB/s, BIOS setting in the Exabox runbook), so 4x 7.88 =
+    //     31.5 GB/s read and 4x 6.8 = 27.2 GB/s write. Reads and writes share the drives (one queue, conservative).
+    hostTier: false, hostDramGBPerGalaxy: 576, hostHeadroom: 0.1, hostOsGB: 16, hostRuntimeGB: 32, hostKvStagingGB: 32,
+    hostPinnedGBPerChip: 1.073741824, hostStageWeights: true,
+    ssdTBPerGalaxy: 32, ssdReadGBsPerGalaxy: 31.5, ssdWriteGBsPerGalaxy: 27.2, pcieGBsPerGalaxy: 63,
     reserveGB: 3, expertImb: IMB0, maxInflight: 0,
     // decodeSlots: KV slots on the decode side (0 = unlimited). A request takes one before it may start prefill (it
     //   waits in FIFO order, inside its TTFT, while all are held) and frees it when decode ends: prefill only runs
@@ -537,12 +559,13 @@
     const stages = []; let st = 0;
     const kvbL = kvBytesPerTokenLayer(cfg, tp);
     const attnW = 110.9e6 * BF8, sharedW = 3 * M3.E * M3.Is * BF16, denseW = 3 * M3.E * M3.Id * BF16, expW = 3 * M3.E * M3.I * BF4;
-    let capTok = Infinity;
+    let capTok = Infinity, wTot = 0;
     for (let s = 0; s < counts.length; s++) {
       const n = counts[s]; const nd = Math.max(0, Math.min(M3.nDense, st + n) - st); const nm = n - nd; st += n;
       let w = nm * (M3.Ex * expW + attnW * sp + sharedW * sp + M3.E * M3.Ex * BF16 * P) + nd * (attnW * sp + denseW * sp);
       if (s === 0) w += M3.V * M3.E * BF16;
       if (s === counts.length - 1) w += M3.V * M3.E * BF8;
+      wTot += w;
       const free = P * (HW.dramCap - cfg.reserveGB * GB - actBytes(Tmax)) - w;
       const cap = free / (n * kvbL);
       capTok = Math.min(capTok, cap);
@@ -576,6 +599,8 @@
     if (cfg.lanesOverride && cfg.cache === 'pool' && !cfg.batch) errors.push('overriding the lane count needs batching (without it the count is derived)');
     if (fixedLanes && cfg.batch && reqsPerBatch === 0 && !cfg.lanesOverride) errors.push('variable-layout batching on the pool needs the lane count set (lanesOverride)');
     if (cfg.lanesOverride && !(cfg.lanes >= 1)) errors.push('the lane count must be at least 1');
+    for (const k of ['hostDramGBPerGalaxy', 'ssdTBPerGalaxy']) if (!(cfg[k] >= 0)) errors.push(`${k} must be >= 0`);
+    for (const k of ['pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy']) if (!(cfg[k] > 0)) errors.push(`${k} must be > 0`);
     if (!(cfg.decodeConcurrency >= 0)) errors.push('decode concurrency must be >= 0 (0 = unlimited)');
     if (!(cfg.batchMaxChunks >= 0) || cfg.batchMaxChunks !== Math.floor(cfg.batchMaxChunks)) errors.push('max chunks per request per batch must be a whole number >= 0 (0 = no limit)');
     // every buffer that must hold a whole request has to fit the largest AgentX request (990,016 tokens)
@@ -584,14 +609,24 @@
     if (cfg.cache === 'pool' && cfg.laneArena && arena < MAX_REQ) errors.push(`the lane arena must hold the largest request (${MAX_REQ} tokens)`);
     // host copies do not need the TP replicas of index_k (re-broadcast on fetch)
     const kvbHost = kvBytesPerTokenLayer(Object.assign({}, cfg, { idxDerep: true }), tp);
-    const hostTok = cfg.hostTier && cfg.cache !== 'inf' ? cfg.hostGBPerGalaxy * GB * (cfg.galaxies / cfg.replicas) / (M3.L * kvbHost) : 0;
+    // offload tiers, per replica (its galaxies' hosts and drives); host DRAM left for KV after the reserves
+    const gpr = cfg.galaxies / cfg.replicas, offload = cfg.hostTier && cfg.cache !== 'inf';
+    const hostBudget = {
+      dram: cfg.hostDramGBPerGalaxy, headroom: cfg.hostDramGBPerGalaxy * cfg.hostHeadroom, os: cfg.hostOsGB, runtime: cfg.hostRuntimeGB,
+      staging: cfg.hostKvStagingGB, pinned: 32 * cfg.hostPinnedGBPerChip, weights: cfg.hostStageWeights ? wTot / GB / gpr : 0,
+    };
+    hostBudget.kv = Math.max(0, hostBudget.dram - hostBudget.headroom - hostBudget.os - hostBudget.runtime - hostBudget.staging - hostBudget.pinned - hostBudget.weights);
+    const tokOf = (bytesPerGalaxy) => bytesPerGalaxy * gpr / (M3.L * kvbHost);
+    const hostTok = offload ? tokOf(hostBudget.kv * GB) : 0;
+    const ssdTok = offload ? tokOf(cfg.ssdTBPerGalaxy * 1e12) : 0;
     const gran = 32 * sp;
     return {
       cfg, sp, tp, P, S, counts, stages, eff, lat, layer, stageOv, embedMs, blockMs, hopMs, errors,
-      capTok, nSlots, poolTok, lanes, arena, hostTok, kvbL, kvbHost, gran, laneCap,
+      capTok, nSlots, poolTok, lanes, arena, hostTok, ssdTok, hostBudget, kvbL, kvbHost, gran, laneCap,
       // time (ms) to copy `tok` tokens of KV between pool and lane on the stage holding the most layers
       copyMs: (tok) => tok * Math.max(...stages.map((x) => x.n)) * kvbL / P * 2 / (HW.dram * 0.5) * 1e3,
-      pcieBps: cfg.pcieGBsPerGalaxy * GB * (cfg.galaxies / cfg.replicas),
+      // per replica: PCIe per direction, SSD read / write
+      pcieBps: cfg.pcieGBsPerGalaxy * GB * gpr, ssdRdBps: cfg.ssdReadGBsPerGalaxy * GB * gpr, ssdWrBps: cfg.ssdWriteGBsPerGalaxy * GB * gpr,
       // in-flight chunks: round robin on static slots mirrors tt-d-gen's ChunkFifo, max(8, 4 x max_slots)
       maxInflight: cfg.maxInflight > 0 ? cfg.maxInflight : cfg.policy === 'rr' && cfg.cache === 'slots' ? Math.max(8, 4 * nSlots) : 2 * S + 4,
       tokensPerSec: null,
@@ -691,8 +726,10 @@
   // Content-addressed paged pool over prefix-tree pieces with exact LRU (piece granularity == 64-token pages).
   // Optional second tier (host DRAM): device evictions demote to host; host evictions drop.
   class PoolCache {
-    constructor(TR, capBlocks, hostBlocks) {
-      this.TR = TR; this.cap = capBlocks; this.hcap = hostBlocks;
+    // tiers: 0 none, 1 device, 2 host DRAM, 3 SSD (exclusive); onDemote(blocks, from, to) on every move down
+    constructor(TR, capBlocks, hostBlocks, ssdBlocks) {
+      this.TR = TR; this.cap = capBlocks; this.hcap = hostBlocks; this.scap = ssdBlocks || 0;
+      this.sused = 0; this.sheap = new LruHeap();
       this.n = 0; this.tier = new Uint8Array(1 << 16); this.t = new Float64Array(1 << 16); this.pk = new Int32Array(1 << 16);
       this.len = new Int32Array(1 << 16); this.dep = new Int32Array(1 << 16); this.pin = new Int32Array(1 << 16);
       this.used = 0; this.hused = 0; this.heap = new LruHeap(); this.hheap = new LruHeap(); this.path = new Int32Array(1024);
@@ -717,17 +754,18 @@
       while (k >= 0) { if (n === this.path.length) { const B = new Int32Array(n * 2); B.set(this.path); this.path = B; } this.path[n++] = k; k = this.pk[k]; }
       return n;
     }
-    hit(n) { // resident prefix from root: [device blocks, host blocks]
-      let dev = 0, host = 0, i = n - 1;
+    hit(n) { // resident prefix from root: device blocks, then host DRAM and SSD blocks (any order) up to the first miss
+      let dev = 0, host = 0, ssd = 0, i = n - 1;
       for (; i >= 0; i--) { const k = this.path[i]; if (this.tier[k] !== 1) break; dev += this.len[k]; }
-      for (; i >= 0; i--) { const k = this.path[i]; if (this.tier[k] === 0) break; host += this.len[k]; }
-      this.hDev = dev; this.hHost = host; return dev + host;
+      for (; i >= 0; i--) { const k = this.path[i]; if (this.tier[k] === 0) break; if (this.tier[k] === 3) ssd += this.len[k]; else host += this.len[k]; }
+      this.hDev = dev; this.hHost = host; this.hSsd = ssd; return dev + host + ssd;
     }
     touch(n, now) {
       for (let i = 0; i < n; i++) {
         const k = this.path[i];
         if (this.tier[k] === 0) this.used += this.len[k];
         else if (this.tier[k] === 2) { this.hused -= this.len[k]; this.used += this.len[k]; }
+        else if (this.tier[k] === 3) { this.sused -= this.len[k]; this.used += this.len[k]; }
         this.tier[k] = 1; this.t[k] = now; this.heap.push(now, this.dep[k], k);
       }
       this.evict();
@@ -737,6 +775,7 @@
         const k = this.path[i];
         if (this.tier[k] === 1) { this.t[k] = now; this.heap.push(now, this.dep[k], k); }
         else if (this.tier[k] === 2) { this.t[k] = now; this.hheap.push(now, this.dep[k], k); }
+        else if (this.tier[k] === 3) { this.t[k] = now; this.sheap.push(now, this.dep[k], k); }
       }
     }
     // pin the device-resident pieces from the root that overlap the first `blocks` blocks of the path (the cached
@@ -756,16 +795,29 @@
         const k = this.heap.pop(); const t = this.heap.ot;
         if (this.tier[k] !== 1 || this.t[k] !== t || this.pin[k] > 0) continue; // pinned: re-pushed by unpin()
         this.used -= this.len[k]; this.evictedBlocks += this.len[k];
-        if (this.hcap > 0) { this.tier[k] = 2; this.hused += this.len[k]; this.hheap.push(t, this.dep[k], k); if (this.onDemote) this.onDemote(this.len[k]); }
+        if (this.hcap > 0) this.down(k, t, 1, 2);
+        else if (this.scap > 0) this.down(k, t, 1, 3);
         else this.tier[k] = 0;
       }
       while (this.hused > this.hcap && this.hheap.n > 0) {
         const k = this.hheap.pop(); const t = this.hheap.ot;
         if (this.tier[k] !== 2 || this.t[k] !== t) continue;
-        this.hused -= this.len[k]; this.tier[k] = 0;
+        this.hused -= this.len[k];
+        if (this.scap > 0) this.down(k, t, 2, 3); else this.tier[k] = 0;
+      }
+      while (this.sused > this.scap && this.sheap.n > 0) {
+        const k = this.sheap.pop(); const t = this.sheap.ot;
+        if (this.tier[k] !== 3 || this.t[k] !== t) continue;
+        this.sused -= this.len[k]; this.tier[k] = 0;
       }
       if (this.heap.n > 4 * (this.n + 1024)) this.rebuild(this.heap, 1);
       if (this.hheap.n > 4 * (this.n + 1024)) this.rebuild(this.hheap, 2);
+      if (this.sheap.n > 4 * (this.n + 1024)) this.rebuild(this.sheap, 3);
+    }
+    down(k, t, from, to) { // move piece k one or two tiers down, keeping its LRU time
+      this.tier[k] = to;
+      if (to === 2) { this.hused += this.len[k]; this.hheap.push(t, this.dep[k], k); } else { this.sused += this.len[k]; this.sheap.push(t, this.dep[k], k); }
+      if (this.onDemote) this.onDemote(this.len[k], from, to);
     }
     rebuild(h, tier) {
       const t = h.t.slice(0, h.n), k = h.k.slice(0, h.n); h.n = 0;
@@ -824,38 +876,70 @@
         trees: 0, lanesUsed: 0, arenaUsed: 0, progTok: 0, nProg: 0,
         // round robin on fixed lanes: which request's context each lane holds, segments using it, last use
         laneTab: rrPool && !cfg.laneArena ? Array.from({ length: plan.lanes }, () => ({ owner: null, busy: 0, t: -1 })) : null,
-        pool: cfg.cache === 'slots' ? null : new PoolCache(TR, plan.poolTok / B, plan.hostTok / B),
-        slots: cfg.cache === 'slots' ? new SlotCache(plan.nSlots) : null, pcieFree: 0,
+        pool: cfg.cache === 'slots' ? null : new PoolCache(TR, plan.poolTok / B, plan.hostTok / B, plan.ssdTok / B),
+        slots: cfg.cache === 'slots' ? new SlotCache(plan.nSlots) : null, h2dFree: 0, d2hFree: 0, ssdFree: 0,
       });
     }
-    // device -> host demotions (write-back) occupy the same PCIe link as host -> device fetches
-    const pcieS = (blocks) => blocks * B * M3.L * plan.kvbHost / plan.pcieBps;
-    for (const rp of reps) if (rp.pool && plan.hostTok > 0) {
-      rp.pool.onDemote = (blocks) => { rp.pcieFree = Math.max(rp.pcieFree, now) + pcieS(blocks); };
+    // offload links per replica, each a FIFO resource: PCIe host -> device (fetches), PCIe device -> host
+    // (write-backs; full duplex, so the two do not wait on each other) and the SSDs (reads and writes share them).
+    // linkBusy[] counts their busy seconds that start inside the window.
+    const offBytes = (blocks) => blocks * B * M3.L * plan.kvbHost;
+    const offload = plan.hostTok + plan.ssdTok > 0;
+    function useLink(rp, key, bytes, bps, notBefore) {
+      if (!(bytes > 0)) return Math.max(now, notBefore || 0);
+      const start = Math.max(now, rp[key], notBefore || 0), sec = bytes / bps;
+      rp[key] = start + sec;
+      if (warmDone && start >= t0 && start <= tEnd) st[key + 'Busy'] += sec;
+      return rp[key];
     }
-    // SSD tier behind static slots: an evicted slot's KV (its stream's latest request) is written to SSD, one copy per
-    // stream (no prefix sharing), LRU over hostTok; the stream's next request reads back the prefix it shares with it
-    for (const rp of reps) if (rp.slots && plan.hostTok > 0) {
-      rp.ssd = new Map(); rp.ssdUsed = 0; // streamKey -> blocks, in LRU order
+    // read `host` blocks from host DRAM and `ssd` blocks from SSD onto the device; returns when both have landed
+    // (an SSD read streams into host DRAM and on over PCIe, so the two overlap)
+    function offFetch(rp, host, ssd) {
+      const tS = useLink(rp, 'ssdFree', offBytes(ssd), plan.ssdRdBps);
+      const tP = useLink(rp, 'h2dFree', offBytes(host + ssd), plan.pcieBps);
+      if (warmDone) { st.hostTok += host * B; st.ssdTok += ssd * B; }
+      return Math.max(tS, tP);
+    }
+    // a demotion: device -> host is a PCIe write-back, host -> SSD a drive write, device -> SSD both in turn
+    function offDemote(rp, blocks, from, to) {
+      const b = offBytes(blocks);
+      const t = from === 1 ? useLink(rp, 'd2hFree', b, plan.pcieBps) : now;
+      if (to === 3) useLink(rp, 'ssdFree', b, plan.ssdWrBps, t);
+      return t;
+    }
+    for (const rp of reps) if (rp.pool && offload) rp.pool.onDemote = (blocks, from, to) => { offDemote(rp, blocks, from, to); };
+    // behind static slots: an evicted slot's KV (its stream's latest request) goes to host DRAM, LRU over hostTok,
+    // overflowing to SSD, LRU over ssdTok, one copy per stream (no prefix sharing); the stream's next request reads
+    // back the prefix it shares with it. The new occupant waits for the PCIe write-back.
+    for (const rp of reps) if (rp.slots && offload) {
+      rp.off = { host: new Map(), hostUsed: 0, ssd: new Map(), ssdUsed: 0 }; // streamKey -> blocks, in LRU order
       rp.slots.onEvict = (key, blocks) => {
         if (!(blocks > 0)) return 0;
-        rp.pcieFree = Math.max(rp.pcieFree, now) + pcieS(blocks);
-        rp.ssd.set(key, blocks); rp.ssdUsed += blocks;
-        for (const [k, b] of rp.ssd) { if (rp.ssdUsed * B <= plan.hostTok) break; rp.ssd.delete(k); rp.ssdUsed -= b; }
-        return rp.pcieFree;
+        const o = rp.off, toHost = plan.hostTok > 0;
+        const t = offDemote(rp, blocks, 1, toHost ? 2 : 3);
+        if (toHost) { o.host.set(key, blocks); o.hostUsed += blocks; } else { o.ssd.set(key, blocks); o.ssdUsed += blocks; }
+        for (const [k, b] of o.host) {
+          if (o.hostUsed * B <= plan.hostTok) break;
+          o.host.delete(k); o.hostUsed -= b;
+          if (plan.ssdTok > 0) { offDemote(rp, b, 2, 3); o.ssd.set(k, b); o.ssdUsed += b; }
+        }
+        for (const [k, b] of o.ssd) { if (o.ssdUsed * B <= plan.ssdTok) break; o.ssd.delete(k); o.ssdUsed -= b; }
+        return t;
       };
     }
     const slotKey = (q) => q.tree.key * 4096 + (TR.req_stream[q.r] - q.tree.s0);
-    // read a stream's KV back from the SSD tier (the prefix the request shares with it); returns the fetch's end
-    function ssdFetch(q, rep, key) {
-      const stored = rep.ssd.get(key); rep.ssd.delete(key); rep.ssdUsed -= stored;
+    const offHas = (rep, key) => !!rep.off && (rep.off.host.has(key) || rep.off.ssd.has(key));
+    // read a stream's KV back from host DRAM or SSD (the prefix the request shares with it); returns the fetch's end
+    function slotFetch(q, rep, key) {
+      const o = rep.off, inHost = o.host.has(key), m = inHost ? o.host : o.ssd;
+      const stored = m.get(key); m.delete(key); if (inHost) o.hostUsed -= stored; else o.ssdUsed -= stored;
       const blocks = Math.min(stored, TR.req_lcp_prev[q.r]);
       q.ssdBlocks = blocks;
-      if (warmDone) st.hostTok += blocks * B;
-      const t = Math.max(now, rep.pcieFree) + pcieS(blocks); rep.pcieFree = t; return t;
+      return inHost ? offFetch(rep, blocks, 0) : offFetch(rep, 0, blocks);
     }
     // stats
-    const st = { done: 0, useful: 0, newTok: 0, processed: 0, hitTok: 0, inTok: 0, infHitTok: 0, hostTok: 0, reprefill: 0, alignLoss: 0,
+    const st = { done: 0, useful: 0, newTok: 0, processed: 0, hitTok: 0, inTok: 0, infHitTok: 0, hostTok: 0, ssdTok: 0, reprefill: 0, alignLoss: 0,
+      h2dFreeBusy: 0, d2hFreeBusy: 0, ssdFreeBusy: 0,
       ttft: [], chunks: 0, segs: 0, laneWait: 0, reqs: 0, primers: 0, warmupS: 0, idleWarps: 0, primerTok: 0,
       gated: 0, gateWait: 0, legacyStarts: 0, skippedTraces: 0, rrSegs: 0, rrReuse: 0, rrCopyIn: 0,
       outTok: 0, decArea: 0, decingArea: 0, decMax: 0, decWaits: 0, decWait: 0, decWaited: 0, runWait: 0, runWaited: 0 };
@@ -1012,19 +1096,17 @@
       if (rep.pool) {
         const pool = rep.pool; const n = pool.walk(tree.ns, TR.req_leaf[r] - TR.tr_pc0[tree.trace]);
         pool.hit(n);
-        let dev = pool.hDev, host = pool.hHost;
+        const dev = pool.hDev, host = pool.hHost, ssd = pool.hSsd;
         pool.refresh(n, now); // LRU-refresh the resident part of the path; tryStart re-checks what is left
-        q.hitRaw = dev + host; q.host = host;
-        if (host > 0 && plan.hostTok > 0) { // fetch host part over PCIe before it can be admitted
-          const bytes = host * B * M3.L * plan.kvbHost;
-          const t = Math.max(now, rep.pcieFree) + bytes / plan.pcieBps; rep.pcieFree = t; q.fetchedAt = t;
-          if (warmDone) st.hostTok += host * B;
+        q.hitRaw = dev + host + ssd; q.host = host + ssd;
+        if (host + ssd > 0 && offload) { // fetch the host DRAM / SSD part before it can be admitted
+          const t = offFetch(rep, host, ssd); q.fetchedAt = t;
           ev.push(t, { e: EV_FETCHED, q }); return;
         }
       }
-      if (rep.ssd && !q.primer) { // static slots: the stream's KV is on SSD, not in a slot -> read it back before admission
+      if (rep.off && !q.primer) { // static slots: the stream's KV is in host DRAM / on SSD, not in a slot -> read it back
         const key = slotKey(q);
-        if (!rep.slots.of.has(key) && rep.ssd.has(key)) { const t = ssdFetch(q, rep, key); q.fetchedAt = t; ev.push(t, { e: EV_FETCHED, q }); return; }
+        if (!rep.slots.of.has(key) && offHas(rep, key)) { const t = slotFetch(q, rep, key); q.fetchedAt = t; ev.push(t, { e: EV_FETCHED, q }); return; }
       }
       enqueue(q);
     }
@@ -1048,7 +1130,7 @@
         q.slot = a.slot; q.laneCap = cfg.slotLen;
         if (rep.slots.evictEnd > (q.readyAt || 0)) q.readyAt = rep.slots.evictEnd; // previous occupant still writing back
         // SSD tier: read back at READY, or now if the slot was evicted while the request was queued
-        if (!a.warm && !q.ssdBlocks && rep.ssd && rep.ssd.has(streamKey)) q.readyAt = Math.max(q.readyAt || 0, ssdFetch(q, rep, streamKey));
+        if (!a.warm && !q.ssdBlocks && offHas(rep, streamKey)) q.readyAt = Math.max(q.readyAt || 0, slotFetch(q, rep, streamKey));
         const lp = a.warm ? TR.req_lcp_prev[r] : q.ssdBlocks || 0;
         q.hitTok = hitTokens(q, lp);
       } else {
@@ -1068,13 +1150,10 @@
         // re-check the hit: the READY-time refresh does not pin, so pages may have been evicted (lost) or demoted to
         // host (need a PCIe fetch) while the request was queued. Blocks fetched at READY are staged on device.
         const pool = rep.pool; const n = pool.walk(tree.ns, TR.req_leaf[r] - TR.tr_pc0[tree.trace]); pool.hit(n);
-        const devNow = pool.hDev, hostNow = pool.hHost, fetched = q.host || 0;
-        const hitB = Math.min(q.hitRaw, devNow + Math.max(hostNow, fetched));
-        const extra = plan.hostTok > 0 ? Math.max(0, hitB - devNow - fetched) : 0;
-        if (extra > 0) {
-          const t = Math.max(now, rep.pcieFree) + extra * B * M3.L * plan.kvbHost / plan.pcieBps; rep.pcieFree = t; q.readyAt = t;
-          if (warmDone) st.hostTok += extra * B;
-        }
+        const devNow = pool.hDev, offNow = pool.hHost + pool.hSsd, fetched = q.host || 0;
+        const hitB = Math.min(q.hitRaw, devNow + Math.max(offNow, fetched));
+        const extra = offload ? Math.max(0, hitB - devNow - fetched) : 0;
+        if (extra > 0) { const h = Math.min(extra, pool.hHost); q.readyAt = offFetch(rep, h, extra - h); }
         q.hitTok = hitTokens(q, hitB);
         if (pinHits) { q.pins = pool.pinPrefix(n, q.hitTok / B); q.pinTok = Math.min(pool.pinB * B, q.hitTok); }
         if (cfg.cache === 'paging' && plan.poolTok !== Infinity) { q.resv = (TR.req_blocks[r] * B - q.hitTok) / B; pool.reserve(q.resv); }
@@ -1432,7 +1511,10 @@
       alignLossFrac: st.inTok ? st.alignLoss / st.inTok : 0,
       avgChunkTok: st.chunks ? st.processed / st.chunks : 0, avgSegsPerChunk: st.chunks ? st.segs / st.chunks : 0,
       stageUtil: util, maxUtil: Math.max(...util), done: st.done, warmupS: st.warmupS, primers: st.primers, primerTok: st.primerTok,
-      laneWaitMean: st.done ? st.laneWait / Math.max(1, st.done) : 0, hostTok: st.hostTok, idleWarps: st.idleWarps,
+      laneWaitMean: st.done ? st.laneWait / Math.max(1, st.done) : 0, hostTok: st.hostTok, ssdTok: st.ssdTok, idleWarps: st.idleWarps,
+      // offload traffic (tokens read back per second from host DRAM / SSD) and link busy shares
+      hostReadTps: st.hostTok / D, ssdReadTps: st.ssdTok / D,
+      pcieH2DUtil: st.h2dFreeBusy / (D * reps.length), pcieD2HUtil: st.d2hFreeBusy / (D * reps.length), ssdUtil: st.ssdFreeBusy / (D * reps.length),
       // decode slots: held on average and at most (admission to decode end), decoding on average, and the requests
       // that waited for a slot (count per second, mean wait)
       decSlotsMean: st.decArea / D, decSlotsMax: st.decMax, decodingMean: st.decingArea / D,
@@ -1455,7 +1537,8 @@
   function planSummary(plan) {
     return {
       S: plan.S, mesh: [plan.sp, plan.tp], counts: plan.counts, capTok: plan.capTok, nSlots: plan.nSlots, poolTok: plan.poolTok,
-      lanes: plan.lanes, arena: plan.arena, hostTok: plan.hostTok, errors: plan.errors, kvbL: plan.kvbL,
+      lanes: plan.lanes, arena: plan.arena, hostTok: plan.hostTok, ssdTok: plan.ssdTok, hostKvGB: +plan.hostBudget.kv.toFixed(1),
+      errors: plan.errors, kvbL: plan.kvbL,
       weightsGBperChip: plan.stages.map((s) => +s.weightsGBperChip.toFixed(2)),
     };
   }

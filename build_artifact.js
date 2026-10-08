@@ -31,7 +31,9 @@ const slim = (a) => (a ? { conc: a.conc, usefulTps: a.usefulTps, processedTps: a
 const DETAILS = require('./feature_details.js');
 // studies run before the host-DRAM tier was renamed to the SSD tier store the old sensitivity names
 const SENS_RENAME = { 'host 0.5 TB/gx': 'SSD 0.5 TB/gx', 'host 2 TB/gx': 'SSD 2 TB/gx', 'PCIe 16 GB/s/gx': 'SSD 16 GB/s/gx', 'PCIe 256 GB/s/gx': 'SSD 256 GB/s/gx' };
-const S = { slo: study.slo, features: FEATURES.map((f) => ({ key: f.key, name: f.name, requires: f.requires || [], scope: SCOPE[f.key], detail: DETAILS[f.key] })), scenarios: {} };
+// feature names as the study ran them (a feature's definition may have changed since), else the current ones
+const studyName = (f) => ((study.features || []).find((x) => x.key === f.key) || f).name;
+const S = { slo: study.slo, features: FEATURES.map((f) => ({ key: f.key, name: studyName(f), requires: f.requires || [], scope: SCOPE[f.key], detail: DETAILS[f.key] })), scenarios: {} };
 const presets = PRESETS.list.map((p) => ({ name: p.name, desc: p.desc, cfg: p.cfg }));
 for (const [key, R] of Object.entries(study.scenarios)) {
   S.scenarios[key] = {

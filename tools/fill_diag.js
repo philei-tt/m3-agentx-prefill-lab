@@ -13,10 +13,10 @@ const CASES = {
   g8_k0: [1136, 1656],
 };
 const VARIANTS = [
-  ['best (pool lanes/arena + host 1 TB/gx)', {}],
-  ['paging + host 1 TB/gx', { cache: 'paging', laneArena: false }],
-  ['paging + host 8 TB/gx', { cache: 'paging', laneArena: false, hostGBPerGalaxy: 8192 }],
-  ['paging + host 8 TB/gx + PCIe 1 TB/s', { cache: 'paging', laneArena: false, hostGBPerGalaxy: 8192, pcieGBsPerGalaxy: 1000 }],
+  ['best (pool lanes/arena + offload tiers)', {}],
+  ['paging + offload tiers', { cache: 'paging', laneArena: false }],
+  ['paging + offload tiers, 1 TB SSD/gx', { cache: 'paging', laneArena: false, ssdTBPerGalaxy: 1 }],
+  ['paging + offload tiers + PCIe 1 TB/s', { cache: 'paging', laneArena: false, pcieGBsPerGalaxy: 1000 }],
   ['infinite cache', { cache: 'inf', hostTier: false, laneArena: false }],
 ];
 

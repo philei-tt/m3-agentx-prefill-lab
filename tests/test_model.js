@@ -56,14 +56,26 @@ assert.strictEqual(a.done, b.done); assert.ok(Math.abs(a.usefulTps - b.usefulTps
 const r = SIM.simulate(TR, cal, Object.assign({ cache: 'inf', batch: true, budget: 16384, layout: 'fixed' }, base, { concurrency: 64 }));
 assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
 
-// 7. replay: an SSD tier behind static slots keeps evicted slots' KV, so reads happen and the hit rate improves; the
+// 7. replay: offload tiers behind static slots keep evicted slots' KV, so reads happen and the hit rate improves; the
 //    infinite cache has no tier
 {
   const cfg = Object.assign({ cache: 'slots', chunk: 2048, unaligned: true }, base, { concurrency: 64 });
   const a = SIM.simulate(TR, cal, cfg), b = SIM.simulate(TR, cal, Object.assign({ hostTier: true }, cfg));
-  assert.ok(SIM.makePlan(Object.assign({ hostTier: true }, cfg), cal).hostTok > 0 && b.hostTok > 0, 'no SSD reads behind slots');
-  assert.ok(b.hitRate > a.hitRate, `slots + SSD hit ${b.hitRate} <= ${a.hitRate}`);
-  assert.strictEqual(SIM.makePlan(Object.assign({ hostTier: true }, cfg, { cache: 'inf' }), cal).hostTok, 0);
+  assert.ok(SIM.makePlan(Object.assign({ hostTier: true }, cfg), cal).hostTok > 0 && b.hostTok > 0, 'no host reads behind slots');
+  assert.ok(b.hitRate > a.hitRate, `slots + tiers hit ${b.hitRate} <= ${a.hitRate}`);
+  const inf = SIM.makePlan(Object.assign({ hostTier: true }, cfg, { cache: 'inf' }), cal);
+  assert.ok(inf.hostTok === 0 && inf.ssdTok === 0);
+}
+
+// 7b. offload tiers: the host DRAM share left for KV is DRAM minus the reserves; with a small host tier, pool pages
+//     cascade device -> host -> SSD and are read back from both; without host DRAM, evictions go straight to SSD
+{
+  const p = SIM.makePlan(Object.assign({ cache: 'pool', hostTier: true }, base), cal), h = p.hostBudget;
+  assert.ok(Math.abs(h.kv - (576 * 0.9 - 16 - 32 - 32 - 32 * 1.073741824 - h.weights)) < 1e-9 && h.weights > 0 && p.ssdTok > p.hostTok, `host kv ${h.kv}`);
+  const cfg = Object.assign({ cache: 'pool', chunk: 2048, hostTier: true, hostDramGBPerGalaxy: 260 }, base, { concurrency: 256 }); // about 50 GB of KV
+  const r = SIM.simulate(TR, cal, cfg), n = SIM.simulate(TR, cal, Object.assign({}, cfg, { hostDramGBPerGalaxy: 0 }));
+  assert.ok(r.hostTok > 0 && r.ssdTok > 0 && r.pcieH2DUtil > 0 && r.ssdUtil > 0, `reads host ${r.hostTok} ssd ${r.ssdTok}`);
+  assert.ok(n.hostTok === 0 && n.ssdTok > 0, 'no host tier: SSD only');
 }
 
 // 8. unaligned resume (tt-metal #57636) is the default: no cached tokens are lost to chunk rounding unless

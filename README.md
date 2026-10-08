@@ -68,7 +68,7 @@ completed in the window; study points from before it have no margin. Override wi
 
 | file | what |
 |---|---|
-| `sim_core.js` | **The whole model** (no dependencies): per-op roofline + calibration, stage plan and memory, KV residency (static slots / paged pool with lanes / SSD tier / paging / ∞), and the closed-loop replay. The artifact inlines it and node requires it. |
+| `sim_core.js` | **The whole model** (no dependencies): per-op roofline + calibration, stage plan and memory, KV residency (static slots / paged pool with lanes / host DRAM + SSD offload tiers / paging / ∞), and the closed-loop replay. The artifact inlines it and node requires it. |
 | `prep_traffic.py` | Corpus → `traffic.bin` + `traffic.json`: agent-chain split, DAG, end-to-start delays, spawn/join, replay barriers, prefix-tree pieces. Takes 23 s on 4 cores. |
 | `collect_calib.py` | Measured data → `calib_data.json` (committed): zone profiles, per-rank per-chunk-position medians of runs A/B/C, matrix tables. |
 | `validate.js` | Calibration report: fitted efficiencies, per-rank stage times, and all 105 matrix cells, model vs measured. |
@@ -189,16 +189,32 @@ Every buffer that must hold a whole request (slots, fixed lanes, the lane arena)
 ## KV residency
 
 * **`slots`** (today): one 1M slot per stream; LRU over idle slots. The hit is the prefix shared with the stream's previous request, resumed at any 32-token boundary (`unaligned`, default on since tt-metal #57636 merged; `--set unaligned=false` floors it to a chunk multiple, the old behaviour).
-  * With `hostTier` (SSD tier): a reclaimed slot's KV (its stream's latest request) is written to SSD, and the new occupant waits for that write-back. The stream's next request reads back the prefix it shares with it before admission (or at start, if its slot was reclaimed while it was queued). One copy per stream, LRU over the SSD capacity, index_k stored once; write-backs and reads share `pcieGBsPerGalaxy`. On today-C (unaligned, round robin, 1 TB/galaxy) goodput goes from 3.3k to 16.4k (p90 6.8 s, hit 94.8%), vs 24.9k for the pool with one lane and the same SSD. In the study the SSD feature no longer requires the pool, and it is now the first roadmap step.
+  * With `hostTier` (the offload tiers, below): a reclaimed slot's KV (its stream's latest request) is written to host DRAM over PCIe, and the new occupant waits for that write-back; host DRAM overflows to SSD. The stream's next request reads back the prefix it shares with it before admission (or at start, if its slot was reclaimed while it was queued). One copy per stream, LRU per tier, index_k stored once. The numbers that follow are from the Oct 1 study, when this was a 1 TB SSD tier at 64 GB/s: On today-C (unaligned, round robin, 1 TB/galaxy) goodput goes from 3.3k to 16.4k (p90 6.8 s, hit 94.8%), vs 24.9k for the pool with one lane and the same SSD. In the study the SSD feature no longer requires the pool, and it is now the first roadmap step.
 * **`pool`**: lanes (fixed 1M per stage, or request-sized in an arena) plus a content-addressed paged pool with LRU over prefix-tree pieces.
   * **Lanes per stage** are derived: with a per-stage lane table a stage works on one chunk at a time, so it needs one lane per request in the batch it is processing (1 without batching, the chunk units per batch with fixed-layout batching), times the buffers of `copyMode` (sequential 1, double 2, overlap3 3). A global lane table (`laneScope: 'global'`) holds a lane for the request's whole trip through the pipeline, so it derives stages × requests per batch, and it allows only sequential copies (buffering a lane reserved for the whole trip gains nothing). `lanesOverride: true` sets the count to `lanes` instead; it is allowed only with batching on the pool. Variable-layout batching has no chunk units, so it must override. Every request in a batch holds its own lane, so the count caps the requests per batch, under every policy. Each extra 1M lane comes out of the pool: at 4 galaxies without the SSD tier, one lane beats three by 2–4% and eight lanes cost 13–22% with batching. The study's batched stacks override (its pool feature uses 4 lanes; the grid tries 2/4/6); its unbatched pool steps derive 1 lane.
   * The prefix tree is compressed into pieces cut at branch points and request ends, so every request touches whole pieces. LRU over pieces matches LRU over 64-token pages except that a piece is evicted whole. Against a brute-force page LRU, total hits agree within 0.15%.
   * The hit is looked up when the request becomes ready (which refreshes it in the LRU, but does not pin it), and re-checked when the request starts. Pages evicted meanwhile are recomputed; pages demoted to host meanwhile are fetched over PCIe before the first chunk.
   * The new KV enters the pool when the lane is freed: with per-stage lanes, when stage 0 finishes the request's last chunk (later stages follow in FIFO order); with global lanes, at prefill completion.
   * Copy-in/out is DRAM-bound per stage. By default (`copyMode: 'sequential'`) the full copy time is charged on the stage. `'double'` overlaps copies with compute and charges 25% of their time for DRAM contention; the study's pool feature pins this mode, which was the default when `results/study.json` was computed. `'overlap3'` is static triple buffering.
-  * With `hostTier` (the **SSD KV tier**; the keys keep their old host-DRAM names), device evictions are demoted to SSD. SSD hits are read back before admission, and write-backs share the same bandwidth (`pcieGBsPerGalaxy` = the lower of the drives' and PCIe's). SSD copies store index_k once (no TP replicas; re-broadcast on fetch).
+  * With `hostTier` (the **KV offload tiers**), device evictions move to host DRAM, host DRAM evicts to SSD, SSD drops (exclusive LRU tiers over prefix-tree pieces). Hits are read back before admission. Offloaded copies store index_k once (no TP replicas; re-broadcast on fetch).
   * Known approximation: KV fetched from host at READY is staged on device without being counted against capacity until the request starts.
-* **`paging`**: an ideal paged kernel (no lanes, no copies). The pages a request is writing are reserved in the pool from start to completion. The SSD tier also works behind paging.
+* **`paging`**: an ideal paged kernel (no lanes, no copies). The pages a request is writing are reserved in the pool from start to completion. The offload tiers also work behind paging.
+* **KV offload tiers** (`hostTier`): device DRAM → host DRAM → SSD, per galaxy host. Defaults, from the [Tenstorrent Galaxy Blackhole Server User Guide v1.8](https://docs.tenstorrent.com/_downloads/3086863c42126fd0d63b01baccf8432e/galaxy-blackhole.pdf) unless noted:
+  * **Host DRAM** `hostDramGBPerGalaxy` 576 GB (6 × 96 GB DDR5-4800 RDIMM). The share left for KV is derived in `makePlan` (`plan.hostBudget`), and these reserves are estimates:
+
+    | reserve | default | key |
+    |---|---|---|
+    | headroom | 10% (58 GB) | `hostHeadroom` |
+    | OS and services | 16 GB | `hostOsGB` |
+    | model runtime (tt-metal, inference server, program caches) | 32 GB | `hostRuntimeGB` |
+    | staging for KV migration to decode | 32 GB | `hostKvStagingGB` |
+    | pinned PCIe host memory: 1 GiB hugepage channel per chip (tt-metal/UMD picks min(4, chips per MMIO device) = 1 on a Galaxy, where every chip has its own PCIe link) | 34 GB | `hostPinnedGBPerChip` |
+    | this galaxy's share of the model weights (host copies while loading / reloading) | 33 GB at 8 galaxies, 67 GB at 4 | `hostStageWeights` |
+
+    That leaves about **371 GB of KV per galaxy at 8 galaxies** (37M tokens per pipeline at 80.6 KB/token, next to 56M of device pool) and 337 GB at 4 galaxies (17M tokens, next to 20M). Set `hostDramGBPerGalaxy: 0` to drop the host tier. The AgentX rules cap host DRAM per system; check that cap against this budget.
+  * **SSD** `ssdTBPerGalaxy` 32 TB (4 E1.S bays; shipped systems carry 4 × 7.68 TB Samsung PM9D3a, MZTL67T6HBLC = 30.7 TB): 3.2B tokens at 8 galaxies. Bandwidth `ssdReadGBsPerGalaxy` 31.5, `ssdWriteGBsPerGalaxy` 27.2 GB/s: the [PM9D3a](https://semiconductor.samsung.com/ssd/datacenter-ssd/pm9d3a/) reads up to 12,000 MB/s and writes up to 6,800 MB/s at PCIe 5.0 x4, but Rev C chassis run the E1.S links at Gen4 x4 (a BIOS setting in the Exabox provisioning runbook), which caps a read at 7.88 GB/s per drive. Reads and writes share the drives.
+  * **PCIe** `pcieGBsPerGalaxy` 63 GB/s each way, full duplex (fetches and write-backs do not share it). Per tray, one chip has a Gen5 x8 host link and seven have x1 links that train at Gen4 (user guide: "PCIe Gen5 1x8 and 7x1"; Quanta S7TK product spec: "7x1 PCIe G4"). KV is spread evenly over the chips and each chip moves its own share over its own link, so the x1 chips set the pace: 32 × 1.97 GB/s. Relaying through each tray's x8 chip over Ethernet would allow up to 4 × (31.5 + 7 × 1.97) = 181 GB/s; no software does that today.
+  * Not modelled: host DRAM bandwidth (6 channels of DDR5-4800, about 230 GB/s, above the links' combined peak), SSD endurance and per-IO latency. A device page counts as free as soon as its write-back is queued. Runs report `hostReadTps`, `ssdReadTps` and the busy share of each link (`pcieH2DUtil`, `pcieD2HUtil`, `ssdUtil`).
 * **`inf`**: infinite cache.
 
 ## Scheduling (`policy`)
@@ -213,6 +229,8 @@ Every buffer that must hold a whole request (slots, fixed lanes, the lane arena)
   * Round robin on the pool, and paging under rr, pin the cached prefix of every request in progress. A request is admitted only while the pool can hold all in-progress requests in full; until then it waits in the queue. This matches tt-d-gen, where admission needs a free slot, a full pool queues the request rather than rejecting it, and in-flight slots are never evicted.
 
 ## Findings (study of Oct 1 2026: round-robin scheduling, sequential pool copies, derived lane counts, SSD tier behind static slots, unaligned resume in the baseline; decode 180 tok/s, AIPerf-exact replay, `results/study.json`)
+
+This study predates the host DRAM tier: its "SSD KV tier" was a single 1 TB tier per galaxy at 64 GB/s, not today's host DRAM + 32 TB SSD. Re-run `study.js` to update it.
 
 Goodput in useful tok/s at p90 TTFT ≤ 10 s. "Today" = 16×[2,4] (or 32×[2,4]), chunk 2048, auto split, static 1M slots, round-robin scheduling, unaligned resume.
 
@@ -410,7 +428,7 @@ Takeaways (study numbers are from the Oct 1 study; the results of separate `tool
 
 ## Assumptions to revisit
 
-* SSD tier: 1 TB and 64 GB/s per galaxy are placeholders (carried over from the earlier host-DRAM tier), modelled as an ideal page DMA with one symmetric bandwidth; endurance, read/write asymmetry and IO latency are not modelled. Set the real drive numbers; see the sensitivity table in the artifact.
+* Offload tiers: capacities and bandwidths come from the Galaxy Blackhole documentation and the drive datasheet, but the host DRAM reserves (OS, runtime, KV staging) are estimates, and transfers are ideal page DMAs. The PCIe figure assumes each chip moves its own KV over its own link; measure the sustained rate.
 * Pool copies are page-list gathers at 50% DRAM efficiency. Arena fragmentation is not modelled.
 * Decode is a fixed per-request rate, whatever the number of sessions decoding, and its capacity is a slot count
   (`decodeSlots`), not KV bytes per context length (today's decode slots hold 64k positions; AgentX contexts average

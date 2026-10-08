@@ -18,8 +18,8 @@ async function main() {
   for (const key of get('--scenarios', 'g4_k0,g8_k0').split(',')) {
     const R = study.scenarios[key];
     const best = Object.assign(withFeatures(R.base, R.bestKeys), R.grid[0].extra);
-    for (const [name, d] of [['paging + host 1 TB/gx', { cache: 'paging', laneArena: false, hostGBPerGalaxy: 1024 }],
-      ['paging + host 8 TB/gx', { cache: 'paging', laneArena: false, hostGBPerGalaxy: 8192 }]])
+    for (const [name, d] of [['paging + 1 TB SSD/gx', { cache: 'paging', laneArena: false, ssdTBPerGalaxy: 1 }],
+      ['paging + 32 TB SSD/gx', { cache: 'paging', laneArena: false, ssdTBPerGalaxy: 32 }]])
       jobs.push(pool.evalCfg(`${key} ${name}`, Object.assign({}, best, d), PAGE_GRID, 10).then((r) => ({ key, name, pts: r.points })));
   }
   const res = await Promise.all(jobs);
