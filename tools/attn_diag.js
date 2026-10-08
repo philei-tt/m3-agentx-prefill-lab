@@ -69,8 +69,9 @@ Promise.all(jobs.map((j) => new Promise((res) => {
   console.log('\n== B) replay at the peak concurrency, fixed chunk 128, 64k budget, infinite cache: stage utilisation');
   for (const r of rs) {
     let start = 0; const dense = [], moe = [];
+    // a stage holding any of the 3 dense layers (with the auto split it may also hold MoE layers)
     r.counts.forEach((n, s) => { (start < 3 ? dense : moe).push(r.util[s]); start += n; });
     const mx = (a) => (a.length ? (100 * Math.max(...a)).toFixed(0) : '-');
-    console.log(`  ${r.key} ${r.attn.padEnd(5)} prefetch ${String(r.prefetchKV).padEnd(5)}: useful ${(r.useful / 1e3).toFixed(1)}k, ${r.req.toFixed(1)} req/chunk | busiest dense-layer stage ${mx(dense)}% (${dense.length} stages) vs busiest MoE stage ${mx(moe)}% | layers/stage ${r.counts.slice(0, 6).join(',')}..`);
+    console.log(`  ${r.key} ${r.attn.padEnd(5)} prefetch ${String(r.prefetchKV).padEnd(5)}: useful ${(r.useful / 1e3).toFixed(1)}k, ${r.req.toFixed(1)} req/chunk | busiest stage with a dense layer ${mx(dense)}% (${dense.length} stages) vs busiest MoE-only stage ${mx(moe)}% | layers/stage ${r.counts.slice(0, 6).join(',')}..`);
   }
 });

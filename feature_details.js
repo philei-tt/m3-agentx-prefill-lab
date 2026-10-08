@@ -73,7 +73,7 @@ module.exports = {
       'MSA cache read and ring attention without chunk-aligned starts.',
       'MoE buffers sized for the maximum budget; compile/trace buckets for variable token counts.',
     ],
-    notes: 'Includes unaligned resume. Most of its value is realised together with batching. A small fixed chunk plus batching gets nearly all of it, as long as a request\'s chunk-units in one batch form one attention call (its prefix is gathered once). With the same attention, fixed chunk 128-256 plus batching matches the variable layout in every scenario (within 0.8% with fused ("ragged") attention; 0-0.8% ahead with per-request attention), and chunk 1024 is 2-4% behind (tools/layout_ab.js, Oct 8 best configs). Chunks below 2048 are extrapolated (calibrated at 2048 and 5120).',
+    notes: 'Includes unaligned resume. Most of its value is realised together with batching. A small fixed chunk plus batching gets nearly all of it, as long as a request\'s chunk-units in one batch form one attention call (its prefix is gathered once). With the same attention, fixed chunk 128-256 plus batching matches the variable layout in every scenario (within 0.5% with fused ("ragged") attention; 0.1-0.4% ahead with per-request attention), and chunk 1024 is 3-4% behind (tools/layout_ab.js, Oct 8 best configs with the new auto split; at 4 galaxies with roofline kernels, where SSD reads bind, every chunk from 128 to 2048 is within 0.4%). Chunks below 2048 are extrapolated (calibrated at 2048 and 5120).',
   },
   arena: {
     what: 'Instead of fixed 1M lanes, give each request a lane of its actual length from one contiguous arena per stage (2-8M tokens).',

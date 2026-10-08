@@ -1,54 +1,54 @@
 
-== today 4gx 16x[2,4] C=2048 + pool + tiers  | no batching:   25.5k (req/chunk 1.00, pad 19%)
-  budget  4k: sized to tokens   29.4k (req/chunk 1.29, pad 20%) | static budget shape   29.4k (req/chunk 1.30, pad 23%) | x1.00
-  budget  8k: sized to tokens   30.5k (req/chunk 1.47, pad 20%) | static budget shape   29.3k (req/chunk 1.63, pad 37%) | x0.96
-  budget 16k: sized to tokens   29.5k (req/chunk 1.36, pad 20%) | static budget shape   15.7k (req/chunk 1.18, pad 71%) | x0.53
-  budget 32k: sized to tokens   25.0k (req/chunk 1.31, pad 20%) | static budget shape    8.7k (req/chunk 1.12, pad 85%) | x0.35
+== today 4gx 16x[2,4] C=2048 + pool + tiers  | no batching:   30.2k (req/chunk 1.00, pad 20%)
+  budget  4k: sized to tokens   36.6k (req/chunk 1.38, pad 20%) | static budget shape   36.6k (req/chunk 1.38, pad 20%) | x1.00
+  budget  8k: sized to tokens   39.8k (req/chunk 2.07, pad 20%) | static budget shape   39.5k (req/chunk 2.07, pad 22%) | x0.99
+  budget 16k: sized to tokens   40.2k (req/chunk 2.45, pad 20%) | static budget shape   28.7k (req/chunk 1.90, pad 55%) | x0.71
+  budget 32k: sized to tokens   27.4k (req/chunk 1.59, pad 20%) | static budget shape   12.3k (req/chunk 1.32, pad 82%) | x0.45
 
-== g4_k0 best stack, fixed C=256  | no batching:   33.6k (req/chunk 1.00, pad 20%)
-  budget  4k: sized to tokens   48.2k (req/chunk 1.59, pad 2%) | static budget shape   48.2k (req/chunk 1.61, pad 11%) | x1.00
-  budget  8k: sized to tokens   55.9k (req/chunk 2.07, pad 2%) | static budget shape   55.2k (req/chunk 2.15, pad 18%) | x0.99
-  budget 16k: sized to tokens   58.7k (req/chunk 2.38, pad 2%) | static budget shape   56.0k (req/chunk 2.83, pad 34%) | x0.95
-  budget 32k: sized to tokens   50.2k (req/chunk 2.20, pad 2%) | static budget shape   37.1k (req/chunk 1.91, pad 75%) | x0.74
+== g4_k0 best stack, fixed C=256  | no batching:   43.4k (req/chunk 1.00, pad 20%)
+  budget  4k: sized to tokens   55.2k (req/chunk 1.80, pad 2%) | static budget shape   55.3k (req/chunk 1.79, pad 3%) | x1.00
+  budget  8k: sized to tokens   65.1k (req/chunk 2.61, pad 2%) | static budget shape   64.9k (req/chunk 2.61, pad 3%) | x1.00
+  budget 16k: sized to tokens   68.9k (req/chunk 4.15, pad 2%) | static budget shape   68.4k (req/chunk 4.11, pad 8%) | x0.99
+  budget 32k: sized to tokens   50.0k (req/chunk 2.23, pad 2%) | static budget shape   36.0k (req/chunk 1.81, pad 76%) | x0.72
 
 == g4_k0 best stack, var layout
-  budget  4k: sized to tokens   48.3k (req/chunk 1.61, pad 1%) | static budget shape   48.2k (req/chunk 1.65, pad 9%) | x1.00
-  budget  8k: sized to tokens   55.8k (req/chunk 2.07, pad 1%) | static budget shape   55.0k (req/chunk 2.15, pad 18%) | x0.99
-  budget 16k: sized to tokens   59.1k (req/chunk 2.49, pad 1%) | static budget shape   55.8k (req/chunk 2.75, pad 35%) | x0.94
-  budget 32k: sized to tokens   47.8k (req/chunk 1.98, pad 1%) | static budget shape   36.4k (req/chunk 1.80, pad 76%) | x0.76
+  budget  4k: sized to tokens   55.1k (req/chunk 1.81, pad 1%) | static budget shape   55.1k (req/chunk 1.83, pad 1%) | x1.00
+  budget  8k: sized to tokens   64.8k (req/chunk 2.64, pad 1%) | static budget shape   64.9k (req/chunk 2.65, pad 1%) | x1.00
+  budget 16k: sized to tokens   68.8k (req/chunk 4.18, pad 1%) | static budget shape   68.7k (req/chunk 4.21, pad 6%) | x1.00
+  budget 32k: sized to tokens   49.8k (req/chunk 2.18, pad 1%) | static budget shape   36.1k (req/chunk 1.82, pad 76%) | x0.72
 
-== g4_k1 best stack, fixed C=256  | no batching:   63.9k (req/chunk 1.00, pad 20%)
-  budget  4k: sized to tokens  102.1k (req/chunk 1.70, pad 2%) | static budget shape  101.8k (req/chunk 1.71, pad 7%) | x1.00
-  budget  8k: sized to tokens  116.9k (req/chunk 2.23, pad 2%) | static budget shape  116.1k (req/chunk 2.30, pad 16%) | x0.99
-  budget 16k: sized to tokens  125.9k (req/chunk 2.60, pad 2%) | static budget shape  123.6k (req/chunk 3.24, pad 28%) | x0.98
-  budget 32k: sized to tokens  131.0k (req/chunk 2.84, pad 2%) | static budget shape  126.2k (req/chunk 5.33, pad 34%) | x0.96
+== g4_k1 best stack, fixed C=256  | no batching:   97.8k (req/chunk 1.00, pad 20%)
+  budget  4k: sized to tokens  137.4k (req/chunk 1.53, pad 2%) | static budget shape  136.3k (req/chunk 1.52, pad 16%) | x0.99
+  budget  8k: sized to tokens  137.8k (req/chunk 1.44, pad 2%) | static budget shape  137.2k (req/chunk 1.55, pad 40%) | x1.00
+  budget 16k: sized to tokens  137.1k (req/chunk 1.40, pad 2%) | static budget shape  134.8k (req/chunk 1.99, pad 54%) | x0.98
+  budget 32k: sized to tokens  135.0k (req/chunk 1.61, pad 2%) | static budget shape  128.8k (req/chunk 3.08, pad 61%) | x0.95
 
 == g4_k1 best stack, var layout
-  budget  4k: sized to tokens   99.8k (req/chunk 1.72, pad 2%) | static budget shape   99.5k (req/chunk 1.72, pad 6%) | x1.00
-  budget  8k: sized to tokens  114.6k (req/chunk 2.24, pad 2%) | static budget shape  114.5k (req/chunk 2.29, pad 16%) | x1.00
-  budget 16k: sized to tokens  123.5k (req/chunk 2.50, pad 2%) | static budget shape  121.7k (req/chunk 3.32, pad 26%) | x0.98
-  budget 32k: sized to tokens  130.1k (req/chunk 3.11, pad 2%) | static budget shape  125.2k (req/chunk 5.39, pad 33%) | x0.96
+  budget  4k: sized to tokens  136.7k (req/chunk 1.52, pad 1%) | static budget shape  136.2k (req/chunk 1.53, pad 15%) | x1.00
+  budget  8k: sized to tokens  137.7k (req/chunk 1.44, pad 1%) | static budget shape  137.1k (req/chunk 1.56, pad 40%) | x1.00
+  budget 16k: sized to tokens  136.9k (req/chunk 1.41, pad 1%) | static budget shape  134.9k (req/chunk 2.00, pad 54%) | x0.99
+  budget 32k: sized to tokens  135.1k (req/chunk 1.62, pad 1%) | static budget shape  128.7k (req/chunk 3.10, pad 61%) | x0.95
 
 == g8_k0 best stack, fixed C=256  | no batching:   85.0k (req/chunk 1.00, pad 20%)
-  budget  4k: sized to tokens  110.4k (req/chunk 1.84, pad 3%) | static budget shape  110.4k (req/chunk 1.84, pad 2%) | x1.00
-  budget  8k: sized to tokens  128.1k (req/chunk 2.69, pad 2%) | static budget shape  128.4k (req/chunk 2.69, pad 2%) | x1.00
-  budget 16k: sized to tokens  139.1k (req/chunk 4.28, pad 2%) | static budget shape  138.8k (req/chunk 4.27, pad 5%) | x1.00
-  budget 32k: sized to tokens  131.4k (req/chunk 4.42, pad 2%) | static budget shape  127.8k (req/chunk 4.55, pad 43%) | x0.97
+  budget  4k: sized to tokens  110.4k (req/chunk 1.83, pad 2%) | static budget shape  110.3k (req/chunk 1.83, pad 2%) | x1.00
+  budget  8k: sized to tokens  128.3k (req/chunk 2.69, pad 2%) | static budget shape  128.3k (req/chunk 2.69, pad 2%) | x1.00
+  budget 16k: sized to tokens  139.1k (req/chunk 4.29, pad 2%) | static budget shape  138.7k (req/chunk 4.29, pad 5%) | x1.00
+  budget 32k: sized to tokens  131.9k (req/chunk 4.39, pad 2%) | static budget shape  127.7k (req/chunk 4.56, pad 43%) | x0.97
 
 == g8_k0 best stack, var layout
-  budget  4k: sized to tokens  110.2k (req/chunk 1.87, pad 1%) | static budget shape  110.1k (req/chunk 1.87, pad 1%) | x1.00
-  budget  8k: sized to tokens  128.3k (req/chunk 2.74, pad 1%) | static budget shape  128.2k (req/chunk 2.74, pad 1%) | x1.00
-  budget 16k: sized to tokens  139.0k (req/chunk 4.32, pad 1%) | static budget shape  138.7k (req/chunk 4.34, pad 3%) | x1.00
-  budget 32k: sized to tokens  133.1k (req/chunk 4.64, pad 1%) | static budget shape  127.4k (req/chunk 4.54, pad 43%) | x0.96
+  budget  4k: sized to tokens  110.1k (req/chunk 1.87, pad 1%) | static budget shape  110.2k (req/chunk 1.87, pad 1%) | x1.00
+  budget  8k: sized to tokens  128.3k (req/chunk 2.73, pad 1%) | static budget shape  128.2k (req/chunk 2.74, pad 1%) | x1.00
+  budget 16k: sized to tokens  139.0k (req/chunk 4.32, pad 1%) | static budget shape  138.7k (req/chunk 4.34, pad 4%) | x1.00
+  budget 32k: sized to tokens  131.1k (req/chunk 4.43, pad 1%) | static budget shape  127.4k (req/chunk 4.53, pad 43%) | x0.97
 
-== g8_k1 best stack, fixed C=256  | no batching:  214.0k (req/chunk 1.00, pad 20%)
-  budget  4k: sized to tokens  275.9k (req/chunk 1.77, pad 2%) | static budget shape  275.4k (req/chunk 1.77, pad 4%) | x1.00
-  budget  8k: sized to tokens  290.9k (req/chunk 2.24, pad 2%) | static budget shape  291.0k (req/chunk 2.29, pad 17%) | x1.00
-  budget 16k: sized to tokens  288.2k (req/chunk 2.54, pad 2%) | static budget shape  287.6k (req/chunk 2.86, pad 36%) | x1.00
-  budget 32k: sized to tokens  279.2k (req/chunk 2.93, pad 2%) | static budget shape  277.7k (req/chunk 3.76, pad 53%) | x0.99
+== g8_k1 best stack, fixed C=256  | no batching:  214.2k (req/chunk 1.00, pad 20%)
+  budget  4k: sized to tokens  276.1k (req/chunk 1.77, pad 2%) | static budget shape  275.7k (req/chunk 1.77, pad 5%) | x1.00
+  budget  8k: sized to tokens  291.0k (req/chunk 2.26, pad 2%) | static budget shape  292.0k (req/chunk 2.31, pad 16%) | x1.00
+  budget 16k: sized to tokens  288.8k (req/chunk 2.54, pad 2%) | static budget shape  288.1k (req/chunk 2.88, pad 36%) | x1.00
+  budget 32k: sized to tokens  279.4k (req/chunk 2.91, pad 2%) | static budget shape  278.2k (req/chunk 3.79, pad 53%) | x1.00
 
 == g8_k1 best stack, var layout
-  budget  4k: sized to tokens  278.1k (req/chunk 1.79, pad 1%) | static budget shape  278.2k (req/chunk 1.80, pad 4%) | x1.00
-  budget  8k: sized to tokens  292.9k (req/chunk 2.23, pad 1%) | static budget shape  292.9k (req/chunk 2.28, pad 17%) | x1.00
-  budget 16k: sized to tokens  288.1k (req/chunk 2.47, pad 1%) | static budget shape  287.5k (req/chunk 2.80, pad 38%) | x1.00
-  budget 32k: sized to tokens  279.2k (req/chunk 2.91, pad 1%) | static budget shape  277.6k (req/chunk 3.66, pad 54%) | x0.99
+  budget  4k: sized to tokens  278.2k (req/chunk 1.79, pad 1%) | static budget shape  277.4k (req/chunk 1.78, pad 4%) | x1.00
+  budget  8k: sized to tokens  293.5k (req/chunk 2.24, pad 1%) | static budget shape  293.1k (req/chunk 2.31, pad 16%) | x1.00
+  budget 16k: sized to tokens  288.7k (req/chunk 2.46, pad 1%) | static budget shape  288.1k (req/chunk 2.81, pad 37%) | x1.00
+  budget 32k: sized to tokens  279.2k (req/chunk 2.90, pad 1%) | static budget shape  278.0k (req/chunk 3.68, pad 54%) | x1.00

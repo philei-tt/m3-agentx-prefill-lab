@@ -1,30 +1,30 @@
-g4_k0 B=16k fixed C=128 seq                60.9k @C=672 req/chunk 2.69
-g4_k0 B=16k fixed C=128 fused              62.0k @C=680 req/chunk 2.76
-g4_k0 B=16k var seq                        59.9k @C=656 req/chunk 2.54
-g4_k0 B=16k var fused                      62.4k @C=688 req/chunk 2.84
-g4_k0 B=16k fixed C=128 fused + prefetch   65.6k @C=736 req/chunk 3.33
-g4_k1 B=32k fixed C=128 seq                150.3k @C=1624 req/chunk 6.13
-g4_k1 B=32k fixed C=128 fused              154.5k @C=1656 req/chunk 6.21
-g4_k1 B=32k var seq                        146.1k @C=1592 req/chunk 6.16
-g4_k1 B=32k var fused                      152.0k @C=1640 req/chunk 6.10
-g4_k1 B=32k fixed C=128 fused + prefetch   158.8k @C=1688 req/chunk 5.80
-g4_k1 B=64k fixed C=128 seq                148.5k @C=1640 req/chunk 11.06
-g4_k1 B=64k fixed C=128 fused              152.2k @C=1672 req/chunk 10.91
-g4_k1 B=64k var seq                        143.7k @C=1608 req/chunk 10.75
-g4_k1 B=64k var fused                      149.8k @C=1656 req/chunk 11.03
-g4_k1 B=64k fixed C=128 fused + prefetch   156.5k @C=1768 req/chunk 11.16
-g8_k0 B=16k fixed C=128 seq                139.8k @C=1624 req/chunk 4.47
-g8_k0 B=16k fixed C=128 fused              151.9k @C=1720 req/chunk 4.40
-g8_k0 B=16k var seq                        139.4k @C=1608 req/chunk 4.48
-g8_k0 B=16k var fused                      151.2k @C=1704 req/chunk 4.40
-g8_k0 B=16k fixed C=128 fused + prefetch   155.3k @C=1800 req/chunk 4.46
-g8_k1 B=32k fixed C=128 seq                347.7k @C=3880 req/chunk 7.93
-g8_k1 B=32k fixed C=128 fused              396.2k @C=4384 req/chunk 7.66
-g8_k1 B=32k var seq                        346.5k @C=3880 req/chunk 7.90
-g8_k1 B=32k var fused                      394.6k @C=4384 req/chunk 7.75
-g8_k1 B=32k fixed C=128 fused + prefetch   395.8k @C=4384 req/chunk 7.76
-g8_k1 B=64k fixed C=128 seq                352.2k @C=4096 req/chunk 13.94
-g8_k1 B=64k fixed C=128 fused              401.7k @C=4640 req/chunk 14.06
-g8_k1 B=64k var seq                        351.5k @C=4096 req/chunk 13.99
-g8_k1 B=64k var fused                      401.3k @C=4640 req/chunk 14.09
-g8_k1 B=64k fixed C=128 fused + prefetch   402.5k @C=4640 req/chunk 14.05
+g4_k0 B=16k fixed C=128 seq                69.2k @C=776 req/chunk 4.31
+g4_k0 B=16k fixed C=128 fused              74.8k @C=832 req/chunk 4.30
+g4_k0 B=16k var seq                        69.0k @C=768 req/chunk 4.31
+g4_k0 B=16k var fused                      74.5k @C=832 req/chunk 4.33
+g4_k0 B=16k fixed C=128 fused + prefetch   76.7k @C=848 req/chunk 4.28
+g4_k1 B=32k fixed C=128 seq                232.1k @C=2560 req/chunk 6.71
+g4_k1 B=32k fixed C=128 fused              236.0k @C=2584 req/chunk 6.40
+g4_k1 B=32k var seq                        230.7k @C=2520 req/chunk 6.58
+g4_k1 B=32k var fused                      235.4k @C=2584 req/chunk 6.50
+g4_k1 B=32k fixed C=128 fused + prefetch   242.4k @C=2680 req/chunk 6.89
+g4_k1 B=64k fixed C=128 seq                244.3k @C=2808 req/chunk 13.33
+g4_k1 B=64k fixed C=128 fused              247.8k @C=2808 req/chunk 12.31
+g4_k1 B=64k var seq                        242.4k @C=2776 req/chunk 13.17
+g4_k1 B=64k var fused                      246.9k @C=2808 req/chunk 12.46
+g4_k1 B=64k fixed C=128 fused + prefetch   251.6k @C=2872 req/chunk 12.37
+g8_k0 B=16k fixed C=128 seq                139.7k @C=1624 req/chunk 4.46
+g8_k0 B=16k fixed C=128 fused              151.9k @C=1720 req/chunk 4.41
+g8_k0 B=16k var seq                        139.5k @C=1624 req/chunk 4.47
+g8_k0 B=16k var fused                      151.0k @C=1704 req/chunk 4.39
+g8_k0 B=16k fixed C=128 fused + prefetch   155.1k @C=1800 req/chunk 4.45
+g8_k1 B=32k fixed C=128 seq                347.7k @C=3880 req/chunk 7.85
+g8_k1 B=32k fixed C=128 fused              396.0k @C=4384 req/chunk 7.69
+g8_k1 B=32k var seq                        346.3k @C=3880 req/chunk 7.88
+g8_k1 B=32k var fused                      394.4k @C=4384 req/chunk 7.74
+g8_k1 B=32k fixed C=128 fused + prefetch   395.9k @C=4384 req/chunk 7.72
+g8_k1 B=64k fixed C=128 seq                352.6k @C=4096 req/chunk 13.79
+g8_k1 B=64k fixed C=128 fused              401.6k @C=4640 req/chunk 13.97
+g8_k1 B=64k var seq                        351.8k @C=4096 req/chunk 14.10
+g8_k1 B=64k var fused                      400.2k @C=4640 req/chunk 14.17
+g8_k1 B=64k fixed C=128 fused + prefetch   402.3k @C=4640 req/chunk 14.00
