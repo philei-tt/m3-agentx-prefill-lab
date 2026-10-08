@@ -241,7 +241,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row"><label for="priceIn">Input $ / M tokens</label><input id="priceIn" type="number" min="0" step="0.01"></div>
     <div class="row"><label for="priceCached">Cached input $ / M tokens</label><input id="priceCached" type="number" min="0" step="0.01"></div>
     <div class="row"><label for="priceOut">Output $ / M tokens</label><input id="priceOut" type="number" min="0" step="0.01"></div>
-    <div class="hint">Defaults: MiniMax's own M3 price on OpenRouter (Oct 2026). New tokens (cache misses, re-prefill included) bill at the input price, prefix hits at the cached price. The Revenue tile nets input and output revenue against the galaxy cost of prefill and decode.</div>
+    <div class="hint">Defaults: MiniMax's own M3 price on OpenRouter (Oct 2026). New tokens (cache misses, re-prefill included) bill at the input price, prefix hits at the cached price. The Net Revenue tile nets input and output revenue against the galaxy cost of prefill and decode.</div>
     <div class="row"><label for="galaxyUsd">$ / galaxy-hour</label><input id="galaxyUsd" type="number" min="0" step="0.5"></div>
     <div class="row"><label for="decodeGalaxies">Decode galaxies</label><input id="decodeGalaxies" type="number" min="0" step="1"></div>
     <div class="hint">One M3 decode instance: 64 sessions on 16 galaxies; set Decode KV slots to match. Margin = input + output revenue − (prefill + decode galaxies) × $/galaxy-hour. Changes apply without re-running.</div>
@@ -622,7 +622,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li>requests per batch (batch fill). A batch is one pass through the pipeline: without batching it carries one request's chunk, so the value is 1; with batching it holds up to the token budget from several requests. It stays near 1 on a lightly loaded pipeline and climbs only as the bottleneck stage nears saturation. At the same concurrency, a smaller cache shows fuller batches because re-prefill makes each request longer.</li>
         </ul>
         "Pin as comparison" keeps a run as a third line.</li>
-      <li><b>Revenue.</b> Per hour, for the requests completed: <b>net</b> = input-token revenue + output-token revenue − galaxy cost.
+      <li><b>Net Revenue.</b> Per hour, for the requests completed: input-token revenue + output-token revenue − galaxy cost.
         <ul>
           <li><b>Input tokens</b> bill new tokens (cache misses, re-prefill included) at the input price, cached prefix hits ("cache") at the cache-read price. The defaults are MiniMax's own endpoint for <span class="mono">minimax/minimax-m3</span> on OpenRouter, on Oct 7 2026: $0.30 per M input tokens and $0.06 per M cache reads. That is also the model-level price and most providers' (the cheapest third-party provider is about 20% lower). There is no cache-write charge. A better cache bills less per token: a hit pays a fifth of a miss, so a higher hit rate raises revenue only by letting the same hardware serve more requests.</li>
           <li><b>Output tokens</b> bill at $1.20 per M (MiniMax's own price on OpenRouter). Decode generates them, so they belong next to the decode galaxies' cost. AgentX requests average about 1.1k output tokens against 120k-150k input tokens at the study's goodput points, so output adds roughly 10-15% to a request's bill. The precomputed baseline has no output counts, so its net needs a live run.</li>
@@ -1068,7 +1068,7 @@ function render() {
     ['Hit rate', v ? pct(v.hitRate, 1) : '–', at('prefix-cache hit, token-weighted'), v ? `∞-cache ${pct(v.infHitRate, 1)}` : ''],
     ['Input tokens per hour', h ? fmtBig(h.inTok) : '–', at('cached + new'), h ? `new ${fmtBig(h.newTok)} (${pct(h.newTok / h.inTok, 1)}) · cached ${fmtBig(h.cachedTok)}` : ''],
     ['Requests per hour', h ? fmtBig(h.req) : '–', at('completed'), h ? `${fmtK(h.inTok / h.req)} input tok per request` : ''],
-    ['Revenue', e && isFinite(e.margin) ? fmtUsd(e.margin) : '–', at('per hour'), e ? [
+    ['Net Revenue', e && isFinite(e.margin) ? fmtUsd(e.margin) : '–', at('per hour'), e ? [
       `Input tokens: ${fmtUsd(e.inUsd)} (${fmtUsd(h.cachedUsd)} cache + ${fmtUsd(h.newUsd)} new)`,
       `Output tokens: ${isFinite(e.outUsd) ? fmtUsd(e.outUsd) : '– (needs a live run)'}`,
       `<span title="${runGalaxies()} prefill + ${e.decodeUsd / Math.max(1e-9, cost().galaxyUsdPerH)} decode galaxies">Cost: ${fmtUsd(e.cost)} (${runGalaxies() + cost().decodeGalaxies} galaxies)</span>`,
@@ -1268,7 +1268,7 @@ for (const [id, [o, k]] of Object.entries(ECON)) $(id).value = o[k];
 const shared = applyUrl();
 syncSlo('n'); updatePlan(); renderRoadmap(); renderModel();
 // a shared link runs its configuration; otherwise the study curves for the starting preset show until the sweep that
-// starts on load replaces them (they lack output tokens and decode slots, so the Revenue tile needs the live run)
+// starts on load replaces them (they lack output tokens and decode slots, so the Net Revenue tile needs the live run)
 if (shared) { $('resTitle').textContent = 'Results: shared configuration'; syncUrl(); }
 else (function seed() {
   const S = STUDY.scenarios.g4_k0;

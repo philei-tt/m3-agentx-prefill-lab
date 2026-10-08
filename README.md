@@ -57,7 +57,7 @@ million tokens) on `run.js`, `analyze.js` and `tools/feature_table.js`, or with 
 * **A better cache bills less per token** (a hit costs a fifth of a miss); it raises revenue only through the extra
   requests the same hardware can then serve.
 
-**Net revenue per hour** (the page's Revenue tile, `economics()` in `sim_core.js`) is input + output revenue of the requests completed per hour, minus
+**Net revenue per hour** (the page's Net Revenue tile, `economics()` in `sim_core.js`) is input + output revenue of the requests completed per hour, minus
 (prefill galaxies + decode galaxies) × USD per galaxy-hour. Defaults (`SIM.COST`): **$12 per galaxy-hour** (a rough
 operating cost) and **16 decode galaxies**, one M3 decode instance of 64 sessions, so pair it with `decodeSlots: 64`
 (unlimited slots overstate what 16 decode galaxies serve). Each run reports `outTps`, the output tokens of the requests
