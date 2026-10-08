@@ -137,6 +137,8 @@ table.prio tr.fdetail > td { background: var(--surface-2); padding: 12px 14px; }
 .cols2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 @media (max-width: 1000px) { .cols2 { grid-template-columns: 1fr; } }
 .prose { display: flex; flex-direction: column; gap: 10px; max-width: 80ch; }
+/* the Method tab is reference text: use the full content width */
+#tab-method .prose, #tab-method .prose p { max-width: none; }
 .prose ul { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
 .callout { border-left: 3px solid var(--accent); padding: 8px 12px; background: var(--accent-soft); border-radius: 0 6px 6px 0; }
 .callout.bad { border-left-color: var(--bad); background: var(--bad-soft); color: var(--ink); margin-bottom: 10px; }
@@ -430,7 +432,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       </li>
       <li><b>Padding.</b> Tokens computed only to fill a fixed-size chunk.</li>
       <li><b>∞ cache.</b> The same configuration with an unbounded KV cache. It separates cache losses from compute limits.</li>
-      <li><b>Stage, mesh, SP/TP, split, replicas.</b> See "Context". The <b>split</b> is how many layers each stage holds; "auto" balances the stages for a representative mix of cached lengths. <b>Replicas</b> divides the galaxies into independent pipelines, each with its own cache; sessions stick to one replica.</li>
+      <li><b>Stage, mesh, SP/TP, split, replicas.</b> See "Context". The <b>split</b> is how many layers each stage holds; "auto" minimises the busiest stage's mean time per chunk over the context lengths AgentX chunks see; dense layers can share a stage with each other and with MoE layers. <b>Replicas</b> divides the galaxies into independent pipelines, each with its own cache; sessions stick to one replica.</li>
       <li><b>Scenario labels.</b> "Today's kernels" = op-efficiency 0 (k0); "roofline kernels" = op-efficiency 1 (k1). See the section on kernels.</li>
       <li><b>Tiers.</b> P0 / P1 / P2 = priority from the study; the rule is in "How the study works".</li>
       <li><b>Complexity</b> (low / med / high). A rough judgement of how much of the stack a feature touches. <b>Low:</b> one op or the scheduler, plus validation. <b>Med:</b> a new op or allocator, or changes across a few ops. <b>High:</b> cross-cutting changes to the runtime, KV layout, several kernels and the scheduler. Not validated with the code owners.</li>
@@ -509,7 +511,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
         Capacity is set by the stage holding the most layers.
         <ul>
           <li>Four galaxies with an even split (4 layers per stage) hold <b>35 static 1M slots</b>, matching the hardware measurement.</li>
-          <li>With the default auto split (up to 5 layers per stage) they hold <b>28</b>.</li>
+          <li>The default auto split ([2,3,4×13,3]) also has at most 4 layers per stage and holds the same.</li>
           <li>The calibration runs used bf16 index_k (1024 B), which the model keeps for replaying them.</li>
         </ul>
       </li>
@@ -519,7 +521,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li><b>Lane table ("Lane table" control).</b>
             <ul>
               <li><b>Per stage (default):</b> each stage allocates a lane only while it works through the request's chunks. That's about 1–3 chunks' worth of requests per stage.</li>
-              <li><b>Global, like today's slot_id:</b> a lane is held on every stage for the request's whole trip through the pipeline, so you need stages × requests-per-batch lanes, and its copies can only be sequential. On the best 4-galaxy config with today's kernels a global lane table drops goodput from 60.3k to 15.5k.</li>
+              <li><b>Global, like today's slot_id:</b> a lane is held on every stage for the request's whole trip through the pipeline, so you need stages × requests-per-batch lanes, and its copies can only be sequential. On the best 4-galaxy config with today's kernels a global lane table drops goodput from 73.9k to 20.1k.</li>
               <li>Each stage keeps its own KV tensors, so a per-stage table is feasible. It is a prerequisite for combining the pool with batching.</li>
             </ul>
           </li>
@@ -626,7 +628,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li>a TP=4-only mesh.</li>
         </ul>
         With roofline kernels faster decode raises prefill goodput, because requests finish sooner and less KV is live; with today's kernels it moves goodput within seed noise.</li>
-      <li><b>[4,2] stages</b> (TP=2) win three of the four grids by 1-12% (at 4 galaxies with roofline kernels, 4×[8,4] stages win by 2%). The current KV cache assumes one KV head per chip (TP=4), so they need a KV-head sharding change.</li>
+      <li><b>[4,2] stages</b> (TP=2) win three of the four grids by 1-12% (at 4 galaxies with roofline kernels, 8×[4,4] stages win by 3%). The current KV cache assumes one KV head per chip (TP=4), so they need a KV-head sharding change.</li>
     </ul>
 
     <h2 id="m-read">Reading the Explore tab</h2>
@@ -661,7 +663,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Torus rings.</b> Every measurement used line (mesh) collectives, so the ring speed-ups are textbook link-load ratios, not measurements. [4,4] has no profile at all (geometric midpoint of [2,4] and [8,4]).</li>
       <li><b>Decode.</b> A fixed per-request speed, whatever the number of sessions decoding. Decode capacity is a slot count only (Decode KV slots, default unlimited), not KV bytes per context length. KV migration to decode is not modelled.</li>
       <li><b>Extrapolation.</b> Batched chunks above 5120 tokens, meshes without a profile, and stage counts other than 16 are extrapolated. [4,2] stage costs come from a single-stage profile.</li>
-      <li><b>Memory is calibrated to one measurement.</b> The 1 GB per-chip reserve reproduces the measured slot fit: 35 × 1M slots on 16×[2,4] with bf8 index_k and an even layer split, where stages with 4 MoE layers bind. The default auto split puts 5 MoE layers on some stages and fits 28. Weights and activation buffers are estimates.</li>
+      <li><b>Memory is calibrated to one measurement.</b> The 1 GB per-chip reserve reproduces the measured slot fit: 35 × 1M slots on 16×[2,4] with bf8 index_k and an even layer split, where stages with 4 MoE layers bind. The default auto split also has at most 4 layers per stage and fits the same. Weights and activation buffers are estimates.</li>
       <li><b>Complexity bins are rough</b> and not checked with the code owners.</li>
     </ul>
 
@@ -1248,7 +1250,7 @@ function renderRoadmap() {
   $('roadHead').innerHTML = `<h2>What moves goodput on AgentX</h2>
   <p>Goodput = useful tok/s with p90 TTFT ≤ ${STUDY.slo} s. Baseline → best configuration found: <b>4 galaxies</b> ${fmtK(g0.greedy[0].goodput)} → <b>${fmtK(g0.grid[0].goodput)}</b> with today's kernels, ${fmtK(g1.grid[0].goodput)} with roofline kernels; <b>8 galaxies</b> ${fmtK(h0.greedy[0].goodput)} → <b>${fmtK(h0.grid[0].goodput)}</b> today, ${fmtK(h1.grid[0].goodput)} with roofline kernels.</p>
   <p>P0 features: ${top.map((k) => `<span class="pill p0">${esc(k)}</span>`).join(' ')}. The ordering, gains and complexity are below; hover the orange ticks for the infinite-cache ceiling of each step.</p>
-  <p>On AgentX traffic, KV-cache capacity is the first wall, so the features that add effective KV capacity come first: the KV offload tiers (host DRAM + SSD) and the paged pool. With them the best configurations reach 97-99% of their own infinite-cache goodput with today's kernels and 86-90% with roofline kernels, where reading KV back from the tiers is the next limit. After that, compute features (async handoff, batching, variable chunk) matter most. "Today's kernels" / "roofline kernels", greedy vs leave-one-out, tiers and scope are defined in the <a href="#method">Method</a> tab.</p>`;
+  <p>On AgentX traffic, KV-cache capacity is the first wall, so the features that add effective KV capacity come first: the KV offload tiers (host DRAM + SSD) and the paged pool. With them the best configurations reach 99% of their own infinite-cache goodput with today's kernels and 71-80% with roofline kernels, where reading KV back from the tiers is the next limit. After that, compute features (async handoff, batching, variable chunk) matter most. "Today's kernels" / "roofline kernels", greedy vs leave-one-out, tiers and scope are defined in the <a href="#method">Method</a> tab.</p>`;
 }
 
 // ---------------------------------------------------------------- model tab

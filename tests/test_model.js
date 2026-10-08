@@ -163,4 +163,40 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   assert.ok(g.usefulTps === z.usefulTps && SIM.makePlan(Object.assign({}, cfg, { batchChunksPerRequest: 1.5 }), cal).errors.length > 0);
 }
 
+// 11. auto layer split: the DP finds the least bottleneck (checked against every split for a few stages), and on the
+//     real costs it is no worse than the old auto split anywhere, matches the hand split [2,3,4x13,3] on 16x[2,4]
+//     (dense layers sharing stages) and keeps 32x[2,4] at its old bottleneck
+{
+  const L = 60, D = 3;
+  const worstOf = (c, m) => { let w = 0, st = 0; c.forEach((n, s) => { const nd = Math.max(0, Math.min(D, st + n) - st); st += n; w = Math.max(w, nd * m.td + (n - nd) * m.tm + m.ov + (s === 0 ? m.embed : 0)); }); return w; };
+  const rnd = (() => { let a = 7; return () => { a = (a * 16807) % 2147483647; return a / 2147483647; }; })();
+  for (let t = 0; t < 6; t++) for (const S of [2, 3, 4]) {
+    const m = { tm: 5 + 10 * rnd(), td: 2 + 60 * rnd(), ov: 2 * rnd(), embed: 3 * rnd() };
+    const c = SIM.splitLayers({ split: 'auto' }, S, m);
+    assert.ok(c.length === S && c.every((n) => n >= 1) && c.reduce((x, y) => x + y, 0) === L, `split ${c}`);
+    let best = Infinity;
+    const rec = (pre, left) => {
+      if (pre.length === S - 1) { best = Math.min(best, worstOf(pre.concat([left]), m)); return; }
+      for (let n = 1; n <= left - (S - 1 - pre.length); n++) rec(pre.concat([n]), left - n);
+    };
+    rec([], L);
+    assert.ok(worstOf(c, m) <= best * (1 + 1e-9), `S=${S}: auto ${worstOf(c, m)} > best ${best}`);
+  }
+  const worst = (cfg) => { const p = plan(Object.assign({ cache: 'inf' }, cfg)), o = []; SIM.chunkStageMs(p, 2048, [{ n: 2048, na: 2048, k: 131072, cap: 0 }], o); return Math.max(...o); };
+  const rep = (n, x) => Array(n).fill(x);
+  const old = { // the old auto splits (each dense layer on its own stage)
+    '8x2,4': [2, 4].concat(rep(6, 9)), '16x2,4': [1, 1, 1].concat(rep(8, 4), rep(5, 5)), '24x2,4': [1, 1, 1].concat(rep(6, 2), rep(15, 3)),
+    '32x2,4': [1, 1, 1, 1].concat(rep(28, 2)), '8x4,2': [4].concat(rep(7, 8)), '16x4,2': [2, 3, 3].concat(rep(13, 4)),
+    '24x4,2': [1, 1, 1].concat(rep(6, 2), rep(15, 3)), '32x4,2': [1, 1, 1, 1].concat(rep(28, 2)),
+  };
+  for (const [key, split] of Object.entries(old)) {
+    const [S, mesh] = [Number(key.split('x')[0]), key.split('x')[1].split(',').map(Number)];
+    const cfg = { galaxies: S / 4, stages: S, mesh };
+    assert.ok(worst(cfg) <= worst(Object.assign({ split }, cfg)) + 1e-9, `${key}: auto ${worst(cfg)} > old ${worst(Object.assign({ split }, cfg))}`);
+  }
+  const g16 = { galaxies: 4, stages: 16, mesh: [2, 4] }, hand = [2, 3].concat(rep(13, 4), [3]);
+  assert.ok(worst(g16) <= worst(Object.assign({ split: hand }, g16)) + 1e-9 && worst(g16) < 0.85 * worst(Object.assign({ split: old['16x2,4'] }, g16)), `16x[2,4] ${worst(g16)}`);
+  assert.ok(plan(g16).counts[0] >= 2, 'dense layers share a stage on 16x[2,4]');
+}
+
 console.log('test_model: all checks passed');

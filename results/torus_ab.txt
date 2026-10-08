@@ -1,0 +1,83 @@
+== idle chunk: 5120 new tokens after 0 / 100k cached, bounded gather; period ms (system tok/s) / latency ms
+k0 4gx 16x[2,4]     off    0k   77.5 ( 66.0k) / 1132 | off  100k   79.7 ( 64.3k) / 1228 | axes   0k   72.5 ( 70.6k) / 1059 | axes 100k   74.7 ( 68.6k) / 1154
+k0 4gx 8x[4,4]      off    0k   97.7 ( 52.4k) /  716 | off  100k  103.1 ( 49.7k) /  792 | full   0k   81.5 ( 62.8k) /  600 | full 100k   85.6 ( 59.8k) /  667
+k0 4gx 4x[8,4]      off    0k  135.5 ( 37.8k) /  499 | off  100k  146.8 ( 34.9k) /  561 | axes   0k  126.3 ( 40.5k) /  465 | axes 100k  137.6 ( 37.2k) /  527
+k0 4gx 16x[4,2]     off    0k   67.5 ( 75.8k) /  984 | off  100k   74.9 ( 68.3k) / 1155 | axes   0k   58.9 ( 86.9k) /  862 | axes 100k   64.6 ( 79.3k) / 1008
+k0 4gx 2x8x[2,4]    off    0k  155.0 ( 66.0k) / 1132 | off  100k  159.4 ( 64.3k) / 1228 | axes   0k  145.0 ( 70.6k) / 1059 | axes 100k  149.3 ( 68.6k) / 1154
+k0 4gx 2x4x[4,4]    off    0k  195.4 ( 52.4k) /  716 | off  100k  206.2 ( 49.7k) /  792 | full   0k  163.0 ( 62.8k) /  600 | full 100k  171.3 ( 59.8k) /  667
+k0 8gx 32x[2,4]     off    0k   38.8 (132.1k) / 1132 | off  100k   39.8 (128.5k) / 1228 | axes   0k   36.2 (141.2k) / 1059 | axes 100k   37.3 (137.1k) / 1154
+k0 8gx 16x[4,4]     off    0k   48.8 (104.8k) /  716 | off  100k   51.5 ( 99.3k) /  792 | full   0k   40.8 (125.6k) /  600 | full 100k   42.8 (119.6k) /  667
+k0 8gx 8x[8,4]      off    0k   67.8 ( 75.5k) /  499 | off  100k   73.4 ( 69.8k) /  561 | axes   0k   63.1 ( 81.1k) /  465 | axes 100k   68.8 ( 74.4k) /  527
+k0 8gx 2x16x[2,4]   off    0k   77.5 (132.1k) / 1132 | off  100k   79.7 (128.5k) / 1228 | axes   0k   72.5 (141.2k) / 1059 | axes 100k   74.7 (137.1k) / 1154
+k0 8gx 32x[4,2]     off    0k   33.8 (151.7k) /  984 | off  100k   37.5 (136.7k) / 1155 | axes   0k   29.5 (173.7k) /  862 | axes 100k   32.3 (158.6k) / 1008
+k0 8gx 2x8x[4,4]    off    0k   97.7 (104.8k) /  716 | off  100k  103.1 ( 99.3k) /  792 | full   0k   81.5 (125.6k) /  600 | full 100k   85.6 (119.6k) /  667
+k1 4gx 16x[2,4]     off    0k   30.4 (168.7k) /  360 | off  100k   31.6 (161.9k) /  405 | axes   0k   28.2 (181.5k) /  335 | axes 100k   29.5 (173.7k) /  380
+k1 4gx 8x[4,4]      off    0k   27.7 (185.0k) /  206 | off  100k   30.6 (167.1k) /  242 | full   0k   25.9 (197.5k) /  173 | full 100k   28.4 (180.1k) /  204
+k1 4gx 4x[8,4]      off    0k   34.5 (148.4k) /  129 | off  100k   41.4 (123.8k) /  161 | axes   0k   32.2 (159.1k) /  121 | axes 100k   39.0 (131.2k) /  153
+k1 4gx 16x[4,2]     off    0k   28.2 (181.3k) /  334 | off  100k   31.4 (163.1k) /  400 | axes   0k   25.0 (204.4k) /  297 | axes 100k   27.4 (186.7k) /  355
+k1 4gx 2x8x[2,4]    off    0k   54.6 (187.4k) /  360 | off  100k   56.9 (179.9k) /  405 | axes   0k   50.8 (201.7k) /  335 | axes 100k   53.1 (193.0k) /  380
+k1 4gx 2x4x[4,4]    off    0k   55.3 (185.0k) /  206 | off  100k   61.3 (167.1k) /  242 | full   0k   49.0 (209.2k) /  173 | full 100k   53.7 (190.7k) /  204
+k1 8gx 32x[2,4]     off    0k   12.1 (421.7k) /  360 | off  100k   15.1 (340.1k) /  405 | axes   0k   11.3 (453.8k) /  335 | axes 100k   14.7 (348.0k) /  380
+k1 8gx 16x[4,4]     off    0k   13.8 (370.1k) /  206 | off  100k   16.2 (316.7k) /  242 | full   0k   14.4 (355.6k) /  173 | full 100k   15.8 (324.2k) /  204
+k1 8gx 8x[8,4]      off    0k   17.2 (296.9k) /  129 | off  100k   20.7 (247.6k) /  161 | axes   0k   16.1 (318.3k) /  121 | axes 100k   19.5 (262.3k) /  153
+k1 8gx 2x16x[2,4]   off    0k   30.4 (337.3k) /  360 | off  100k   31.6 (323.8k) /  405 | axes   0k   28.2 (363.0k) /  335 | axes 100k   29.5 (347.4k) /  380
+k1 8gx 32x[4,2]     off    0k   11.3 (453.3k) /  334 | off  100k   14.2 (359.4k) /  400 | axes   0k   10.0 (511.0k) /  297 | axes 100k   14.2 (359.4k) /  355
+k1 8gx 2x8x[4,4]    off    0k   27.7 (370.1k) /  206 | off  100k   30.6 (334.3k) /  242 | full   0k   25.9 (395.1k) /  173 | full 100k   28.4 (360.2k) /  204
+
+== g4_k0 (4 galaxies, today's kernels): best stack {"stages":16,"mesh":[4,2],"replicas":1,"arenaTokens":2000000,"budget":16384}
+  16x[4,2]     off   goodput   73.9k  at C=832 p90 9.9 s
+  16x[4,2]     axes  goodput   73.4k  at C=808 p90 9.9 s
+  16x[2,4]     axes  goodput   69.7k  at C=768 p90 9.9 s
+  2x8x[2,4]    axes  goodput   68.8k  at C=744 p90 9.8 s
+  16x[2,4]     off   goodput   65.1k  at C=696 p90 9.8 s
+  8x[4,4]      full  goodput   61.8k  at C=656 p90 9.5 s
+  2x4x[4,4]    full  goodput   60.0k  at C=640 p90 9.8 s
+  2x8x[2,4]    off   goodput   58.6k  at C=624 p90 9.1 s
+  8x[4,4]      off   goodput   50.9k  at C=520 p90 9.2 s
+  2x4x[4,4]    off   goodput   49.5k  at C=504 p90 9.8 s
+  4x[8,4]      axes  goodput   40.8k  at C=440 p90 9.3 s
+  4x[8,4]      off   goodput   38.3k  at C=408 p90 9.0 s
+
+== g4_k1 (4 galaxies, roofline kernels): best stack {"stages":8,"mesh":[4,4],"replicas":1,"arenaTokens":2000000,"budget":8192}
+  8x[4,4]      full  goodput  137.8k  at C=1416 p90 9.3 s
+  8x[4,4]      off   goodput  136.4k  at C=1400 p90 8.5 s
+  16x[4,2]     off   goodput  131.6k  at C=1320 p90 6.8 s
+  16x[4,2]     axes  goodput  131.2k  at C=1352 p90 10.0 s
+  16x[2,4]     axes  goodput  130.9k  at C=1352 p90 9.8 s
+  4x[8,4]      axes  goodput  130.5k  at C=1336 p90 6.5 s
+  16x[2,4]     off   goodput  130.2k  at C=1336 p90 8.7 s
+  2x4x[4,4]    full  goodput  126.2k  at C=1264 p90 5.1 s
+  4x[8,4]      off   goodput  124.8k  at C=1264 p90 6.1 s
+  2x8x[2,4]    off   goodput  121.5k  at C=1240 p90 6.0 s
+  2x4x[4,4]    off   goodput  118.6k  at C=1200 p90 3.1 s
+  2x8x[2,4]    axes  goodput  118.2k  at C=1200 p90 3.8 s
+
+== g8_k0 (8 galaxies, today's kernels): best stack {"stages":32,"mesh":[4,2],"replicas":1,"arenaTokens":2000000,"budget":16384}
+  32x[4,2]     axes  goodput  173.9k  at C=2024 p90 9.9 s
+  32x[4,2]     off   goodput  150.3k  at C=1704 p90 9.8 s
+  32x[2,4]     axes  goodput  143.2k  at C=1624 p90 9.6 s
+  2x16x[2,4]   axes  goodput  139.9k  at C=1592 p90 9.8 s
+  32x[2,4]     off   goodput  134.2k  at C=1544 p90 9.8 s
+  2x16x[2,4]   off   goodput  129.5k  at C=1432 p90 9.3 s
+  16x[4,4]     full  goodput  128.5k  at C=1432 p90 9.8 s
+  2x8x[4,4]    full  goodput  127.6k  at C=1400 p90 9.4 s
+  16x[4,4]     off   goodput  105.8k  at C=1192 p90 9.9 s
+  2x8x[4,4]    off   goodput  104.2k  at C=1128 p90 9.7 s
+  8x[8,4]      axes  goodput   80.5k  at C=864 p90 9.8 s
+  8x[8,4]      off   goodput   76.3k  at C=840 p90 9.8 s
+
+== g8_k1 (8 galaxies, roofline kernels): best stack {"stages":32,"mesh":[4,2],"replicas":1,"arenaTokens":2000000,"budget":8192}
+  32x[4,2]     axes  goodput  295.1k  at C=3128 p90 8.2 s
+  32x[4,2]     off   goodput  294.4k  at C=3128 p90 8.3 s
+  32x[2,4]     axes  goodput  294.1k  at C=3128 p90 8.5 s
+  32x[2,4]     off   goodput  293.5k  at C=3128 p90 8.6 s
+  2x8x[4,4]    full  goodput  273.4k  at C=2936 p90 8.2 s
+  16x[4,4]     full  goodput  273.3k  at C=2872 p90 9.2 s
+  2x8x[4,4]    off   goodput  269.9k  at C=2872 p90 6.2 s
+  16x[4,4]     off   goodput  263.0k  at C=2752 p90 3.5 s
+  2x16x[2,4]   axes  goodput  258.0k  at C=2776 p90 8.7 s
+  2x16x[2,4]   off   goodput  255.4k  at C=2776 p90 9.7 s
+  8x[8,4]      axes  goodput  254.6k  at C=2680 p90 4.4 s
+  8x[8,4]      off   goodput  243.7k  at C=2584 p90 7.9 s
+
+62 s

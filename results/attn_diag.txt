@@ -16,19 +16,19 @@
   C=1024 N=10 (T=20480): MoE layer seq   16.8 fused   16.5 (1.9%) | seq+pf   16.0 (5.0%) || dense layer seq   78.1 fused   65.5 (16.0%) | seq+pf   78.1 (0.0%) || MSA KV/index gather   10.0 vs indexer+sparse    0.9 ms; dense ring compute   55.6 vs gather    2.4 ms
 
 == B) replay at the peak concurrency, fixed chunk 128, 64k budget, infinite cache: stage utilisation
-  g4_k0 seq   prefetch false: useful 67.8k, 10.2 req/chunk | busiest dense-layer stage 46% (3 stages) vs busiest MoE stage 100% | layers/stage 1,1,1,4,4,4..
-  g4_k0 fused prefetch false: useful 69.0k, 10.0 req/chunk | busiest dense-layer stage 42% (3 stages) vs busiest MoE stage 99% | layers/stage 1,1,1,4,4,4..
-  g4_k0 seq   prefetch true : useful 68.9k, 10.0 req/chunk | busiest dense-layer stage 45% (3 stages) vs busiest MoE stage 99% | layers/stage 1,1,1,4,4,4..
-  g4_k0 fused prefetch true : useful 70.2k, 9.8 req/chunk | busiest dense-layer stage 41% (3 stages) vs busiest MoE stage 99% | layers/stage 1,1,1,4,4,4..
-  g4_k1 seq   prefetch false: useful 149.1k, 13.5 req/chunk | busiest dense-layer stage 46% (1 stages) vs busiest MoE stage 100% | layers/stage 3,19,19,19..
-  g4_k1 fused prefetch false: useful 152.4k, 12.0 req/chunk | busiest dense-layer stage 32% (1 stages) vs busiest MoE stage 100% | layers/stage 3,19,19,19..
-  g4_k1 seq   prefetch true : useful 153.3k, 11.9 req/chunk | busiest dense-layer stage 48% (1 stages) vs busiest MoE stage 100% | layers/stage 3,19,19,19..
-  g4_k1 fused prefetch true : useful 156.3k, 10.4 req/chunk | busiest dense-layer stage 33% (1 stages) vs busiest MoE stage 99% | layers/stage 3,19,19,19..
-  g8_k0 seq   prefetch false: useful 150.3k, 13.7 req/chunk | busiest dense-layer stage 100% (3 stages) vs busiest MoE stage 93% | layers/stage 1,1,1,1,2,2..
-  g8_k0 fused prefetch false: useful 165.0k, 14.0 req/chunk | busiest dense-layer stage 99% (3 stages) vs busiest MoE stage 99% | layers/stage 1,1,1,1,2,2..
-  g8_k0 seq   prefetch true : useful 156.9k, 13.8 req/chunk | busiest dense-layer stage 100% (3 stages) vs busiest MoE stage 95% | layers/stage 1,1,1,1,2,2..
-  g8_k0 fused prefetch true : useful 170.0k, 14.1 req/chunk | busiest dense-layer stage 97% (3 stages) vs busiest MoE stage 99% | layers/stage 1,1,1,1,2,2..
-  g8_k1 seq   prefetch false: useful 361.1k, 13.5 req/chunk | busiest dense-layer stage 100% (3 stages) vs busiest MoE stage 65% | layers/stage 1,1,1,1,2,2..
-  g8_k1 fused prefetch false: useful 407.7k, 13.7 req/chunk | busiest dense-layer stage 100% (3 stages) vs busiest MoE stage 73% | layers/stage 1,1,1,1,2,2..
-  g8_k1 seq   prefetch true : useful 361.1k, 13.5 req/chunk | busiest dense-layer stage 100% (3 stages) vs busiest MoE stage 64% | layers/stage 1,1,1,1,2,2..
-  g8_k1 fused prefetch true : useful 407.7k, 13.7 req/chunk | busiest dense-layer stage 100% (3 stages) vs busiest MoE stage 71% | layers/stage 1,1,1,1,2,2..
+  g4_k0 seq   prefetch false: useful 67.9k, 10.4 req/chunk | busiest stage with a dense layer 86% (3 stages) vs busiest MoE-only stage 100% | layers/stage 1,1,3,5,5,5..
+  g4_k0 fused prefetch false: useful 69.1k, 10.2 req/chunk | busiest stage with a dense layer 82% (3 stages) vs busiest MoE-only stage 100% | layers/stage 1,1,3,5,5,5..
+  g4_k0 seq   prefetch true : useful 69.2k, 10.2 req/chunk | busiest stage with a dense layer 85% (3 stages) vs busiest MoE-only stage 100% | layers/stage 1,1,3,5,5,5..
+  g4_k0 fused prefetch true : useful 70.3k, 10.0 req/chunk | busiest stage with a dense layer 81% (3 stages) vs busiest MoE-only stage 100% | layers/stage 1,1,3,5,5,5..
+  g4_k1 seq   prefetch false: useful 245.8k, 14.4 req/chunk | busiest stage with a dense layer 85% (2 stages) vs busiest MoE-only stage 99% | layers/stage 2,5,9,9,9,9..
+  g4_k1 fused prefetch false: useful 249.1k, 13.6 req/chunk | busiest stage with a dense layer 77% (2 stages) vs busiest MoE-only stage 99% | layers/stage 2,5,9,9,9,9..
+  g4_k1 seq   prefetch true : useful 249.0k, 13.9 req/chunk | busiest stage with a dense layer 86% (2 stages) vs busiest MoE-only stage 99% | layers/stage 2,5,9,9,9,9..
+  g4_k1 fused prefetch true : useful 252.9k, 13.1 req/chunk | busiest stage with a dense layer 77% (2 stages) vs busiest MoE-only stage 99% | layers/stage 2,5,9,9,9,9..
+  g8_k0 seq   prefetch false: useful 150.3k, 13.7 req/chunk | busiest stage with a dense layer 100% (3 stages) vs busiest MoE-only stage 93% | layers/stage 1,1,1,2,2,2..
+  g8_k0 fused prefetch false: useful 164.9k, 13.9 req/chunk | busiest stage with a dense layer 98% (3 stages) vs busiest MoE-only stage 100% | layers/stage 1,1,1,2,2,2..
+  g8_k0 seq   prefetch true : useful 156.6k, 13.8 req/chunk | busiest stage with a dense layer 100% (3 stages) vs busiest MoE-only stage 95% | layers/stage 1,1,1,2,2,2..
+  g8_k0 fused prefetch true : useful 169.3k, 13.9 req/chunk | busiest stage with a dense layer 96% (3 stages) vs busiest MoE-only stage 100% | layers/stage 1,1,1,2,2,2..
+  g8_k1 seq   prefetch false: useful 361.1k, 13.5 req/chunk | busiest stage with a dense layer 100% (3 stages) vs busiest MoE-only stage 65% | layers/stage 1,1,1,2,2,2..
+  g8_k1 fused prefetch false: useful 407.7k, 13.7 req/chunk | busiest stage with a dense layer 100% (3 stages) vs busiest MoE-only stage 73% | layers/stage 1,1,1,2,2,2..
+  g8_k1 seq   prefetch true : useful 361.1k, 13.4 req/chunk | busiest stage with a dense layer 100% (3 stages) vs busiest MoE-only stage 64% | layers/stage 1,1,1,2,2,2..
+  g8_k1 fused prefetch true : useful 407.7k, 13.7 req/chunk | busiest stage with a dense layer 100% (3 stages) vs busiest MoE-only stage 71% | layers/stage 1,1,1,2,2,2..
