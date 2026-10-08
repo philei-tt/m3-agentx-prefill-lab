@@ -6,7 +6,7 @@
 'use strict';
 const fs = require('fs');
 const { Pool, summarize } = require('../lib/pool.js');
-const { withFeatures, CONCS } = require('../study.js');
+const { withFeatures, scenarios, CONCS } = require('../study.js');
 const { STUDY } = require('../lib/paths.js');
 
 const SLOS = [5, 10, 20, 30, 60, 120, 1e6];
@@ -16,7 +16,8 @@ async function main() {
   const args = process.argv.slice(2);
   const get = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
   const study = JSON.parse(fs.readFileSync(STUDY));
-  const cfgs = [['today 4gx + pool + host + batch 16k', { galaxies: 4, stages: 16, mesh: [2, 4], chunk: 2048, cache: 'pool', lanes: 4, lanesOverride: true, hostTier: true, batch: true, budget: 16384, unaligned: true }]];
+  // today's 4-gx config (study base: 16x[2,4], chunk 2048, round robin) + the study's pool (4 lanes), tiers and batching
+  const cfgs = [['today 4gx + pool + tiers + batch 16k', withFeatures(scenarios()[0].base, ['pool', 'host', 'batch'])]];
   for (const [key, R] of Object.entries(study.scenarios)) {
     const best = Object.assign(withFeatures(R.base, R.bestKeys), R.grid[0].extra);
     cfgs.push([`${key} best`, best]);

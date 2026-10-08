@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Print the study results: greedy roadmap, leave-one-out, grid top-N, per scenario.
-// Usage: node analyze.js [results/study.json] [--points]
+// Usage: node analyze.js [results/study.json] [--points] [--price-in USD_PER_M] [--price-cached USD_PER_M]
 'use strict';
 const fs = require('fs');
 const f = process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[2] : require('./lib/paths.js').STUDY;
@@ -8,7 +8,10 @@ const R = JSON.parse(fs.readFileSync(f));
 const k = (x) => (x == null ? '    -' : (x / 1000).toFixed(1).padStart(5) + 'k');
 const pc = (x) => (x == null ? '  - ' : (100 * x).toFixed(0).padStart(3) + '%');
 const big = (x) => (x >= 1e9 ? (x / 1e9).toFixed(2) + 'B' : x >= 1e6 ? (x / 1e6).toFixed(1) + 'M' : (x / 1e3).toFixed(1) + 'k');
-const perHour = (a) => { const h = require('./sim_core.js').hourly(a); return ` | per hour: in ${big(h.inTok)} (new ${big(h.newTok)}, cached ${big(h.cachedTok)}) req ${big(h.req)}`; };
+const { priceFromArgv, usd, priceTxt } = require('./lib/price.js');
+const price = priceFromArgv(process.argv);
+const perHour = (a) => { const h = require('./sim_core.js').hourly(a, price); return ` | per hour: in ${big(h.inTok)} (new ${big(h.newTok)}, cached ${big(h.cachedTok)}) req ${big(h.req)} ${usd(h.usd)}`; };
+console.log(`revenue per hour: input tokens only, at ${priceTxt(price)}`);
 const at = (a) => (a ? `C=${String(a.conc).padStart(4)} p50 ${a.ttftP50.toFixed(1).padStart(5)}s p90 ${a.ttftP90.toFixed(1).padStart(5)}s hit ${pc(a.hitRate)}/${pc(a.infHitRate)} repf ${pc(a.reprefillFrac)} pad ${pc(a.padFrac)} util ${pc(a.maxUtil)} chunk ${Math.round(a.avgChunkTok)} segs ${a.avgSegsPerChunk.toFixed(1)}${perHour(a)}` : '(no point meets SLO)');
 for (const [key, S] of Object.entries(R.scenarios)) {
   console.log(`\n=== ${key}: ${S.label}   (goodput = useful tok/s at p90 TTFT <= ${R.slo}s)`);

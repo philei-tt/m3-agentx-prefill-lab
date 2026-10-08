@@ -194,10 +194,13 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row"><label for="copyMode">Pool copies</label><select id="copyMode"><option value="sequential">sequential</option><option value="double">double-buffered</option><option value="overlap3">triple-buffered</option></select></div>
     <div class="row check"><input id="laneArena" type="checkbox"><label for="laneArena">Variable-size lanes (arena)</label></div>
     <div class="row"><label for="arenaTokens">Arena (M tokens)</label><select id="arenaTokens"><option value="2000000">2</option><option value="4000000">4</option><option value="8000000">8</option></select></div>
-    <div class="row check"><input id="hostTier" type="checkbox"><label for="hostTier">SSD KV tier</label></div>
-    <div class="row"><label for="hostGBPerGalaxy">SSD capacity GB / galaxy</label><input id="hostGBPerGalaxy" type="number" min="0" step="1024"></div>
-    <div class="row"><label for="pcieGBsPerGalaxy">SSD bandwidth GB/s / galaxy</label><input id="pcieGBsPerGalaxy" type="number" min="1" step="4"></div>
-    <div class="hint">SSD bandwidth = the lower of the drives' and PCIe's, shared by fetches and write-backs.</div>
+    <div class="row check"><input id="hostTier" type="checkbox"><label for="hostTier">Host DRAM + SSD KV tiers</label></div>
+    <div class="row"><label for="hostDramGBPerGalaxy">Host DRAM GB / galaxy</label><input id="hostDramGBPerGalaxy" type="number" min="0" step="32"></div>
+    <div class="row"><label for="ssdTBPerGalaxy">SSD TB / galaxy</label><input id="ssdTBPerGalaxy" type="number" min="0" step="1"></div>
+    <div class="row"><label for="pcieGBsPerGalaxy">PCIe GB/s / galaxy (each way)</label><input id="pcieGBsPerGalaxy" type="number" min="1" step="1"></div>
+    <div class="row"><label for="ssdReadGBsPerGalaxy">SSD read GB/s / galaxy</label><input id="ssdReadGBsPerGalaxy" type="number" min="1" step="0.5"></div>
+    <div class="row"><label for="ssdWriteGBsPerGalaxy">SSD write GB/s / galaxy</label><input id="ssdWriteGBsPerGalaxy" type="number" min="1" step="0.5"></div>
+    <div class="hint">Device evicts to host DRAM, host DRAM to SSD. Host DRAM left for KV (Plan panel) = DRAM minus 10% headroom, OS, runtime, KV staging, pinned PCIe buffers and this galaxy's share of the weights. Defaults from the Galaxy Blackhole user guide (576 GB host DRAM; PCIe x1 Gen4 to 28 of 32 chips = 63 GB/s each way) and the drives (4x Samsung PM9D3a E1.S at Gen4: 31.5 GB/s read, 27.2 GB/s write).</div>
     <div class="row check"><input id="idxDerep" type="checkbox"><label for="idxDerep">index_k stored once (not ×TP)</label></div>
     <div class="row check"><input id="idxBf16" type="checkbox"><label for="idxBf16">index_k bf16 (off = bf8)</label></div>
     <div class="row"><label for="reserveGB">Reserve GB / chip</label><input id="reserveGB" type="number" min="0" step="0.5"></div>
@@ -206,7 +209,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <legend>Chunking &amp; batching</legend>
     <div class="row"><label for="layout">KV layout</label><select id="layout"><option value="fixed">fixed chunk (block-cyclic)</option><option value="var">variable chunk (a2a KV write)</option></select></div>
     <div class="row"><label for="chunk">Chunk size</label><select id="chunk"><option>128</option><option>256</option><option>512</option><option>1024</option><option>2048</option><option>4096</option><option>5120</option><option>8192</option></select></div>
-    <div class="hint" id="chunkHint" hidden>Not used: with batching on a variable layout, the token budget below is the chunk size.</div>
+    <div class="hint" id="chunkHint" hidden>Not used: with batching on a variable layout, the token budget below is the chunk size (unless max chunks per request is set).</div>
     <div class="row check"><input id="batch" type="checkbox"><label for="batch">Batch several requests per pipeline pass</label></div>
     <div class="hint" id="batchHint" hidden>With static 1M slots a request holds its slot for the whole pipeline trip, so requests per batch × stages must fit in the slots; otherwise the plan reports out of memory.</div>
     <div class="row"><label for="budget">Token budget</label><select id="budget"><option>4096</option><option>5120</option><option>8192</option><option>16384</option><option>32768</option></select></div>
@@ -216,6 +219,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="hint">Default: requests per batch × copy buffers (sequential 1, double 2, triple 3); with a global lane table, stages × requests per batch (sequential copies only). Variable-layout batching must override.</div>
     <div class="row check"><input id="batchDynShape" type="checkbox"><label for="batchDynShape">Dynamic batch size (no padding to the budget)</label></div>
     <div class="hint">On: a partly filled batch runs at its actual size (untraced). Off: it is padded to the full budget, as tracing requires.</div>
+    <div class="row"><label for="batchChunksPerRequest">Chunks per request per round (0 = no limit)</label><input id="batchChunksPerRequest" type="number" min="0" step="1"></div>
+    <div class="hint">Round robin: a batch is filled in rounds over the queue, each request getting up to this many more chunks per round, until the budget is used. 0: the front request takes all it can (greedy); 1: an even split. A request alone fills the batch either way. Every request in a batch reads its own cached prefix, so many requests per batch cost throughput.</div>
     <div class="row"><label for="attn">Attention</label><select id="attn"><option value="seq">sequential per request</option><option value="fused">fused multi-user</option></select></div>
     <div class="row check"><input id="kvDedup" type="checkbox"><label for="kvDedup">One attention call per request per chunk (prefix gathered once)</label></div>
     <div class="hint">Off: with a fixed layout, each chunk-unit of a request makes its own call and re-gathers the cached prefix.</div>
@@ -226,6 +231,10 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
   <fieldset>
     <legend>Traffic &amp; SLO</legend>
     <div class="row"><label for="decodeTps">Decode tok/s per request</label><input id="decodeTps" type="number" min="5" step="5"></div>
+    <div class="row"><label for="decodeSlots">Decode KV slots (0 = unlimited)</label><input id="decodeSlots" type="number" min="0" step="1"></div>
+    <div class="row"><label for="decodeConcurrency">Decode sessions at once (0 = unlimited)</label><input id="decodeConcurrency" type="number" min="0" step="1"></div>
+    <div class="hint">KV slots and decode positions are separate: a 64-stage decode ring generates for at most 64 sessions at once (one per stage), while its memory holds about 85 slots of 1M tokens. A request whose prefill is done waits for a decode position while holding its slot.</div>
+    <div class="hint">A request needs a free decode slot before its prefill may start (tt-d-gen reserves it up front to start KV migration eagerly), and holds it until decode ends; waiting for one counts in TTFT. M3 decode today holds about 64 sessions (one per pipeline stage).</div>
     <div class="row"><label for="slo">p90 TTFT SLO (s)</label><input id="slo" type="number" min="0.5" step="0.5"></div>
     <div class="row"><label for="sloR">SLO slider <span class="mono" id="sloV"></span></label><input id="sloR" type="range" min="0" max="100" step="1" aria-label="p90 TTFT SLO, log scale, right end = no SLO"></div>
     <div class="hint">Log scale from 1 s to 10 min; the right end means no SLO (goodput = peak). Results update live; a run sweeps up to about 4× the SLO it was started with, so for a much looser SLO, run again.</div>
@@ -233,6 +242,16 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row"><label for="seed">Seed</label><input id="seed" type="number" min="1" step="1"></div>
     <div class="row"><label for="concs">Concurrency grid</label><input id="concs" type="text"></div>
     <div class="row check"><input id="compareInf" type="checkbox" checked><label for="compareInf">Also run with an infinite cache</label></div>
+  </fieldset>
+  <fieldset>
+    <legend>Revenue &amp; cost</legend>
+    <div class="row"><label for="priceIn">Input $ / M tokens</label><input id="priceIn" type="number" min="0" step="0.01"></div>
+    <div class="row"><label for="priceCached">Cached input $ / M tokens</label><input id="priceCached" type="number" min="0" step="0.01"></div>
+    <div class="row"><label for="priceOut">Output $ / M tokens</label><input id="priceOut" type="number" min="0" step="0.01"></div>
+    <div class="hint">Defaults: MiniMax's own M3 price on OpenRouter (Oct 2026). New tokens (cache misses, re-prefill included) bill at the input price, prefix hits at the cached price. The Net Revenue tile nets input and output revenue against the galaxy cost of prefill and decode.</div>
+    <div class="row"><label for="galaxyUsd">$ / galaxy-hour</label><input id="galaxyUsd" type="number" min="0" step="0.5"></div>
+    <div class="row"><label for="decodeGalaxies">Decode galaxies</label><input id="decodeGalaxies" type="number" min="0" step="1"></div>
+    <div class="hint">One M3 decode instance: 64 sessions on 16 galaxies; set Decode KV slots to match. Margin = input + output revenue − (prefill + decode galaxies) × $/galaxy-hour. Changes apply without re-running.</div>
   </fieldset>
   <div class="btns">
     <button class="primary" id="runBtn" type="button">Run sweep</button>
@@ -310,8 +329,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <div class="panel"><h3>Sensitivity of the best configuration</h3><div class="tablewrap" id="sensTable" style="margin-top:8px"></div></div>
     </div>
     <div class="panel">
-      <h3>Hourly volume at the goodput point</h3>
-      <p class="muted small" style="margin:4px 0 8px">At the concurrency where each configuration reaches its goodput (p90 TTFT ≤ SLO): input tokens of the requests completed per hour, split into new tokens the pipeline prefilled (re-prefill included) and cached prefix hits, and requests completed per hour.</p>
+      <h3>Hourly volume and revenue at the goodput point</h3>
+      <p class="muted small" style="margin:4px 0 8px">At the concurrency where each configuration reaches its goodput (p90 TTFT ≤ SLO): input tokens of the requests completed per hour, split into new tokens the pipeline prefilled (re-prefill included) and cached prefix hits, requests completed per hour, and the input revenue they bill at <span id="hourPrice"></span> (set on the Explore tab; output tokens not counted).</p>
       <div class="tablewrap" id="hourTable"></div>
     </div>
     <div class="panel">
@@ -378,7 +397,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li><b>C:</b> chunk 2048, same split as B.</li>
         </ul>
         Each run measures a (new tokens × cached tokens) matrix, loaded and idle. The preset <span class="mono">today-C</span> is run C.</li>
-      <li><b>Features under consideration</b> (defined in "Features" below): batching several requests per pipeline pass; slot lanes plus a paged KV pool; variable chunk size with an all-to-all KV write; plus a few more the study adds (SSD KV tier, index-cache layout, async stage handoff, and others).</li>
+      <li><b>Features under consideration</b> (defined in "Features" below): batching several requests per pipeline pass; slot lanes plus a paged KV pool; variable chunk size with an all-to-all KV write; plus a few more the study adds (KV offload tiers, index-cache layout, async stage handoff, and others).</li>
     </ul>
 
     <h2 id="m-metric">The metric: goodput</h2>
@@ -500,7 +519,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li><b>Lane table ("Lane table" control).</b>
             <ul>
               <li><b>Per stage (default):</b> each stage allocates a lane only while it works through the request's chunks. That's about 1–3 chunks' worth of requests per stage.</li>
-              <li><b>Global, like today's slot_id:</b> a lane is held on every stage for the request's whole trip through the pipeline, so you need stages × requests-per-batch lanes, and its copies can only be sequential. On the best 4-galaxy config a global lane table drops goodput from 45.1k to 13.6k.</li>
+              <li><b>Global, like today's slot_id:</b> a lane is held on every stage for the request's whole trip through the pipeline, so you need stages × requests-per-batch lanes, and its copies can only be sequential. On the best 4-galaxy config with today's kernels a global lane table drops goodput from 60.3k to 15.5k.</li>
               <li>Each stage keeps its own KV tensors, so a per-stage table is feasible. It is a prerequisite for combining the pool with batching.</li>
             </ul>
           </li>
@@ -516,13 +535,14 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li><b>How eviction is tracked.</b> Each session's prefix tree is compressed into pieces. Every request touches whole pieces, so LRU over pieces is exactly LRU over 64-token pages.</li>
         </ul>
       </li>
-      <li><b>SSD KV tier = offloading KV to NVMe drives on the galaxy hosts.</b>
+      <li><b>KV offload tiers: device DRAM → host DRAM → SSD.</b>
         <ul>
-          <li><b>Static slots.</b> When a slot is reclaimed, its conversation's KV is written to SSD (the new occupant waits for the write-back), and that conversation's next request reads the prefix it shares back before it is admitted. One copy per conversation: nothing is shared between conversations, unlike pool pages. On today-C (4 galaxies, unaligned, round robin), 1 TB per galaxy lifts goodput from 3.3k to 16.4k; the pool with one lane and the same SSD reaches 24.9k.</li>
-          <li><b>Mechanism (pool and paging).</b> When the device pool evicts a page, it is written to SSD instead of being dropped. A later hit on it is read back into the request's lane while the request waits in the queue. The SSD tier evicts least-recently-used too. Write-backs and fetches share one bandwidth per galaxy: the lower of the drives' and PCIe's. Index keys are stored once on SSD, not per TP column.</li>
-          <li><b>Defaults:</b> 16 TB per galaxy, the planned hardware, and 64 GB/s per galaxy, a placeholder for the drives' / PCIe bandwidth.</li>
-          <li><b>What matters.</b> Capacity matters much more than bandwidth. At 8 TB per galaxy the results match an infinite cache; dropping bandwidth from 64 to 16 GB/s costs at most 13%.</li>
-          <li><b>Not modelled:</b> SSD write endurance, read/write asymmetry, and per-IO latency. The tier is an ideal page DMA at one bandwidth.</li>
+          <li><b>Mechanism (pool and paging).</b> When the device pool evicts a page, it moves to host DRAM over PCIe; when host DRAM is full, its least recently used pages move to SSD; when SSD is full, they are dropped. The tiers are exclusive. A later hit is read back into the request's lane while the request waits in the queue: host pages over PCIe, SSD pages from the drives and then over PCIe. Index keys are stored once off device, not per TP column.</li>
+          <li><b>Static slots.</b> When a slot is reclaimed, its conversation's KV goes to host DRAM (the new occupant waits for the PCIe write-back), overflowing to SSD, and that conversation's next request reads the prefix it shares back before it is admitted. One copy per conversation: nothing is shared between conversations, unlike pool pages.</li>
+          <li><b>Host DRAM for KV.</b> The Galaxy Blackhole host has 576 GB (6 × 96 GB DDR5-4800). Kept back: 10% headroom, 16 GB for the OS and services, 32 GB for the model's runtime (tt-metal, inference server, program caches), 32 GB of staging for KV migration to decode, 1 GiB of pinned memory per chip (tt-metal's PCIe host channel, 32 GiB), and this galaxy's share of the model weights (about 33 GB at 8 galaxies, 67 GB at 4). That leaves about 370 GB of KV per galaxy at 8 galaxies, 340 GB at 4: about 40M and 18M tokens per pipeline at 73.4 KB per token, against 77M and 29M tokens of device pool.</li>
+          <li><b>SSD.</b> 16 TB per galaxy by default, the planned hardware (shipped systems carry 4 × 7.68 TB Samsung PM9D3a E1.S = 30.7 TB): about 1.7B tokens at 8 galaxies.</li>
+          <li><b>Bandwidth.</b> PCIe is full duplex, so fetches (host → device) and write-backs (device → host) each get 63 GB/s per galaxy: per tray, one chip has a Gen5 x8 link and seven have x1 links at Gen4 (1.97 GB/s), and since KV is spread evenly over the chips, the x1 chips set the pace (32 × 1.97). Relaying through each tray's x8 chip over Ethernet would allow up to 181 GB/s; no software does that today. The drives give 31.5 GB/s read (Rev C runs them at Gen4 x4, 7.88 GB/s each, below the drive's 12 GB/s) and 27.2 GB/s write (6.8 GB/s each); reads and writes share them.</li>
+          <li><b>Not modelled:</b> SSD write endurance and per-IO latency; host DRAM bandwidth (6 channels of DDR5-4800, about 230 GB/s, above the links' combined peak); a device page is assumed free as soon as its write-back is queued.</li>
           <li><b>AgentX.</b> The methodology caps host <i>DRAM</i> per system; check how it treats SSD-backed KV before relying on large tiers.</li>
         </ul>
       </li>
@@ -551,7 +571,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Dynamic batch size</b> (on by default). Decides what a batch that is not full costs, e.g. a single request. On, it runs at the tokens it holds, rounded up to whole chunks (fixed layout) or 32·SP (variable layout), as ops do without tracing. Off, it is padded to the full budget, as a traced build with one fixed shape must be.
         <ul>
           <li>Off, every batched chunk has one static budget-sized shape. A partly filled batch pays for the whole budget in every token-proportional op and in the stage-to-stage send. Routed MoE ops still trim to the real tokens, as they do for a padded chunk tail today.</li>
-          <li>With few requests per batch this hurts large budgets: on today's 4-galaxy config with pool and SSD tier, a static 16k shape drops 28.0k → 15.5k, below no batching (23.0k).</li>
+          <li>With few requests per batch this hurts large budgets: on today's 4-galaxy config with pool and the old 1 TB SSD tier, a static 16k shape drops 28.0k → 15.5k, below no batching (23.0k).</li>
           <li>There a static 4k shape loses 3% and 8k loses 9%. On the best stacks, which fill batches better, static 8k is within 1% and static 16k costs 0–6%.</li>
         </ul>
       </li>
@@ -569,7 +589,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <ul>
       <li><b>Slot lanes + paged pool:</b> replaces static slots (see KV cache): 4 fixed 1M lanes per stage.</li>
       <li><b>Variable-size lanes (arena):</b> lanes allocated at the request's actual length from a contiguous arena (2-8M tokens) instead of 1M each.</li>
-      <li><b>SSD KV tier:</b> see KV cache. In the study it requires the paged pool; the simulator also supports it behind static slots.</li>
+      <li><b>KV offload tiers:</b> see KV cache. They work behind static slots as well as the paged pool; in the study they are the first roadmap step in every scenario.</li>
       <li><b>Not a feature: bounded dense gather.</b> Earlier versions listed bounding the dense ring-joint gather to [0, kv_len) as a P0 feature. The op already does this (tt-metal #47539), so it is part of today's baseline, and the old whole-lane behaviour is only a sensitivity row.</li>
       <li><b>Not a feature: unaligned resume.</b> Resuming at any 32-token boundary instead of rounding the cached prefix down to a chunk multiple (with chunk 2048 the rounding discards about 1024 cached tokens per request). It is merged (tt-metal #57636; validated on 5 layers, the full 60-layer two-turn accuracy check is still to run), so the simulator always resumes unaligned (<span class="mono">node run.js --set unaligned=false</span> still models the old rounding). The variable layout includes it anyway.</li>
       <li><b>index_k stored once:</b> the index-key cache is kept on one TP column instead of all four, and gathered when needed. This cuts KV size from 2112 to 1344 B per token per layer.</li>
@@ -599,22 +619,21 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Sensitivity.</b> The best configuration re-run with:
         <ul>
           <li>other seeds (about ±5% noise);</li>
-          <li>1, 4 or 64 TB of SSD tier per galaxy;</li>
-          <li>16 or 256 GB/s of SSD bandwidth per galaxy;</li>
+          <li>no host DRAM tier; 1, 4 or 64 TB of SSD per galaxy; PCIe at 181 GB/s per galaxy (x8 relay); or half the SSD bandwidth;</li>
           <li>decode at 90 or 360 tok/s;</li>
           <li>a 3 GB reserve per chip;</li>
           <li>index_k in bf16, as in the calibration runs;</li>
           <li>a TP=4-only mesh.</li>
         </ul>
-        Faster decode raises prefill goodput because requests finish sooner, fewer lanes carry the same load, and less KV is live.</li>
-      <li><b>[4,2] stages</b> (TP=2) win the grids by 1-10%. The current KV cache assumes one KV head per chip (TP=4), so they need a KV-head sharding change.</li>
+        With roofline kernels faster decode raises prefill goodput, because requests finish sooner and less KV is live; with today's kernels it moves goodput within seed noise.</li>
+      <li><b>[4,2] stages</b> (TP=2) win three of the four grids by 1-12% (at 4 galaxies with roofline kernels, 4×[8,4] stages win by 2%). The current KV cache assumes one KV head per chip (TP=4), so they need a KV-head sharding change.</li>
     </ul>
 
     <h2 id="m-read">Reading the Explore tab</h2>
     <ul>
-      <li><b>Loading.</b> On load, the charts show the precomputed baseline (<span class="mono">today-C</span>). <b>Run sweep</b> simulates your configuration at every concurrency in the grid, in your browser, in about 5-30 s. It also runs the same configuration with an infinite cache, unless you untick that option.</li>
+      <li><b>Loading.</b> On load, the charts show the precomputed baseline (<span class="mono">today-C</span>) while a live sweep of the starting configuration runs, which then replaces it. <b>Run sweep</b> simulates your configuration at every concurrency in the grid, in your browser, in about 5-30 s. It also runs the same configuration with an infinite cache, unless you untick that option.</li>
       <li><b>Metrics at.</b> Picks the concurrency the tiles and "Where processed tokens go" show: the goodput point by default, any concurrency of the sweep (also by clicking a chart; a dashed line marks it), or any other concurrency typed into the box, which is simulated on demand (with its infinite-cache twin) and added to the charts. At a picked concurrency the first tile shows useful tok/s there instead of goodput, and the infinite-cache tile compares at the same concurrency. Added concurrencies never move goodput, which comes from the sweep alone. Peak useful always describes the sweep. Copy link keeps the choice.</li>
-      <li><b>Tiles.</b> Goodput; goodput with an infinite cache; TTFT p50/p90 and hit rate at the goodput point; input tokens per hour at the goodput point (the input of the requests completed there, split into new tokens the pipeline prefilled, re-prefill included, and cached prefix hits) and requests completed per hour; the peak useful throughput regardless of TTFT; wasted compute (the share of processed tokens that is re-prefill or padding, the complement of the useful share in "Where processed tokens go"); requests per batch at the goodput point and at the peak.</li>
+      <li><b>Tiles.</b> Goodput; goodput with an infinite cache; TTFT p50/p90 and hit rate at the goodput point; input tokens per hour at the goodput point (the input of the requests completed there, split into new tokens the pipeline prefilled, re-prefill included, and cached prefix hits) and requests completed per hour; revenue (below); the peak useful throughput regardless of TTFT; wasted compute (the share of processed tokens that is re-prefill or padding, the complement of the useful share in "Where processed tokens go"); decode slots held (mean and max: requests from admission to prefill until the end of their decode, which is what a decode-slot limit caps), and with a limit, the share of requests that waited for a slot and the mean wait; requests per batch at the goodput point and at the peak.</li>
       <li><b>Charts</b> share a log concurrency axis:
         <ul>
           <li>useful tok/s;</li>
@@ -623,17 +642,24 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li>requests per batch (batch fill). A batch is one pass through the pipeline: without batching it carries one request's chunk, so the value is 1; with batching it holds up to the token budget from several requests. It stays near 1 on a lightly loaded pipeline and climbs only as the bottleneck stage nears saturation. At the same concurrency, a smaller cache shows fuller batches because re-prefill makes each request longer.</li>
         </ul>
         "Pin as comparison" keeps a run as a third line.</li>
-      <li><b>Copy link.</b> Copies a URL holding every setting that differs from the defaults (plus SLO, concurrency grid and the infinite-cache option); the address bar also tracks it. Opening the link loads that configuration and runs the sweep.</li>
+      <li><b>Net Revenue.</b> Per hour, for the requests completed: input-token revenue + output-token revenue − galaxy cost.
+        <ul>
+          <li><b>Input tokens</b> bill new tokens (cache misses, re-prefill included) at the input price, cached prefix hits ("cache") at the cache-read price. The defaults are MiniMax's own endpoint for <span class="mono">minimax/minimax-m3</span> on OpenRouter, on Oct 7 2026: $0.30 per M input tokens and $0.06 per M cache reads. That is also the model-level price and most providers' (the cheapest third-party provider is about 20% lower). There is no cache-write charge. A better cache bills less per token: a hit pays a fifth of a miss, so a higher hit rate raises revenue only by letting the same hardware serve more requests.</li>
+          <li><b>Output tokens</b> bill at $1.20 per M (MiniMax's own price on OpenRouter). Decode generates them, so they belong next to the decode galaxies' cost. AgentX requests average about 1.1k output tokens against 120k-150k input tokens at the study's goodput points, so output adds roughly 10-15% to a request's bill. The precomputed baseline has no output counts, so its net needs a live run.</li>
+          <li><b>Cost</b> is the prefill galaxies of the run plus the decode galaxies, at $12 per galaxy-hour by default (a rough operating cost). The default decode is one M3 instance, 64 sessions on 16 galaxies, so set Decode KV slots to 64 to match it (unlimited slots overstate what 16 decode galaxies serve).</li>
+        </ul>
+        Set other prices and costs in the Revenue &amp; cost fields; the tile, the points table (input $/h and net $/h) and the Roadmap hourly table (input revenue) update without re-running, and Copy link keeps them.</li>
+      <li><b>Copy link.</b> Copies a URL holding every setting that differs from the defaults (plus SLO, concurrency grid, the infinite-cache option, the prices and costs); the address bar also tracks it. Opening the link loads that configuration and runs the sweep.</li>
       <li><b>Where processed tokens go.</b> At the goodput point (or the concurrency picked in Metrics at), splits the pipeline's processed tokens into useful, re-prefill and padding.</li>
       <li><b>Plan.</b> Updates without simulating. It shows chips, KV capacity, slots or pool and lane sizes, KV bytes per token, and the modelled time of one chunk (at 140k cached) on each stage. Orange bars are stages holding a dense layer; the outlined bar is the bottleneck. The ceiling line is that chunk's tokens divided by the bottleneck time plus the send.</li>
     </ul>
 
     <h2 id="m-limits">Assumptions and limits</h2>
     <ul>
-      <li><b>SSD tier.</b> Capacity, bandwidth and the ideal page DMA are assumptions; endurance, read/write asymmetry and IO latency are not modelled. Capacity matters a lot for the result; bandwidth hardly does.</li>
+      <li><b>Offload tiers.</b> Capacities and bandwidths come from the Galaxy Blackhole documentation and the drive datasheet, but the host DRAM reserves (OS, runtime, KV staging) are estimates, and the transfers are ideal page DMAs. SSD endurance and IO latency are not modelled. The Roadmap study runs the defaults: host DRAM plus 16 TB of SSD per galaxy (the Oct 1 study used a single 1 TB SSD tier at 64 GB/s).</li>
       <li><b>Pool copies.</b> Assumed to be page-list gather kernels at 50% DRAM efficiency. Arena fragmentation is not modelled.</li>
       <li><b>Torus rings.</b> Every measurement used line (mesh) collectives, so the ring speed-ups are textbook link-load ratios, not measurements. [4,4] has no profile at all (geometric midpoint of [2,4] and [8,4]).</li>
-      <li><b>Decode.</b> A fixed per-request speed. Decode-side capacity and KV migration to decode are not modelled.</li>
+      <li><b>Decode.</b> A fixed per-request speed, whatever the number of sessions decoding. Decode capacity is a slot count only (Decode KV slots, default unlimited), not KV bytes per context length. KV migration to decode is not modelled.</li>
       <li><b>Extrapolation.</b> Batched chunks above 5120 tokens, meshes without a profile, and stage counts other than 16 are extrapolated. [4,2] stage costs come from a single-stage profile.</li>
       <li><b>Memory is calibrated to one measurement.</b> The 1 GB per-chip reserve reproduces the measured slot fit: 35 × 1M slots on 16×[2,4] with bf8 index_k and an even layer split, where stages with 4 MoE layers bind. The default auto split puts 5 MoE layers on some stages and fits 28. Weights and activation buffers are estimates.</li>
       <li><b>Complexity bins are rough</b> and not checked with the code owners.</li>
@@ -667,6 +693,15 @@ const fmtK = (x) => (x == null || !isFinite(x) ? '–' : x >= 1e4 ? (x / 1000).t
 const fmtS = (x) => (x == null || !isFinite(x) ? '–' : x >= 100 ? x.toFixed(0) : x >= 10 ? x.toFixed(1) : x.toFixed(2));
 // large counts (tokens or requests per hour): 1.23B, 45.6M, 789k
 const fmtBig = (x) => (x == null || !isFinite(x) ? '–' : x >= 1e9 ? (x / 1e9).toFixed(2) + 'B' : x >= 1e6 ? (x / 1e6).toFixed(1) + 'M' : fmtK(x));
+// dollars per hour: $1,290, $42.55, −$35.10
+const fmtUsd = (x) => (x == null || !isFinite(x) ? '–' : (x < 0 ? '−$' : '$') + (Math.abs(x) >= 100 ? Math.round(Math.abs(x)).toLocaleString('en-US') : Math.abs(x).toFixed(2)));
+// Revenue & cost fields: field id -> [SIM.PRICE or SIM.COST, key]; an empty or invalid field falls back to the default
+const ECON = { priceIn: [SIM.PRICE, 'inUsdPerM'], priceCached: [SIM.PRICE, 'cachedUsdPerM'], priceOut: [SIM.PRICE, 'outUsdPerM'], galaxyUsd: [SIM.COST, 'galaxyUsdPerH'], decodeGalaxies: [SIM.COST, 'decodeGalaxies'] };
+const econVal = (id) => { const x = Number($(id).value), [o, k] = ECON[id]; return $(id).value !== '' && x >= 0 ? x : o[k]; };
+const price = () => ({ inUsdPerM: econVal('priceIn'), cachedUsdPerM: econVal('priceCached'), outUsdPerM: econVal('priceOut') });
+const cost = () => ({ galaxyUsdPerH: econVal('galaxyUsd'), decodeGalaxies: econVal('decodeGalaxies') });
+// prefill galaxies of the run on screen (its config, not the form's)
+const runGalaxies = () => Object.assign({}, SIM.DEFAULTS, run && run.cfg).galaxies;
 const pct = (x, d = 0) => (x == null || !isFinite(x) ? '–' : (100 * x).toFixed(d) + '%');
 const cssv = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -699,9 +734,10 @@ const GLUE = `
 let TR = null, CAL = null;
 function slim(r, c) {
   if (r.error) return { conc: c, error: r.error };
-  return { conc: c, usefulTps: r.usefulTps, processedTps: r.processedTps, newTps: r.newTps, inTps: r.inTps, hitTps: r.hitTps, reqPerS: r.reqPerS, ttftP50: r.ttftP50, ttftP90: r.ttftP90, ttftP99: r.ttftP99,
+  return { conc: c, usefulTps: r.usefulTps, processedTps: r.processedTps, newTps: r.newTps, inTps: r.inTps, hitTps: r.hitTps, outTps: r.outTps, hostReadTps: r.hostReadTps, ssdReadTps: r.ssdReadTps, pcieH2DUtil: r.pcieH2DUtil, ssdUtil: r.ssdUtil, reqPerS: r.reqPerS, ttftP50: r.ttftP50, ttftP90: r.ttftP90, ttftP99: r.ttftP99,
     hitRate: r.hitRate, infHitRate: r.infHitRate, reprefillFrac: r.reprefillFrac, padFrac: r.padFrac, maxUtil: r.maxUtil, avgChunkTok: r.avgChunkTok,
-    avgSegsPerChunk: r.avgSegsPerChunk, done: r.done, warmupS: r.warmupS };
+    avgSegsPerChunk: r.avgSegsPerChunk, done: r.done, warmupS: r.warmupS,
+    decSlotsMean: r.decSlotsMean, decSlotsMax: r.decSlotsMax, decodingMean: r.decodingMean, decWaitPerS: r.decWaitPerS, decWaitMean: r.decWaitMean, runWaitPerS: r.runWaitPerS, runWaitMean: r.runWaitMean, runQP50: r.runQP50, runQP90: r.runQP90 };
 }
 onmessage = (e) => {
   const m = e.data;
@@ -732,9 +768,9 @@ function mkWorker() {
 }
 
 // ---------------------------------------------------------------- form <-> cfg
-const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'batchDynShape', 'attn', 'kvDedup', 'prefetchKV', 'policy',
-  'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'duration', 'seed'];
-const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'lanes', 'arenaTokens', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy', 'reserveGB', 'decodeTps', 'duration', 'seed']);
+const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'batchDynShape', 'batchChunksPerRequest', 'attn', 'kvDedup', 'prefetchKV', 'policy',
+  'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeConcurrency', 'duration', 'seed'];
+const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchChunksPerRequest', 'lanes', 'arenaTokens', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeConcurrency', 'duration', 'seed']);
 function setForm(cfg) {
   const c = Object.assign({}, SIM.DEFAULTS, cfg);
   for (const f of FIELDS) {
@@ -764,15 +800,15 @@ function syncUi() {
   $('splitRow').hidden = $('split').value !== 'custom';
   const pool = $('cache').value === 'pool', paged = pool || $('cache').value === 'paging';
   for (const id of ['lanes', 'laneArena', 'laneScope', 'copyMode']) $(id).disabled = !pool;
-  // the SSD tier works behind every finite cache: pool / paging pages, or whole static slots
-  for (const id of ['hostTier', 'hostGBPerGalaxy', 'pcieGBsPerGalaxy']) $(id).disabled = $('cache').value === 'inf';
+  // the offload tiers work behind every finite cache: pool / paging pages, or whole static slots
+  for (const id of ['hostTier', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy']) $(id).disabled = $('cache').value === 'inf';
   // a global lane is reserved for the whole pipeline trip: buffering its copies gains nothing, so sequential only
   if (pool && $('laneScope').value === 'global') { $('copyMode').value = 'sequential'; $('copyMode').disabled = true; }
   $('arenaTokens').disabled = !pool || !$('laneArena').checked;
   $('lanes').disabled = !pool || $('laneArena').checked;
   // every cache can batch; static slots need requests per batch x stages slots (makePlan reports out of memory)
   $('batch').disabled = false; $('batchHint').hidden = $('cache').value !== 'slots';
-  $('budget').disabled = !$('batch').checked; $('attn').disabled = !$('batch').checked; $('batchDynShape').disabled = !$('batch').checked;
+  $('budget').disabled = !$('batch').checked; $('attn').disabled = !$('batch').checked; $('batchDynShape').disabled = !$('batch').checked; $('batchChunksPerRequest').disabled = !$('batch').checked || $('policy').value !== 'rr';
   // pool lanes per stage (as makePlan): derived = copy-mode buffers x requests per batch; the override is for batching
   // on the pool only, and variable-layout batching (no chunk units) must override
   const fixedLanes = pool && !$('laneArena').checked, batched = $('batch').checked;
@@ -792,7 +828,8 @@ function syncUi() {
     $('lanes').value = String($('laneScope').value === 'stage' ? buffers * r : Number($('stages').value) * r);
   }
   // with batching on a variable layout the token budget is the chunk size; the chunk field is unused
-  const chunkUnused = $('batch').checked && $('layout').value === 'var';
+  // variable-layout batching packs to the budget; the chunk size only sets the per-request cap, if there is one
+  const chunkUnused = $('batch').checked && $('layout').value === 'var' && !(Number($('batchChunksPerRequest').value) > 0);
   $('chunk').disabled = chunkUnused; $('chunkHint').hidden = !chunkUnused;
 }
 // keep the pipeline valid when the hardware changes: fill each replica with stages, and drop a custom split
@@ -837,6 +874,7 @@ function shareUrl(hash) {
   const concs = $('concs').value.replace(/\s/g, ''); if (concs !== DEFAULT_CONCS) kv.push(['concs', concs]);
   if (!$('compareInf').checked) kv.push(['inf', '0']);
   if (viewC != null) kv.push(['at', String(viewC)]);
+  for (const [id, [o, k]] of Object.entries(ECON)) if (econVal(id) !== o[k]) kv.push([id, String(econVal(id))]);
   const qs = kv.map(([k, v]) => k + '=' + encodeURIComponent(v).replace(/%2C/g, ',')).join('&');
   return location.href.split(/[?#]/)[0] + (qs ? '?' + qs : '') + hash;
 }
@@ -844,7 +882,7 @@ function syncUrl() { try { history.replaceState(null, '', shareUrl(location.hash
 // apply a shared link; returns null without parameters, else the list of parameters it had to ignore
 function applyUrl() {
   const q = new URLSearchParams(location.search);
-  if (![...FIELDS, 'slo', 'concs', 'inf', 'at'].some((k) => q.has(k))) return null;
+  if (![...FIELDS, 'slo', 'concs', 'inf', 'at', ...Object.keys(ECON)].some((k) => q.has(k))) return null;
   const cfg = {}, bad = [];
   for (const f of FIELDS) {
     if (!q.has(f)) continue;
@@ -862,6 +900,7 @@ function applyUrl() {
   if (q.has('concs')) { const v = q.get('concs'); if (/^\d+(,\d+)*$/.test(v)) $('concs').value = v; else bad.push('concs=' + v); }
   $('compareInf').checked = q.get('inf') !== '0';
   if (q.has('at')) { const v = Number(q.get('at')); if (v > 0) viewC = v; else bad.push('at=' + q.get('at')); }
+  for (const k of Object.keys(ECON)) if (q.has(k)) { const v = Number(q.get(k)); if (q.get(k) !== '' && v >= 0) $(k).value = v; else bad.push(`${k}=${q.get(k)}`); }
   return bad;
 }
 $('shareBtn').addEventListener('click', async () => {
@@ -896,7 +935,8 @@ function updatePlan() {
   kvS.push(['KV capacity / replica', `${(plan.capTok / 1e6).toFixed(1)} M tokens`]);
   if (cfg.cache === 'slots') kvS.push(['Static 1M slots', `${plan.nSlots}`]);
   if (cfg.cache === 'pool') { kvS.push(['Paged pool', `${(plan.poolTok / 1e6).toFixed(1)} M tokens`]); kvS.push([cfg.laneArena ? 'Lane arena' : 'Lanes', cfg.laneArena ? `${(plan.arena / 1e6).toFixed(0)} M tokens` : `${plan.lanes} x 1M`]); }
-  if (plan.hostTok > 0) kvS.push(['SSD tier', `${(plan.hostTok / 1e6).toFixed(0)} M tokens`]);
+  if (plan.hostTok > 0) kvS.push(['Host DRAM tier', `${(plan.hostTok / 1e6).toFixed(0)} M tokens (${plan.hostBudget.kv.toFixed(0)} GB / galaxy)`]);
+  if (plan.ssdTok > 0) kvS.push(['SSD tier', `${(plan.ssdTok / 1e6).toFixed(0)} M tokens`]);
   kvS.push(['KV bytes / token', `${(plan.kvbL * 60 / 1000).toFixed(1)} KB`]);
   kvS.push(['Ceiling @140k cached', `${fmtK(ceiling)} processed tok/s`]);
   $('planKv').innerHTML = kvS.map(([k, v]) => `<div><span>${k}</span><br><b class="mono">${v}</b></div>`).join('');
@@ -1038,7 +1078,7 @@ function render() {
   const stale = run && run.slo && slo > 4 * run.slo;
   // processed-token split at the viewed point, shared by the Wasted tile and the breakdown bar
   const bp = v, sp = bp && tokSplit(bp);
-  const h = v && SIM.hourly(v);
+  const h = v && SIM.hourly(v, price()), e = v && SIM.economics(v, runGalaxies(), price(), cost());
   const tiles = [
     showPick
       ? ['Useful throughput', fmtK(pickP.usefulTps), `useful tok/s at C = ${pickP.conc}`, '']
@@ -1047,14 +1087,24 @@ function render() {
       ? ['With infinite cache', fmtK(infP.usefulTps), `useful tok/s at C = ${pickP.conc}, nothing evicted`, `real = ${pct(pickP.usefulTps / infP.usefulTps)} of ∞`]
       : ['With infinite cache', I ? (I.atEdge ? '≥ ' : '') + fmtK(I.goodput) : '–', 'same config, nothing evicted', R && I && I.goodput ? `real = ${I.atEdge ? '≤ ' : ''}${pct(R.goodput / I.goodput)} of ∞` : ''],
     ['TTFT', v ? `${fmtS(v.ttftP50)}<small> / ${fmtS(v.ttftP90)} s</small>` : '–', at('p50 / p90'), v ? `C = ${v.conc} lanes` : ''],
-    ['Hit rate', v ? pct(v.hitRate, 1) : '–', at('prefix-cache hit, token-weighted'), v ? `∞-cache ${pct(v.infHitRate, 1)}` : ''],
+    ['Hit rate', v ? pct(v.hitRate, 1) : '–', at('prefix-cache hit, token-weighted'), v ? `∞-cache ${pct(v.infHitRate, 1)}` + (v.hostReadTps > 0 || v.ssdReadTps > 0 ? ` · read back: host ${fmtK(v.hostReadTps)}, SSD ${fmtK(v.ssdReadTps)} tok/s` : '') : ''],
     ['Input tokens per hour', h ? fmtBig(h.inTok) : '–', at('cached + new'), h ? `new ${fmtBig(h.newTok)} (${pct(h.newTok / h.inTok, 1)}) · cached ${fmtBig(h.cachedTok)}` : ''],
     ['Requests per hour', h ? fmtBig(h.req) : '–', at('completed'), h ? `${fmtK(h.inTok / h.req)} input tok per request` : ''],
+    ['Net Revenue', e && isFinite(e.margin) ? fmtUsd(e.margin) : '–', at('per hour'), e ? [
+      `Input tokens: ${fmtUsd(e.inUsd)} (${fmtUsd(h.cachedUsd)} cache + ${fmtUsd(h.newUsd)} new)`,
+      `Output tokens: ${isFinite(e.outUsd) ? fmtUsd(e.outUsd) : '– (needs a live run)'}`,
+      `<span title="${runGalaxies()} prefill + ${e.decodeUsd / Math.max(1e-9, cost().galaxyUsdPerH)} decode galaxies">Cost: ${fmtUsd(e.cost)} (${runGalaxies() + cost().decodeGalaxies} galaxies)</span>`,
+    ].join('<br>') : ''],
     ['Peak useful', R && R.peak ? fmtK(R.peak.usefulTps) : '–', 'any TTFT', R && R.peak ? `C = ${R.peak.conc}, p90 ${fmtS(R.peak.ttftP90)} s` : ''],
     ['Wasted compute', sp && sp.proc ? pct((sp.rep + sp.pad) / sp.proc, 1) : '–', at('of processed tokens'), sp && sp.proc ? `re-prefill ${pct(sp.rep / sp.proc, 1)} · padding ${pct(sp.pad / sp.proc, 1)}` : ''],
+    ['Decode Slots', '', '', v && v.decSlotsMean != null ? [
+      `Mean slots held: ${Math.round(v.decSlotsMean)}`, `Max slots held: ${v.decSlotsMax}`,
+      ...(v.decWaitPerS > 0 ? [`${pct(v.decWaitPerS / v.reqPerS)} waited ${fmtS(v.decWaitMean)} s for a slot`] : []),
+      ...(v.runWaitPerS > 0 ? [`${pct(v.runWaitPerS / v.reqPerS)} waited ${fmtS(v.runWaitMean)} s to decode`, `Decode queue p50 / p90: ${v.runQP50} / ${v.runQP90} requests`] : [])].join('<br>') : ''],
     ['Requests per batch', v ? v.avgSegsPerChunk.toFixed(2) : '–', at('average (1 without batching)'), v ? `batch ${Math.round(v.avgChunkTok)} tok, busy ${pct(v.maxUtil)}` + (R.peak && R.peak !== v ? ` · at peak ${R.peak.avgSegsPerChunk.toFixed(2)}` : '') : ''],
   ];
-  $('tiles').innerHTML = tiles.map(([k, v, s, d]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="k">${s}</div><div class="d">${d}</div></div>`).join('');
+  // a tile without a headline number (empty value and subtitle) is just its title and detail lines
+  $('tiles').innerHTML = tiles.map(([k, v, s, d]) => `<div class="tile"><div class="k">${k}</div>${v !== '' ? `<div class="v">${v}</div>` : ''}${s !== '' ? `<div class="k">${s}</div>` : ''}<div class="d">${d}</div></div>`).join('');
   // breakdown
   if (bp) {
     const { proc, use, rep, pad } = sp;
@@ -1066,8 +1116,8 @@ function render() {
   } else { $('bdBar').innerHTML = ''; $('bdLegend').innerHTML = ''; $('bdNote').textContent = ''; }
   // points table
   const rows = [];
-  for (const [nm, arr] of [['config', realAll.slice().sort((x, y) => x.conc - y.conc)], ['∞ cache', infAll.slice().sort((x, y) => x.conc - y.conc)]]) for (const p of arr) { const hp = SIM.hourly(p); rows.push(`<tr><td>${nm}</td><td class="n">${p.conc}</td><td class="n">${fmtK(p.usefulTps)}</td><td class="n">${fmtK(p.processedTps)}</td><td class="n">${fmtS(p.ttftP50)}</td><td class="n">${fmtS(p.ttftP90)}</td><td class="n">${pct(p.hitRate, 1)}</td><td class="n">${fmtBig(hp.inTok)}</td><td class="n">${fmtBig(hp.newTok)}</td><td class="n">${fmtBig(hp.req)}</td><td class="n">${pct(p.reprefillFrac)}</td><td class="n">${pct(p.padFrac)}</td><td class="n">${pct(p.maxUtil)}</td><td class="n">${Math.round(p.avgChunkTok)}</td><td class="n">${p.avgSegsPerChunk != null ? p.avgSegsPerChunk.toFixed(2) : '–'}</td></tr>`); }
-  $('ptsTable').innerHTML = rows.length ? `<table><thead><tr><th>run</th><th class="n">C</th><th class="n">useful</th><th class="n">processed</th><th class="n">TTFT p50</th><th class="n">p90</th><th class="n">hit</th><th class="n">input/h</th><th class="n">new/h</th><th class="n">req/h</th><th class="n">re-prefill</th><th class="n">pad</th><th class="n">util</th><th class="n">chunk</th><th class="n">req/chunk</th></tr></thead><tbody>${rows.join('')}</tbody></table>` : '<p class="hint">No run yet.</p>';
+  for (const [nm, arr] of [['config', realAll.slice().sort((x, y) => x.conc - y.conc)], ['∞ cache', infAll.slice().sort((x, y) => x.conc - y.conc)]]) for (const p of arr) { const hp = SIM.hourly(p, price()), ep = SIM.economics(p, runGalaxies(), price(), cost()); rows.push(`<tr><td>${nm}</td><td class="n">${p.conc}</td><td class="n">${fmtK(p.usefulTps)}</td><td class="n">${fmtK(p.processedTps)}</td><td class="n">${fmtS(p.ttftP50)}</td><td class="n">${fmtS(p.ttftP90)}</td><td class="n">${pct(p.hitRate, 1)}</td><td class="n">${fmtBig(hp.inTok)}</td><td class="n">${fmtBig(hp.newTok)}</td><td class="n">${fmtBig(hp.req)}</td><td class="n">${fmtUsd(hp.usd)}</td><td class="n">${fmtUsd(ep.margin)}</td><td class="n">${pct(p.reprefillFrac)}</td><td class="n">${pct(p.padFrac)}</td><td class="n">${pct(p.maxUtil)}</td><td class="n">${Math.round(p.avgChunkTok)}</td><td class="n">${p.avgSegsPerChunk != null ? p.avgSegsPerChunk.toFixed(2) : '–'}</td></tr>`); }
+  $('ptsTable').innerHTML = rows.length ? `<table><thead><tr><th>run</th><th class="n">C</th><th class="n">useful</th><th class="n">processed</th><th class="n">TTFT p50</th><th class="n">p90</th><th class="n">hit</th><th class="n">input/h</th><th class="n">new/h</th><th class="n">req/h</th><th class="n">input $/h</th><th class="n">net $/h</th><th class="n">re-prefill</th><th class="n">pad</th><th class="n">util</th><th class="n">chunk</th><th class="n">req/chunk</th></tr></thead><tbody>${rows.join('')}</tbody></table>` : '<p class="hint">No run yet.</p>';
 }
 function startRun() {
   if (!trafficBuf) decodeTraffic();
@@ -1115,6 +1165,7 @@ function syncSlo(from) {
 }
 $('slo').addEventListener('change', () => { syncSlo('n'); render(); syncUrl(); });
 $('sloR').addEventListener('input', () => { syncSlo('r'); render(); syncUrl(); });
+for (const id of Object.keys(ECON)) $(id).addEventListener('input', () => { render(); renderRoadmap(); });
 
 // ---------------------------------------------------------------- roadmap
 const FEAT = Object.fromEntries(STUDY.features.map((f) => [f.key, f]));
@@ -1183,8 +1234,10 @@ function renderRoadmap() {
   $('gridTable').innerHTML = `<table><thead><tr><th>topology</th><th class="n">budget / chunk</th><th class="n">lanes</th><th class="n">goodput</th><th class="n">p90</th><th class="n">hit</th><th></th></tr></thead><tbody>${S.grid.slice(0, 8).map((g, i) => `<tr><td class="mono">${topo(g.extra)}</td><td class="n">${g.extra.budget || g.extra.chunk}</td><td class="n">${g.extra.arenaTokens ? (g.extra.arenaTokens / 1e6) + 'M arena' : g.extra.lanes || '–'}</td><td class="n">${fmtK(g.goodput)}</td><td class="n">${g.at ? fmtS(g.at.ttftP90) : '–'}</td><td class="n">${g.at ? pct(g.at.hitRate) : '–'}</td><td>${i === 0 ? '<button type="button" id="loadBest">Load</button>' : ''}</td></tr>`).join('')}</tbody></table><p class="hint" style="margin-top:6px">[4,2] = TP=2 stage; today's KV allocation assumes one KV head per chip (TP=4), so it needs a KV-head sharding change.</p>`;
   const lb = $('loadBest'); if (lb) lb.addEventListener('click', () => { const i = PRESETS.findIndex((p) => p.name === 'best-' + curSc); if (i >= 0) { $('preset').value = String(i); $('preset').dispatchEvent(new Event('change')); location.hash = 'explore'; } });
   $('sensTable').innerHTML = `<table><thead><tr><th>variant</th><th class="n">goodput</th><th class="n">vs best</th></tr></thead><tbody>${S.sens.map((s) => `<tr><td>${esc(s.name === 'SLO-free peak' ? 'peak useful (no SLO)' : s.name)}</td><td class="n">${fmtK(s.name === 'SLO-free peak' ? s.peak : s.goodput)}</td><td class="n">${s.name === 'SLO-free peak' ? '' : '×' + (s.goodput / Math.max(1, S.grid[0].goodput)).toFixed(2)}</td></tr>`).join('')}</tbody></table>`;
+  const pr = price(), dollars = (x) => '$' + x.toFixed(Math.max(2, (String(x).split('.')[1] || '').length));
+  $('hourPrice').textContent = `${dollars(pr.inUsdPerM)}/M new, ${dollars(pr.cachedUsdPerM)}/M cached`;
   const hourRows = [['Baseline (today)', S.greedy[0].at], ['Greedy full stack', S.full && S.full.at], ['Best configuration', S.grid[0].at]];
-  $('hourTable').innerHTML = `<table><thead><tr><th>configuration</th><th class="n">C</th><th class="n">p90</th><th class="n">input tok/h</th><th class="n">new tok/h</th><th class="n">cached tok/h</th><th class="n">hit</th><th class="n">requests/h</th></tr></thead><tbody>${hourRows.map(([nm, a]) => { const h = SIM.hourly(a); return h ? `<tr><td>${nm}</td><td class="n">${a.conc}</td><td class="n">${fmtS(a.ttftP90)}</td><td class="n">${fmtBig(h.inTok)}</td><td class="n">${fmtBig(h.newTok)}</td><td class="n">${fmtBig(h.cachedTok)}</td><td class="n">${pct(a.hitRate, 1)}</td><td class="n">${fmtBig(h.req)}</td></tr>` : `<tr><td>${nm}</td><td colspan="7" class="muted">no point meets the SLO</td></tr>`; }).join('')}</tbody></table>`;
+  $('hourTable').innerHTML = `<table><thead><tr><th>configuration</th><th class="n">C</th><th class="n">p90</th><th class="n">input tok/h</th><th class="n">new tok/h</th><th class="n">cached tok/h</th><th class="n">hit</th><th class="n">requests/h</th><th class="n">revenue/h</th></tr></thead><tbody>${hourRows.map(([nm, a]) => { const h = SIM.hourly(a, price()); return h ? `<tr><td>${nm}</td><td class="n">${a.conc}</td><td class="n">${fmtS(a.ttftP90)}</td><td class="n">${fmtBig(h.inTok)}</td><td class="n">${fmtBig(h.newTok)}</td><td class="n">${fmtBig(h.cachedTok)}</td><td class="n">${pct(a.hitRate, 1)}</td><td class="n">${fmtBig(h.req)}</td><td class="n">${fmtUsd(h.usd)}</td></tr>` : `<tr><td>${nm}</td><td colspan="8" class="muted">no point meets the SLO</td></tr>`; }).join('')}</tbody></table>`;
   const C = colors();
   const ser = [{ name: 'baseline (today)', color: C.pin, pts: S.curves.base }, { name: 'best configuration', color: C.cfg, pts: S.curves.best }];
   $('cmpLegend').innerHTML = ser.map((s) => `<span><i style="background:${s.color}"></i>${s.name}</span>`).join('');
@@ -1195,7 +1248,7 @@ function renderRoadmap() {
   $('roadHead').innerHTML = `<h2>What moves goodput on AgentX</h2>
   <p>Goodput = useful tok/s with p90 TTFT ≤ ${STUDY.slo} s. Baseline → best configuration found: <b>4 galaxies</b> ${fmtK(g0.greedy[0].goodput)} → <b>${fmtK(g0.grid[0].goodput)}</b> with today's kernels, ${fmtK(g1.grid[0].goodput)} with roofline kernels; <b>8 galaxies</b> ${fmtK(h0.greedy[0].goodput)} → <b>${fmtK(h0.grid[0].goodput)}</b> today, ${fmtK(h1.grid[0].goodput)} with roofline kernels.</p>
   <p>P0 features: ${top.map((k) => `<span class="pill p0">${esc(k)}</span>`).join(' ')}. The ordering, gains and complexity are below; hover the orange ticks for the infinite-cache ceiling of each step.</p>
-  <p>On AgentX traffic, KV-cache capacity limits throughput more than compute: even the best configurations reach only about 40-70% of their own infinite-cache goodput. The features that add effective KV capacity therefore come first: the paged pool, the SSD KV tier and the index-cache layout. "Today's kernels" / "roofline kernels", greedy vs leave-one-out, tiers and scope are defined in the <a href="#method">Method</a> tab.</p>`;
+  <p>On AgentX traffic, KV-cache capacity is the first wall, so the features that add effective KV capacity come first: the KV offload tiers (host DRAM + SSD) and the paged pool. With them the best configurations reach 97-99% of their own infinite-cache goodput with today's kernels and 86-90% with roofline kernels, where reading KV back from the tiers is the next limit. After that, compute features (async handoff, batching, variable chunk) matter most. "Today's kernels" / "roofline kernels", greedy vs leave-one-out, tiers and scope are defined in the <a href="#method">Method</a> tab.</p>`;
 }
 
 // ---------------------------------------------------------------- model tab
@@ -1237,16 +1290,18 @@ presetOptions();
 const startIdx = Math.max(0, PRESETS.findIndex((p) => p.name === 'today-C'));
 $('preset').value = String(startIdx); setForm(PRESETS[startIdx].cfg); $('presetDesc').textContent = PRESETS[startIdx].desc;
 $('slo').value = STUDY.slo; $('concs').value = DEFAULT_CONCS;
+for (const [id, [o, k]] of Object.entries(ECON)) $(id).value = o[k];
 const shared = applyUrl();
 syncSlo('n'); updatePlan(); renderRoadmap(); renderModel();
-// a shared link runs its configuration; otherwise show the study curves for the starting preset until the viewer runs one
+// a shared link runs its configuration; otherwise the study curves for the starting preset show until the sweep that
+// starts on load replaces them (they lack output tokens and decode slots, so the Net Revenue tile needs the live run)
 if (shared) { $('resTitle').textContent = 'Results: shared configuration'; syncUrl(); }
 else (function seed() {
   const S = STUDY.scenarios.g4_k0;
   run = { seq: ++runSeq, name: 'study baseline, 4 gx', cfg: S.base, infCfg: null, real: S.curves.base, inf: [], extra: [], extraInf: [], slo: STUDY.slo };
-  $('resTitle').textContent = 'Results: study baseline for 4 galaxies (16x[2,4], chunk 2048, auto split, static slots, round robin, unaligned resume; precomputed, press Run for a live sweep)';
+  $('resTitle').textContent = 'Results: study baseline for 4 galaxies (16x[2,4], chunk 2048, auto split, static slots, round robin, unaligned resume; precomputed, live sweep running)';
   render();
 })();
-setTimeout(() => { decodeTraffic(); $('statusTxt').textContent = 'Ready. Press Run sweep.'; if (shared && !$('runBtn').disabled) startRun(); }, 30);
+setTimeout(() => { decodeTraffic(); $('statusTxt').textContent = 'Ready. Press Run sweep.'; if (!$('runBtn').disabled) startRun(); }, 30);
 })();
 </script>

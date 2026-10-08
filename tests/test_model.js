@@ -56,14 +56,26 @@ assert.strictEqual(a.done, b.done); assert.ok(Math.abs(a.usefulTps - b.usefulTps
 const r = SIM.simulate(TR, cal, Object.assign({ cache: 'inf', batch: true, budget: 16384, layout: 'fixed' }, base, { concurrency: 64 }));
 assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
 
-// 7. replay: an SSD tier behind static slots keeps evicted slots' KV, so reads happen and the hit rate improves; the
+// 7. replay: offload tiers behind static slots keep evicted slots' KV, so reads happen and the hit rate improves; the
 //    infinite cache has no tier
 {
   const cfg = Object.assign({ cache: 'slots', chunk: 2048, unaligned: true }, base, { concurrency: 64 });
   const a = SIM.simulate(TR, cal, cfg), b = SIM.simulate(TR, cal, Object.assign({ hostTier: true }, cfg));
-  assert.ok(SIM.makePlan(Object.assign({ hostTier: true }, cfg), cal).hostTok > 0 && b.hostTok > 0, 'no SSD reads behind slots');
-  assert.ok(b.hitRate > a.hitRate, `slots + SSD hit ${b.hitRate} <= ${a.hitRate}`);
-  assert.strictEqual(SIM.makePlan(Object.assign({ hostTier: true }, cfg, { cache: 'inf' }), cal).hostTok, 0);
+  assert.ok(SIM.makePlan(Object.assign({ hostTier: true }, cfg), cal).hostTok > 0 && b.hostTok > 0, 'no host reads behind slots');
+  assert.ok(b.hitRate > a.hitRate, `slots + tiers hit ${b.hitRate} <= ${a.hitRate}`);
+  const inf = SIM.makePlan(Object.assign({ hostTier: true }, cfg, { cache: 'inf' }), cal);
+  assert.ok(inf.hostTok === 0 && inf.ssdTok === 0);
+}
+
+// 7b. offload tiers: the host DRAM share left for KV is DRAM minus the reserves; with a small host tier, pool pages
+//     cascade device -> host -> SSD and are read back from both; without host DRAM, evictions go straight to SSD
+{
+  const p = SIM.makePlan(Object.assign({ cache: 'pool', hostTier: true }, base), cal), h = p.hostBudget;
+  assert.ok(Math.abs(h.kv - (576 * 0.9 - 16 - 32 - 32 - 32 * 1.073741824 - h.weights)) < 1e-9 && h.weights > 0 && p.ssdTok > p.hostTok, `host kv ${h.kv}`);
+  const cfg = Object.assign({ cache: 'pool', chunk: 2048, hostTier: true, hostDramGBPerGalaxy: 260 }, base, { concurrency: 256 }); // about 50 GB of KV
+  const r = SIM.simulate(TR, cal, cfg), n = SIM.simulate(TR, cal, Object.assign({}, cfg, { hostDramGBPerGalaxy: 0 }));
+  assert.ok(r.hostTok > 0 && r.ssdTok > 0 && r.pcieH2DUtil > 0 && r.ssdUtil > 0, `reads host ${r.hostTok} ssd ${r.ssdTok}`);
+  assert.ok(n.hostTok === 0 && n.ssdTok > 0, 'no host tier: SSD only');
 }
 
 // 8. unaligned resume (tt-metal #57636) is the default: no cached tokens are lost to chunk rounding unless
@@ -81,7 +93,74 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   const r = SIM.simulate(TR, cal, Object.assign({ cache: 'slots', chunk: 2048 }, base, { concurrency: 64 }));
   const h = SIM.hourly(r), { inTps, hitTps, ...old } = r, g = SIM.hourly(old);
   assert.ok(Math.abs(r.inTps - r.newTps - r.hitTps) < 1e-6 * r.inTps && Math.abs(h.req - 3600 * r.reqPerS) < 1e-9);
-  for (const k of ['inTok', 'newTok', 'cachedTok', 'req']) assert.ok(Math.abs(h[k] - g[k]) < 1e-6 * h[k], `hourly fallback ${k}`);
+  for (const k of ['inTok', 'newTok', 'cachedTok', 'req', 'usd']) assert.ok(Math.abs(h[k] - g[k]) < 1e-6 * h[k], `hourly fallback ${k}`);
+  // revenue: new tokens at the input price, cached at the cache-read price; a partial override keeps the other price
+  const { inUsdPerM, cachedUsdPerM } = SIM.PRICE;
+  assert.ok(Math.abs(h.usd - (h.newTok * inUsdPerM + h.cachedTok * cachedUsdPerM) / 1e6) < 1e-9 * h.usd && h.usd === h.newUsd + h.cachedUsd);
+  const o = SIM.hourly(r, { inUsdPerM: 2 * inUsdPerM });
+  assert.ok(Math.abs(o.newUsd - 2 * h.newUsd) < 1e-9 * h.newUsd && o.cachedUsd === h.cachedUsd);
+  // output tokens: those of the requests completed in the window; points without outTps have no output revenue
+  const l = SIM.simulate(TR, cal, Object.assign({ cache: 'slots', chunk: 2048 }, base, { concurrency: 64, logRequests: true }));
+  let out = 0; for (const q of l.reqLog) out += TR.req_out[q];
+  const { outTps, ...noOut } = old;
+  assert.ok(Math.abs(l.outTps - out / l.duration) < 1e-9 * l.outTps && Number.isNaN(SIM.hourly(noOut).outUsd));
+  // margin: input + output revenue minus prefill and decode galaxy-hours
+  const e = SIM.economics(r, 8, null, { galaxyUsdPerH: 10, decodeGalaxies: 16 });
+  assert.ok(Math.abs(e.margin - (h.usd + h.outUsd - 240)) < 1e-9 && e.cost === 240 && e.decodeUsd === 160 && h.outUsd > 0);
+}
+
+// 10. decode slots: without a limit nothing waits and the results match the default exactly; with a limit, slots held
+//     never exceed it, requests wait for one, and fewer requests complete
+{
+  const cfg = Object.assign({ cache: 'pool', chunk: 512, batch: true, budget: 8192 }, base, { concurrency: 128 });
+  const d = SIM.simulate(TR, cal, cfg), u = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 0 }, cfg));
+  const l = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 8 }, cfg));
+  assert.ok(d.usefulTps === u.usefulTps && d.ttftP90 === u.ttftP90 && u.decWaitPerS === 0 && u.decSlotsMax > 8, `unlimited ${u.decSlotsMax}`);
+  assert.ok(u.decodingMean > 0 && u.decodingMean <= u.decSlotsMean, `decoding ${u.decodingMean} / held ${u.decSlotsMean}`);
+  assert.ok(l.decSlotsMax === 8 && l.decSlotsMean <= 8 && l.decWaitPerS > 0 && l.decWaitMean > 0 && l.reqPerS < u.reqPerS,
+    `limit 8: max ${l.decSlotsMax} mean ${l.decSlotsMean} waits ${l.decWaitPerS} req ${l.reqPerS} vs ${u.reqPerS}`);
+}
+
+// 10b. decodeConcurrency: never more requests decoding than the cap; requests wait for a position holding their
+//      slot; slots <= concurrency changes nothing
+{
+  const cfg = Object.assign({ cache: 'pool', chunk: 512, batch: true, budget: 8192 }, base, { concurrency: 128 });
+  const a = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 8 }, cfg)), b = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 8, decodeConcurrency: 8 }, cfg));
+  const c = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 16, decodeConcurrency: 4 }, cfg));
+  assert.ok(a.usefulTps === b.usefulTps && b.runWaitPerS === 0, 'slots <= concurrency is unchanged');
+  assert.ok(c.decodingMean <= 4 + 1e-9 && c.runWaitPerS > 0 && c.runWaitMean > 0 && c.decSlotsMax <= 16, `decoding ${c.decodingMean} runWait ${c.runWaitPerS}`);
+  // decode queue length percentiles (time-weighted): ordered, at most the slots that can be waiting, 0 without a limit
+  assert.ok(c.runQP90 >= c.runQP50 && c.runQP50 >= 0 && c.runQP90 <= 16 && c.runQP90 > 0 && a.runQP90 === 0, `queue p50 ${c.runQP50} p90 ${c.runQP90}`);
+  // starvation causes: shares of the window, summing to at most 1; none attributed to decode without decode limits
+  const u = SIM.simulate(TR, cal, cfg);
+  for (const r of [a, c, u]) {
+    const f = [r.pfStarvedSlotFrac, r.pfStarvedDecodeFrac, r.pfStarvedIdleFrac, r.sendBlockFrac];
+    assert.ok(f.every((x) => x >= 0 && x <= 1) && f[0] + f[1] + f[2] <= 1 + 1e-9, `starved ${f}`);
+  }
+  assert.ok(a.pfStarvedSlotFrac > 0 && c.pfStarvedDecodeFrac + c.pfStarvedSlotFrac > 0, 'decode limits starve prefill');
+  assert.ok(u.pfStarvedSlotFrac === 0 && u.pfStarvedDecodeFrac === 0 && u.sendBlockFrac > 0);
+}
+
+// 10c. batchChunksPerRequest L: rounds over the queue, up to L chunks per request per round.
+//      L = 1 is an even split: within a batch, every request not finishing in it holds the largest share (within one
+//      chunk), and a request alone takes the whole budget. L = 4: at most one request per batch gets fewer than 4
+//      chunks without finishing (the one the budget ran out on). L = 0 (default) is greedy.
+{
+  const C = 512, cfg = Object.assign({ cache: 'inf', batch: true, budget: 8192 }, base, { concurrency: 256, chunk: C });
+  let bad = 0, multi = 0, alone = 0;
+  const one = SIM.simulate(TR, cal, Object.assign({ batchChunksPerRequest: 1 }, cfg), { onChunk: (t, segs) => {
+    const tot = segs.reduce((a, s) => a + s.npad, 0), mx = Math.max(...segs.map((s) => s.npad));
+    if (tot > 8192) bad++;
+    if (segs.length > 1) { multi++; for (const s of segs) if (!s.last && s.npad < mx - C) bad++; }
+    else if (!segs[0].last && segs[0].npad === 8192) alone++;
+  } });
+  let cut = 0;
+  SIM.simulate(TR, cal, Object.assign({ batchChunksPerRequest: 4 }, cfg), { onChunk: (t, segs) => {
+    if (segs.filter((s) => !s.last && s.npad < 4 * C).length > 1) cut++;
+  } });
+  const g = SIM.simulate(TR, cal, cfg), z = SIM.simulate(TR, cal, Object.assign({ batchChunksPerRequest: 0 }, cfg));
+  assert.ok(bad === 0 && multi > 0 && alone > 0 && cut === 0 && one.avgSegsPerChunk > g.avgSegsPerChunk, `L=1 bad ${bad} multi ${multi} alone ${alone}; L=4 cut ${cut}`);
+  assert.ok(g.usefulTps === z.usefulTps && SIM.makePlan(Object.assign({}, cfg, { batchChunksPerRequest: 1.5 }), cal).errors.length > 0);
 }
 
 console.log('test_model: all checks passed');
