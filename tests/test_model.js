@@ -148,6 +148,9 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
     assert.ok(f.every((x) => x >= 0 && x <= 1) && f[0] + f[1] <= 1 + 1e-9, `starved ${f}`);
   }
   assert.ok(c.pfStarvedSlotFrac > 0 && n.pfStarvedSlotFrac === 0 && n.sendBlockFrac > 0, 'slot limits starve prefill');
+  // balance: an oversubscribed ring is ~always full, a huge one ~always empty (decode waiting on prefill); no ring = NaN
+  assert.ok(c.ringFillMean > 0.9 && c.ringFillMean <= 1 && c.decStarvedFrac < 0.1 && w.ringFillMean < 0.01 && w.decStarvedFrac > 0.99 && Number.isNaN(u.ringFillMean),
+    `ring fill ${c.ringFillMean} / ${w.ringFillMean}`);
 }
 
 // 10d. decode KV layouts (decodeCache). Paged decode (queue backpressure) with room to spare changes nothing; with
