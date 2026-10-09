@@ -210,6 +210,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
   <fieldset>
     <legend>Chunking &amp; batching</legend>
     <div class="row"><label for="layout">KV layout</label><select id="layout"><option value="fixed">fixed chunk (block-cyclic)</option><option value="var">variable chunk (a2a KV write)</option></select></div>
+    <div class="row"><label for="placement">Token placement</label><select id="placement"><option value="even">even split over SP (a2a KV write)</option><option value="owner">owner rank (no a2a, uneven ranks)</option></select></div>
+    <div class="hint">Variable layout only. Even split: each segment is padded to 32·SP and split evenly, then an all-to-all writes each K/V row to the rank that owns it. Owner rank: each token is computed on the rank that owns its KV row (blocks of chunk/SP), so segments are padded to 32 and there is no all-to-all, but every rank is padded to the busiest one.</div>
     <div class="row"><label for="chunk">Chunk size</label><select id="chunk"><option>128</option><option>256</option><option>512</option><option>1024</option><option>2048</option><option>4096</option><option>5120</option><option>8192</option></select></div>
     <div class="hint" id="chunkHint" hidden>Not used: with batching on a variable layout, the token budget below is the chunk size (unless max chunks per request is set).</div>
     <div class="row check"><input id="batch" type="checkbox"><label for="batch">Batch several requests per pipeline pass</label></div>
@@ -772,7 +774,7 @@ function mkWorker() {
 }
 
 // ---------------------------------------------------------------- form <-> cfg
-const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'batchDynShape', 'batchChunksPerRequest', 'attn', 'kvDedup', 'prefetchKV', 'policy',
+const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'placement', 'chunk', 'batch', 'budget', 'batchDynShape', 'batchChunksPerRequest', 'attn', 'kvDedup', 'prefetchKV', 'policy',
   'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeStages', 'decodeCurve', 'duration', 'seed'];
 const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchChunksPerRequest', 'lanes', 'arenaTokens', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeStages', 'duration', 'seed']);
 function setForm(cfg) {
@@ -833,7 +835,9 @@ function syncUi() {
   }
   // with batching on a variable layout the token budget is the chunk size; the chunk field is unused
   // variable-layout batching packs to the budget; the chunk size only sets the per-request cap, if there is one
-  const chunkUnused = $('batch').checked && $('layout').value === 'var' && !(Number($('batchChunksPerRequest').value) > 0);
+  // (owner placement still needs it: it sets the KV block per rank)
+  const chunkUnused = $('batch').checked && $('layout').value === 'var' && $('placement').value !== 'owner' && !(Number($('batchChunksPerRequest').value) > 0);
+  $('placement').disabled = $('layout').value !== 'var';
   $('chunk').disabled = chunkUnused; $('chunkHint').hidden = !chunkUnused;
 }
 // keep the pipeline valid when the hardware changes: fill each replica with stages, and drop a custom split

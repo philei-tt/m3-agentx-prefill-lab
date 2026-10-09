@@ -205,4 +205,28 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   assert.ok(plan(g16).counts[0] >= 2, 'dense layers share a stage on 16x[2,4]');
 }
 
+// 12. owner placement (variable layout): tokens go to the SP rank that owns their KV row under the block-cyclic layout
+{
+  const W = (load, p, m, cap, blk, sp, apply) => { const t = SIM.ownerWalk(load, p, m, cap, blk, sp, apply); return [t, load]; };
+  // any C-length window gives every rank C/SP rows (#57636's mid-slab chunk); shorter ones are uneven
+  assert.deepStrictEqual(W([0, 0, 0, 0], 5088, 2048, 1e9, 512, 4, true), [2048, [512, 512, 512, 512]]);
+  assert.deepStrictEqual(W([0, 0, 0, 0], 0, 1600, 1e9, 512, 4, true), [1600, [512, 512, 512, 64]]);
+  // a full rank stops the segment (it is contiguous); without apply the loads are untouched
+  assert.deepStrictEqual(W([480, 0, 0, 0], 0, 1024, 512, 512, 4, false), [32, [480, 0, 0, 0]]);
+  // no all-to-all: an owner-placed layer costs what the fixed layout does for the same segments
+  const segs = [{ n: 2048, na: 2000, k: 30000, cap: 0 }];
+  const po = plan({ layout: 'var', placement: 'owner' }), pf = plan({ layout: 'fixed' }), pe = plan({ layout: 'var' });
+  for (const kind of ['moe', 'dense']) {
+    assert.strictEqual(po.layer(kind, 2048, segs), pf.layer(kind, 2048, segs), kind);
+    assert.ok(pe.layer(kind, 2048, segs) > po.layer(kind, 2048, segs), `${kind}: even split pays the all-to-all`);
+  }
+  assert.ok(plan({ layout: 'var', placement: 'owner', chunk: 96 }).errors.some((e) => e.includes('owner placement')));
+  // replay: padding (rank imbalance included) between the even split (none) and the fixed chunk
+  const pad = (cfg) => SIM.simulate(TR, cal, Object.assign({ cache: 'inf' }, base, { concurrency: 64 }, cfg)).padFrac;
+  const [pF, pE, pO] = [pad({ layout: 'fixed' }), pad({ layout: 'var' }), pad({ layout: 'var', placement: 'owner' })];
+  assert.ok(pE < pO && pO < pF, `pad even ${pE} owner ${pO} fixed ${pF}`);
+  const rb = SIM.simulate(TR, cal, Object.assign({ cache: 'inf', batch: true, budget: 16384, layout: 'var', placement: 'owner' }, base, { concurrency: 64 }));
+  assert.ok(rb.done > 0 && rb.avgChunkTok <= 16384 && rb.maxUtil <= 1 + 1e-9);
+}
+
 console.log('test_model: all checks passed');

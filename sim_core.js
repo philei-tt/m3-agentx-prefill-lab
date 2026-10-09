@@ -69,7 +69,8 @@
     const E = M3.E, tl = T / sp;
     // routed tokens: the padded chunk tail is trimmed from dispatch/experts/combine/moe_reduce (padding_config
     // actual_isl); the router itself still scores the whole padded chunk
-    const Tr = c.Tr === undefined ? T : c.Tr, trl = Tr / sp;
+    // c.trl: real routed tokens on the busiest SP rank, when ranks are uneven (owner placement)
+    const Tr = c.Tr === undefined ? T : c.Tr, trl = c.trl === undefined ? Tr / sp : c.trl;
     const rsBytes = (tp - 1) / tp * tl * E * BF16;
     const tf = torusFactors(c);
     const a2a = (m) => (sp > 1 ? sp * m / (4 * HW.linkUni) * tf.a2a : m / HW.dram); // SP line (or ring), bisection-bound
@@ -115,7 +116,8 @@
   const cclLat = (op, c, lat) => { const f = torusFactors(c); return lat.ccl * (TP_CCL.has(op) ? f.latTp : f.latSp); };
   function roofSeg(op, c, s) {
     const { sp, tp } = c;
-    const nl = s.n / sp, kvlen = s.k + s.n;
+    // s.nl: query rows per SP rank, when ranks are uneven (owner placement); otherwise an even split
+    const nl = s.nl === undefined ? s.n / sp : s.nl, kvlen = s.k + s.n;
     const kvHeadB = 2 * (M3.Hkv / tp) * M3.d * BF8;          // K+V bytes/token on one chip (heads over TP)
     switch (op) {
       case 'ag_kv':
@@ -152,6 +154,24 @@
     return Math.ceil(units / CORES) * CORES / units;
   }
   const WAVE_OPS = new Set(['sparse', 'indexer', 'ring_c']);
+  const segRows = (s, c) => (s.nl === undefined ? s.n : s.nl * c.sp); // a segment's tokens as seen by its busiest rank
+  // Owner placement: each new token is computed on the SP rank that owns its KV row under the block-cyclic layout
+  // (blocks of blk = C/SP positions, block j on rank j mod SP), as tt-metal #57636 does for a chunk-length pass. Walks
+  // positions [p, p+m) block by block and returns how many of them fit with every rank at or below cap rows, given
+  // `load` (rows already on each rank); apply = add them to `load` (and to `rows`, the segment's own per-rank rows).
+  // p, m, blk and cap are multiples of 32.
+  function ownerWalk(load, p, m, cap, blk, sp, apply, rows) {
+    const L = apply ? load : load.slice();
+    let t = 0;
+    while (t < m) {
+      const q = p + t, r = Math.floor(q / blk) % sp, piece = Math.min(m - t, blk - (q % blk));
+      const take = Math.min(piece, cap - L[r]);
+      if (take <= 0) break;
+      L[r] += take; if (rows) rows[r] += take; t += take;
+      if (take < piece) break;
+    }
+    return t;
+  }
 
   // ------------------------------------------------------------------------------------------------------
   // Calibration: per-mesh measured efficiencies from zone profiles + pipeline-level fit ([2,4] 16-stage runs)
@@ -324,7 +344,7 @@
         const l = isCcl(op) ? cclLat(op, c, lat) : lat.op;
         const wave = WAVE_OPS.has(op);
         let sum = 0;
-        for (const s of segs) sum += roofSeg(op, c, s) * 1e3 / eff[op] * (wave && !fused ? waveFactor(s.n, c) / z : 1);
+        for (const s of segs) sum += roofSeg(op, c, s) * 1e3 / eff[op] * (wave && !fused ? waveFactor(segRows(s, c), c) / z : 1);
         if (wave && fused) sum *= waveFactor(c.T, c) / z;
         if (acc && (op === 'ag_kv' || op === 'ag_idx')) acc.g += sum;
         if (acc && (op === 'indexer' || op === 'sparse')) acc.w += sum;
@@ -333,7 +353,7 @@
     } else {
       const wf = fused ? waveFactor(c.T, c) / z : 0;
       for (const s of segs) {
-        const w = fused ? wf : waveFactor(s.n, c) / z;
+        const w = fused ? wf : waveFactor(segRows(s, c), c) / z;
         const rc = roofSeg('ring_c', c, s) * 1e3 / eff.ring_c * w, rs = roofSeg('ring_scan', c, s) * 1e3 / eff.ring_scan;
         t += Math.max(rc, rs);
         if (acc) acc.g += Math.max(0, rs - rc);
@@ -354,7 +374,8 @@
     // compute); only the gather time beyond that window stays exposed
     const at = (fused) => {
       const acc = c.prefetch ? { g: 0, w: 0 } : null;
-      const x = attnMs(kind, c, segs, eff, lat, fused, acc);
+      const sg = fused && segs.length && segs[0].nlf !== undefined ? segs.map((s) => Object.assign({}, s, { nl: s.nlf })) : segs;
+      const x = attnMs(kind, c, sg, eff, lat, fused, acc);
       return acc ? x - Math.min(acc.g, w + acc.w) : x;
     };
     // a fused multi-user kernel can always fall back to the per-request schedule, so it is never slower
@@ -376,6 +397,12 @@
     // #57827 calibration runs used bf16, so the calibration and validation replays pin idxBf16: true
     idxBf16: false, idxDerep: false,
     chunk: 5120, layout: 'fixed', batch: false, budget: 16384, attn: 'seq', policy: 'rr',
+    // placement (variable layout only): where a segment's new tokens are computed. 'even' = split evenly over the SP
+    //   ranks (segments padded to 32*SP), then an all-to-all writes each K/V row to the rank that owns it. 'owner' =
+    //   each token goes to the rank that owns its KV row (as the fixed layout does), so no all-to-all, segments are
+    //   padded only to 32, but ranks are uneven: every rank is padded to the busiest one, and each rank holds at
+    //   most budget/SP rows (C/SP without batching). The fixed layout always places by owner.
+    placement: 'even',
     // kvDedup: a request that takes several C-units of a batched fixed-layout chunk makes ONE attention call (one
     //   gather of its cached prefix); false = one call and one prefix gather per C-unit (today's kernels process
     //   one chunk at a time). prefetchKV: overlap the KV-prefix gathers with the layer's non-collective compute.
@@ -559,7 +586,9 @@
     const fix0 = cal.pipe.denseFix || 0;
     const lat = { ccl: (1 - a) * LAT_MEAS.ccl + a * LAT_TGT.ccl, op: (1 - a) * LAT_MEAS.op + a * LAT_TGT.op, denseFix: (1 - a) * fix0 + a * Math.min(fix0, 1) };
     const idxB = cfg.idxBf16 ? BF16 : BF8;
-    const ctxT = (T) => ({ sp, tp, P, T, idxB, imb: cfg.expertImb, varLayout: cfg.layout === 'var', bounded: cfg.boundedDense, msaLocal: cfg.msaLocal, ringSp, ringTp, prefetch: !!cfg.prefetchKV });
+    const owner = cfg.layout === 'var' && cfg.placement === 'owner';
+    const gran = owner ? 32 : 32 * sp; // segment padding unit on the variable layout
+    const ctxT = (T) => ({ sp, tp, P, T, idxB, imb: cfg.expertImb, varLayout: cfg.layout === 'var' && !owner, bounded: cfg.boundedDense, msaLocal: cfg.msaLocal, ringSp, ringTp, prefetch: !!cfg.prefetchKV });
     const pm = cal.pipe;
     // the 1/T term was fitted on chunks of 2048 and 5120 tokens; clamp so small chunks do not extrapolate it
     const moeMult = (T) => (1 - a) * (pm.moeMult[0] + pm.moeMult[1] * 5120 / Math.max(T, 2048)) + a * 1;
@@ -578,10 +607,10 @@
     const actXfer = (T) => T * M3.E * BF16 / (P * HW.linkUni * 0.5) * 1e3; // ms, each chip ships its shard
     const blockMs = (T) => (cfg.asyncHandoff ? 0 : Math.max(0, pm.block[0] + pm.block[1] * T / 1000));
     const hopMs = (T) => (cfg.asyncHandoff ? 0.5 + actXfer(T) : Math.max(0.5, pm.hop[0] + pm.hop[1] * T / 1000));
-    const layer = (kind, T, segs) => {
+    const layer = (kind, T, segs, trl) => {
       const c = ctxT(T);
       let tr = 0; for (const s of segs) tr += s.na === undefined ? s.n : s.na;
-      c.Tr = tr;
+      c.Tr = tr; c.trl = trl;
       const t = layerMs(kind, c, segs, eff[kind], lat, cfg.attn);
       return kind === 'moe' ? t * moeMult(T) : t;
     };
@@ -632,9 +661,9 @@
     if (cfg.cache === 'slots' && nSlots < 1) errors.push('no 1M slot fits in memory');
     // static slots: a slot is held for the request's whole trip through the pipeline (today's slot_id), so a full
     // pipeline has (requests per batch) x (stages) requests in flight, each in its own 1M slot. A variable-layout
-    // batch has no chunk units: up to budget / (32*SP) requests
+    // batch has no chunk units: up to budget / (32*SP) requests (budget / 32 with owner placement)
     if (cfg.cache === 'slots') {
-      const r = !cfg.batch ? 1 : cfg.layout === 'var' ? Math.floor(Tchunk / (32 * sp)) : reqsPerBatch;
+      const r = !cfg.batch ? 1 : cfg.layout === 'var' ? Math.floor(Tchunk / gran) : reqsPerBatch;
       if (r * S > nSlots) errors.push(`out of memory: ${r} requests per batch x ${S} stages = ${r * S} slots in flight, but only ${nSlots} 1M slots fit`);
     }
     // the override only applies to fixed pool lanes (other caches have none and ignore it, as they ignore `lanes`,
@@ -664,10 +693,13 @@
     const tokOf = (bytesPerGalaxy) => bytesPerGalaxy * gpr / (M3.L * kvbHost);
     const hostTok = offload ? tokOf(hostBudget.kv * GB) : 0;
     const ssdTok = offload ? tokOf(cfg.ssdTBPerGalaxy * 1e12) : 0;
-    const gran = 32 * sp;
+    if (!['even', 'owner'].includes(cfg.placement)) errors.push(`placement must be 'even' or 'owner', got ${cfg.placement}`);
+    if (owner && cfg.chunk % (32 * sp)) errors.push(`owner placement needs whole 32-row KV blocks: chunk ${cfg.chunk} is not a multiple of 32 x SP = ${32 * sp}`);
     return {
       cfg, sp, tp, P, S, counts, stages, eff, lat, layer, stageOv, embedMs, blockMs, hopMs, errors,
-      capTok, nSlots, poolTok, lanes, arena, hostTok, ssdTok, hostBudget, kvbL, kvbHost, gran, laneCap,
+      capTok, nSlots, poolTok, lanes, arena, hostTok, ssdTok, hostBudget, kvbL, kvbHost, gran, laneCap, owner,
+      // owner placement: KV block per rank, and the most rows a rank holds per pass (whole 32-row tiles)
+      blk: cfg.chunk / sp, rankCap: cfg.batch ? Math.floor(cfg.budget / sp / 32) * 32 : cfg.chunk / sp,
       // time (ms) to copy `tok` tokens of KV between pool and lane on the stage holding the most layers
       copyMs: (tok) => tok * Math.max(...stages.map((x) => x.n)) * kvbL / P * 2 / (HW.dram * 0.5) * 1e3,
       // per replica: PCIe per direction, SSD read / write
@@ -679,8 +711,8 @@
   }
 
   // stage times (ms) for one chunk; extra[s] adds per-stage copy costs
-  function chunkStageMs(plan, T, segs, out) {
-    const tm = plan.layer('moe', T, segs), td = plan.layer('dense', T, segs);
+  function chunkStageMs(plan, T, segs, out, trl) {
+    const tm = plan.layer('moe', T, segs, trl), td = plan.layer('dense', T, segs, trl);
     const ov = plan.stageOv(T);
     for (let s = 0; s < plan.S; s++) {
       const st = plan.stages[s];
@@ -1257,15 +1289,26 @@
       const fixed = cfg.layout === 'fixed';
       // chunk token budget: batching on a variable layout packs up to the budget; a fixed layout packs whole chunks
       const budget = cfg.batch ? (fixed ? Math.max(cfg.budget, C) : cfg.budget) : C;
-      const room = () => (fixed ? budget - T >= C : budget - T >= plan.gran); // space for one more segment
+      // owner placement: rows per SP rank in this chunk; a rank holds at most plan.rankCap
+      const own = plan.owner, load = own ? new Array(plan.sp).fill(0) : null;
+      const room = () => (fixed ? budget - T >= C : own ? load.some((l) => plan.rankCap - l >= 32) : budget - T >= plan.gran); // space for one more segment
       const cands = rep.active;
+      // owner placement: every rank is padded to the busiest one, so the chunk costs SP x its rows
+      const done = () => ({ segs, T: own ? plan.sp * Math.max(...load) : T, load });
       // one segment per request per chunk (a request's tokens in a chunk form one attention call, whatever the
       // layout): fixed layout = a whole number of chunks, variable layout = any multiple of 32*SP tokens
       const take = (q, maxTok) => {
         let n, npad;
         if (fixed) { const units = Math.floor(maxTok / C); if (units < 1) return false; n = Math.min(q.rem, units * C); npad = Math.ceil(n / C) * C; }
         else { const cap = cfg.batch ? maxTok : Math.min(maxTok, C); if (cap < plan.gran) return false; n = Math.min(q.rem, cap - (cap % plan.gran)); if (n <= 0) return false; npad = Math.ceil(n / plan.gran) * plan.gran; }
-        segs.push({ q, n, npad, k: q.pos, first: q.first, last: n === q.rem });
+        let rows;
+        if (own) { // trim to what the ranks it lands on can still hold
+          const m = ownerWalk(load, q.pos, npad, plan.rankCap, plan.blk, plan.sp, false);
+          if (m <= 0) return false;
+          n = Math.min(n, m); npad = Math.ceil(n / 32) * 32;
+          rows = new Array(plan.sp).fill(0); ownerWalk(load, q.pos, npad, plan.rankCap, plan.blk, plan.sp, true, rows);
+        }
+        segs.push({ q, n, npad, k: q.pos, first: q.first, last: n === q.rem, rows });
         q.first = false; q.pos += n; q.rem -= n; T += npad;
         return true;
       };
@@ -1287,19 +1330,24 @@
           const unit = fixed ? C : plan.gran;
           const L = cfg.batchChunksPerRequest > 0 ? Math.max(1, Math.floor(cfg.batchChunksPerRequest * C / unit)) : Infinity;
           const cand = [], need = [], alloc = [];
-          let left = Math.floor(budget / unit);
+          // owner placement: the budget is per rank (sl = rows allocated so far on each rank), not a token total
+          let left = own ? Infinity : Math.floor(budget / unit);
+          const sl = own ? new Array(plan.sp).fill(0) : null;
+          const fit = (q, off, a, apply) => (own ? ownerWalk(sl, q.pos + off * unit, a * unit, plan.rankCap, plan.blk, plan.sp, apply) / unit : a);
           // first round: requests join in queue order while the budget lasts and they get a lane
           for (const q of rep.active) {
             if (left <= 0) break;
+            const n = Math.ceil(q.rem / unit), a = fit(q, 0, Math.min(n, L, left), false);
+            if (a <= 0) break; // its first rank is full
             if (rrPool && !laneGet(q, rep)) break; // no lane free: a lane release re-pumps
-            const n = Math.ceil(q.rem / unit), a = Math.min(n, L, left);
+            fit(q, 0, a, true);
             cand.push(q); need.push(n); alloc.push(a); left -= a;
           }
           // further rounds among them while budget is left and someone needs more
           for (let more = true; left > 0 && more;) {
             more = false;
             for (let i = 0; i < cand.length && left > 0; i++) {
-              const a = Math.min(need[i] - alloc[i], L, left);
+              const a = fit(cand[i], alloc[i], Math.min(need[i] - alloc[i], L, left), true);
               if (a > 0) { alloc[i] += a; left -= a; more = true; }
             }
           }
@@ -1310,7 +1358,7 @@
             if (q.rem > 0) again.push(q);
           });
           for (const q of again) rep.active.push(q);
-          return segs.length ? { segs, T } : null;
+          return segs.length ? done() : null;
         }
         while (rep.active.length && room()) { // unbatched: one chunk of the front request
           const q = rep.active[0];
@@ -1322,7 +1370,7 @@
           break;
         }
         for (const q of again) rep.active.push(q);
-        return segs.length ? { segs, T } : null;
+        return segs.length ? done() : null;
       }
       // 1) continue active requests (they hold lanes), in start order
       for (let i = 0; i < cands.length && room(); i++) {
@@ -1342,7 +1390,7 @@
         }
       }
       rep.active = rep.active.filter((q) => q.rem > 0);
-      return segs.length ? { segs, T } : null;
+      return segs.length ? done() : null;
     }
     // round robin on the pool: a lane for one turn -> q.seg {lane, arena, miss}; false if none is free. The request's
     // own lane is reused while it still holds its context (also while its previous segment is still copying out);
@@ -1389,11 +1437,21 @@
       // trimming to the real tokens (padding_config actual_isl), as they do for a padded chunk tail today
       const T = cfg.batch && !cfg.batchDynShape ? Math.max(ch.T, cfg.layout === 'fixed' ? Math.max(cfg.budget, cfg.chunk) : cfg.budget) : ch.T;
       let cs = segs.map((s) => ({ n: s.npad, na: s.n, k: s.k, cap: s.q.laneCap || plan.laneCap }));
+      let trl;
+      if (plan.owner) {
+        // uneven ranks: a per-request attention call waits for the segment's busiest rank (nl); a fused call for the
+        // rank with the most attention work over all segments (nlf: that rank's rows of each segment, work ~ rows x
+        // context); routed MoE tokens scale with the busiest rank's rows
+        let rb = 0, wb = -1, pad = 0, real = 0;
+        for (let r = 0; r < plan.sp; r++) { let w = 0; for (const s of segs) w += s.rows[r] * (s.k + s.n / 2); if (w > wb) { wb = w; rb = r; } }
+        cs.forEach((c, i) => { c.nl = Math.max(...segs[i].rows); c.nlf = segs[i].rows[rb]; pad += c.n; real += c.na; });
+        trl = Math.max(...ch.load) * real / pad;
+      }
       if (!cfg.kvDedup && cfg.layout === 'fixed' && cs.some((s) => s.n > cfg.chunk)) { // one attention call per C-unit
         const C = cfg.chunk;
         cs = cs.flatMap((s) => Array.from({ length: s.n / C }, (_, u) => ({ n: C, na: Math.max(0, Math.min(C, s.na - u * C)), k: s.k + u * C, cap: s.cap })));
       }
-      chunkStageMs(plan, T, cs, scratch);
+      chunkStageMs(plan, T, cs, scratch, trl);
       // pool copy-in (first segment of a request) / copy-out (last) per stage, DRAM bound (read + write at 50%)
       const copies = rep.pool && cfg.cache === 'pool' && plan.poolTok !== Infinity;
       if (copies) {
@@ -1759,6 +1817,6 @@
     return { revenue, inUsd: h.usd, outUsd: h.outUsd, cost: costUsd, prefillUsd, decodeUsd, margin: revenue - costUsd, marginFrac: (revenue - costUsd) / revenue };
   }
 
-  const API = { M3, HW, DEFAULTS, PRICE, COST, M3_DECODE_TSU, decodeSpeed, calibrate: calibrateAll, makePlan, splitLayers, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, economics, layerMs, roofTok, roofSeg };
+  const API = { M3, HW, DEFAULTS, PRICE, COST, M3_DECODE_TSU, decodeSpeed, calibrate: calibrateAll, makePlan, splitLayers, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, economics, layerMs, roofTok, roofSeg, ownerWalk };
   if (typeof module !== 'undefined' && module.exports) module.exports = API; else root.M3SIM = API;
 })(typeof self !== 'undefined' ? self : this);
