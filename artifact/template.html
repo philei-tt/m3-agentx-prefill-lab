@@ -226,9 +226,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="hint">On: a partly filled batch runs at its actual size (untraced). Off: it is padded to the full budget, as tracing requires.</div>
     <div class="row"><label for="batchChunksPerRequest">Chunks per request per round (0 = no limit)</label><input id="batchChunksPerRequest" type="number" min="0" step="1"></div>
     <div class="hint">Round robin: a batch is filled in rounds over the queue, each request getting up to this many more chunks per round, until the budget is used. 0: the front request takes all it can (greedy); 1: an even split. A request alone fills the batch either way. Every request in a batch reads its own cached prefix, so many requests per batch cost throughput.</div>
-    <div class="row"><label for="attn">Attention</label><select id="attn"><option value="seq">sequential per request</option><option value="fused">fused multi-user</option></select></div>
-    <div class="row check"><input id="kvDedup" type="checkbox"><label for="kvDedup">One attention call per request per chunk (prefix gathered once)</label></div>
-    <div class="hint">Off: with chunk padding, each chunk-unit of a request makes its own call and re-gathers the cached prefix.</div>
+    <div class="row"><label for="attn">Attention</label><select id="attn"><option value="unit">sequential per chunk-unit</option><option value="request">sequential per request</option><option value="fused">fused multi-request</option></select></div>
+    <div class="hint">Attention calls in a batched pass. Per chunk-unit: a request that takes several chunk-units of the pass makes one call per unit, each re-gathering its cached prefix (chunk padding only; with tile padding a request's tokens in a pass are one run, so this is per request). Per request: one call per request, prefix gathered once. Fused: one call for the whole pass.</div>
     <div class="row check"><input id="prefetchKV" type="checkbox"><label for="prefetchKV">Prefetch KV-prefix gathers (overlap with compute)</label></div>
     <div class="row"><label for="policy">Scheduling</label><select id="policy"><option value="rr">round robin</option><option value="rtc">run to completion, oldest first</option><option value="srpt">run to completion, shortest first (30 s aging)</option></select></div>
     <div class="hint">Round robin (tt-d-gen): a request enqueues at most one token budget (one chunk without batching) per turn, then goes to the back of the queue, so a request with a long sequence cannot starve shorter ones.<br>Run to completion: a request keeps enqueuing token budgets until its whole sequence is processed, which can starve shorter requests waiting in the queue.</div>
@@ -569,15 +568,15 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       </li>
       <li><b>Batching.</b> Several requests share a chunk, up to the token budget. Projections and MoE run on the whole batch; that is where the gain comes from, since expert weights are read once for more tokens.
         <ul>
-          <li><b>Sequential attention</b> runs once per request.</li>
-          <li><b>Fused attention</b> runs once per chunk.</li>
+          <li><b>Sequential per request</b> (default): one attention call per request in the pass.</li>
+          <li><b>Fused</b>: one call for the whole pass.</li>
           <li>Both include a penalty for short segments that leave some of the 110 cores idle.</li>
         </ul>
         With chunk padding, batching packs whole chunks: a request takes a whole number of chunk-units.</li>
-      <li><b>One attention call per request per chunk</b> ("prefix gathered once", on by default). A request that takes several chunk-units of a batched chunk (a cold prefill) makes one attention call over all of them, so its cached prefix is gathered once. Off, each unit is its own call and re-gathers the prefix.
+      <li><b>Sequential per chunk-unit vs per request</b> (chunk padding only). A request that takes several chunk-units of a batched pass (a cold prefill) makes one attention call over all of them per request, so its cached prefix is gathered once; per chunk-unit, each unit is its own call and re-gathers the prefix (today's kernels process one chunk at a time).
         <ul>
-          <li>With it on, smaller chunks only cut padding: chunk 128 (32·SP) matches tile padding, and is about 3% better than 1024.</li>
-          <li>With it off, small chunks collapse. Chunk 2048 becomes the best, and it is 20–26% below the de-duplicated best (within 1% at 4 galaxies with roofline kernels, where SSD reads bind).</li>
+          <li>Per request, smaller chunks only cut padding: chunk 128 (32·SP) matches tile padding, and is about 3% better than 1024.</li>
+          <li>Per chunk-unit, small chunks collapse. Chunk 2048 becomes the best, and it is 20–26% below the per-request best (within 1% at 4 galaxies with roofline kernels, where SSD reads bind).</li>
         </ul>
       </li>
       <li><b>Dynamic batch size</b> (on by default). Decides what a batch that is not full costs, e.g. a single request. On, it runs at the tokens it holds, rounded up to whole chunks (chunk padding) or 32·SP (tile padding), as ops do without tracing. Off, it is padded to the full budget, as a traced build with one fixed shape must be.
@@ -780,7 +779,7 @@ function mkWorker() {
 }
 
 // ---------------------------------------------------------------- form <-> cfg
-const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'reqPad', 'placement', 'chunk', 'batch', 'budget', 'batchDynShape', 'batchChunksPerRequest', 'attn', 'kvDedup', 'prefetchKV', 'policy',
+const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'reqPad', 'placement', 'chunk', 'batch', 'budget', 'batchDynShape', 'batchChunksPerRequest', 'attn', 'prefetchKV', 'policy',
   'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeStages', 'decodeCurve', 'duration', 'seed'];
 const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchChunksPerRequest', 'lanes', 'arenaTokens', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeStages', 'duration', 'seed']);
 function setForm(cfg) {
@@ -844,6 +843,10 @@ function syncUi() {
   // (owner placement still needs it: it sets the KV block per rank)
   const chunkUnused = $('batch').checked && $('reqPad').value === 'tile' && $('placement').value !== 'owner' && !(Number($('batchChunksPerRequest').value) > 0);
   $('placement').disabled = $('reqPad').value !== 'tile';
+  // tile padding has no chunk-units: a request's tokens in a pass are one run, so per chunk-unit = per request
+  const unitOpt = $('attn').querySelector('option[value="unit"]');
+  unitOpt.disabled = $('reqPad').value === 'tile';
+  if (unitOpt.disabled && $('attn').value === 'unit') $('attn').value = 'request';
   $('chunk').disabled = chunkUnused; $('chunkHint').hidden = !chunkUnused;
 }
 // keep the pipeline valid when the hardware changes: fill each replica with stages, and drop a custom split

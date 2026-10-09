@@ -23,7 +23,7 @@ for (const opEff of [0, 0.5, 1]) {
 
 // 2. fused multi-user attention is never slower than per-request attention
 for (const kind of ['moe', 'dense']) {
-  const pf = plan({ attn: 'fused', batch: true, reqPad: 'tile', budget: 16384 }), ps = plan({ attn: 'seq', batch: true, reqPad: 'tile', budget: 16384 });
+  const pf = plan({ attn: 'fused', batch: true, reqPad: 'tile', budget: 16384 }), ps = plan({ attn: 'request', batch: true, reqPad: 'tile', budget: 16384 });
   for (const segs of [[{ n: 8192, k: 500000 }, { n: 256, k: 1000 }], [{ n: 640, k: 50000 }, { n: 640, k: 60000 }, { n: 1600, k: 1e5 }]]) {
     const T = segs.reduce((a, s) => a + s.n, 0);
     const s2 = segs.map((s) => Object.assign({ na: s.n, cap: 0 }, s));

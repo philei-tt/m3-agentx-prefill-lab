@@ -29,7 +29,7 @@ function breakdown(label, cfgBase) {
     const n = Math.ceil(1600 / C) * C, T = N * n;
     const segs = Array.from({ length: N }, () => ({ n, na: 1600, k: 140000, cap: 141600 }));
     const row = [];
-    for (const [attn, prefetchKV] of [['seq', false], ['fused', false], ['seq', true], ['fused', true]]) {
+    for (const [attn, prefetchKV] of [['request', false], ['fused', false], ['request', true], ['fused', true]]) {
       const plan = SIM.makePlan(Object.assign({}, cfgBase, { chunk: C, attn, prefetchKV, batch: true, budget: 65536 }), cal);
       row.push({ attn, prefetchKV, moe: plan.layer('moe', T, segs), dense: plan.layer('dense', T, segs) });
     }
@@ -56,11 +56,11 @@ breakdown(`8 gx roofline (${topo('g8_k1')}, roofline kernels)`, best('g8_k1'));
 // peak concurrency of chunk C=128, 64k, per-request attention (results/layout_ab_inf_peak.json)
 const PEAK = {};
 for (const [key, rows] of Object.entries(JSON.parse(fs.readFileSync(path.join(require('../lib/paths.js').RESULTS, 'layout_ab_inf_peak.json'))).scenarios)) {
-  const r = rows.find((x) => x.mode === 'base' && x.reqPad === 'chunk' && x.attn === 'seq' && x.chunk === 128 && x.budget === 65536);
+  const r = rows.find((x) => x.mode === 'base' && x.reqPad === 'chunk' && x.attn === 'request' && x.chunk === 128 && x.budget === 65536);
   if (r && r.at) PEAK[key] = r.at.conc;
 }
 const jobs = [];
-for (const [key, conc] of Object.entries(PEAK)) for (const [attn, prefetchKV] of [['seq', false], ['fused', false], ['seq', true], ['fused', true]])
+for (const [key, conc] of Object.entries(PEAK)) for (const [attn, prefetchKV] of [['request', false], ['fused', false], ['request', true], ['fused', true]])
   jobs.push({ key, attn, prefetchKV, cfg: Object.assign(best(key), { chunk: 128, batch: true, budget: 65536, attn, prefetchKV, concurrency: conc }) });
 Promise.all(jobs.map((j) => new Promise((res) => {
   const w = new Worker(__filename, { workerData: { data: require('../lib/paths.js').DATA, cfg: j.cfg } });

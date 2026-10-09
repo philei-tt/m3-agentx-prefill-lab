@@ -3,8 +3,8 @@
 // attention-side optimisations.
 // On each scenario's best feature stack and topology from results/study.json:
 //   chunk : chunk C in {128..5120} x batch budget in {off, 4k..32k} (a request takes whole C-token units)
-//   tile  : budget in {4k..32k} (segments padded to 32*SP only), attention 'seq' or 'fused' (one call per chunk)
-//   modes : base     = kvDedup (one attention call / prefix gather per request per chunk), no prefetch
+//   tile  : budget in {4k..32k} (segments padded to 32*SP only), attention 'request' or 'fused' (one call per pass)
+//   modes : base     = attn 'request' (one attention call / prefix gather per request per pass), no prefetch
 //           nodedup  = one attention call and prefix gather per C-unit (a cold prefill split into many units
 //                      re-gathers its prefix for every unit)
 //           prefetch = KV-prefix gathers overlap the layer's non-collective compute
@@ -18,7 +18,7 @@ const { STUDY } = require('../lib/paths.js');
 
 const CHUNKS = [128, 256, 512, 1024, 2048, 5120];
 let BUDGETS = [4096, 8192, 16384, 32768];
-const MODES = { base: {}, nodedup: { kvDedup: false }, prefetch: { prefetchKV: true } };
+const MODES = { base: {}, nodedup: { attn: 'unit' }, prefetch: { prefetchKV: true } };
 // --slo none : peak useful tok/s at any TTFT (sweep never stops early, bisects the peak) instead of goodput
 // --budgets 4096,...,65536 ; --extra-concs 5120,6144,8192 (high-concurrency peaks with an infinite cache)
 
@@ -43,12 +43,12 @@ async function main() {
     const jobs = [];
     for (const [mode, md] of Object.entries(MODES)) {
       for (const C of CHUNKS) {
-        if (mode !== 'nodedup' && C >= 1024) jobs.push({ mode, md, reqPad: 'chunk', attn: 'seq', chunk: C, batch: false });
-        for (const B of BUDGETS) if (B > C) jobs.push({ mode, md, reqPad: 'chunk', attn: 'seq', chunk: C, batch: true, budget: B });
+        if (mode !== 'nodedup' && C >= 1024) jobs.push({ mode, md, reqPad: 'chunk', attn: 'request', chunk: C, batch: false });
+        for (const B of BUDGETS) if (B > C) jobs.push({ mode, md, reqPad: 'chunk', attn: 'request', chunk: C, batch: true, budget: B });
         // fused attention with chunk padding, for the small chunks
         if (mode !== 'nodedup' && C <= 256) for (const B of BUDGETS) jobs.push({ mode, md, reqPad: 'chunk', attn: 'fused', chunk: C, batch: true, budget: B });
       }
-      if (mode !== 'nodedup') for (const attn of ['seq', 'fused']) for (const B of BUDGETS) jobs.push({ mode, md, reqPad: 'tile', attn, chunk: 5120, batch: true, budget: B });
+      if (mode !== 'nodedup') for (const attn of ['request', 'fused']) for (const B of BUDGETS) jobs.push({ mode, md, reqPad: 'tile', attn, chunk: 5120, batch: true, budget: B });
     }
     out[key] = await Promise.all(jobs.map((j) => {
       const { mode, md, ...d } = j;
@@ -69,16 +69,16 @@ async function main() {
     console.log(`\n== ${key} (${S.label}), ${S.grid[0].extra.stages}x[${S.grid[0].extra.mesh}]`);
     for (const mode of Object.keys(MODES)) {
       const f = (p) => rows.filter((r) => r.mode === mode && p(r))[0];
-      const bf = f((r) => r.reqPad === 'chunk' && r.budget && r.attn === 'seq'), ff = f((r) => r.reqPad === 'chunk' && r.attn === 'fused');
-      const vs = f((r) => r.reqPad === 'tile' && r.attn === 'seq'), vf = f((r) => r.reqPad === 'tile' && r.attn === 'fused');
+      const bf = f((r) => r.reqPad === 'chunk' && r.budget && r.attn === 'request'), ff = f((r) => r.reqPad === 'chunk' && r.attn === 'fused');
+      const vs = f((r) => r.reqPad === 'tile' && r.attn === 'request'), vf = f((r) => r.reqPad === 'tile' && r.attn === 'fused');
       const rq = (x) => (x && x.at ? `, ${x.at.avgSegsPerChunk.toFixed(1)} req/chunk` : '');
       console.log(`  ${mode.padEnd(8)} best chunk+batch ${kk(bf)} (C=${bf && bf.chunk} B=${bf && bf.budget / 1024}k${rq(bf)})`
         + (ff ? ` | chunk+fused ${kk(ff)} (C=${ff.chunk} B=${ff.budget / 1024}k)` : '')
-        + (vs ? ` | tile seq ${kk(vs)} (B=${vs.budget / 1024}k) | tile fused ${kk(vf)} (B=${vf.budget / 1024}k${rq(vf)})` : ''));
+        + (vs ? ` | tile request ${kk(vs)} (B=${vs.budget / 1024}k) | tile fused ${kk(vf)} (B=${vf.budget / 1024}k${rq(vf)})` : ''));
       console.log('    chunk:  ' + ['noB', ...BUDGETS.map((b) => 'B' + b / 1024 + 'k')].map((h) => h.padStart(6)).join(''));
       for (const C of CHUNKS) {
         console.log(`    C=${String(C).padStart(4)}` + [0, ...BUDGETS].map((B) => {
-          const r = rows.find((x) => x.mode === mode && x.reqPad === 'chunk' && x.attn === 'seq' && x.chunk === C && x.budget === B);
+          const r = rows.find((x) => x.mode === mode && x.reqPad === 'chunk' && x.attn === 'request' && x.chunk === C && x.budget === B);
           return kk(r).padStart(6);
         }).join(''));
       }

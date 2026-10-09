@@ -23,8 +23,8 @@ for (const m in data.zones) {
   const c = { sp, tp, P: sp * tp, T: 5120, idxB: 2, imb: 1.2, varLayout: false, bounded: true, msaLocal: false };
   const seg = [{ n: 5120, k: 51200, cap: 56320 }];
   const lat = { ccl: 0.04, op: 0.01 };
-  const tm = SIM.layerMs('moe', c, seg, cal.effs[m].moe, lat, 'seq');
-  const td = SIM.layerMs('dense', c, seg, cal.effs[m].dense, lat, 'seq');
+  const tm = SIM.layerMs('moe', c, seg, cal.effs[m].moe, lat, 'request');
+  const td = SIM.layerMs('dense', c, seg, cal.effs[m].dense, lat, 'request');
   console.log(`  ${m}: moe ${tm.toFixed(2)} vs ${data.zones[m]['layer03_sparse'].mean}, dense ${td.toFixed(2)} vs ${data.zones[m]['layer00_dense'].mean}`);
 }
 

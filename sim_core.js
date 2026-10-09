@@ -268,7 +268,7 @@
       }
     }
     cal.fit.samples = samples.length;
-    const moeZone = (p) => layerMs('moe', ctx(p.T, p.na), [{ n: p.T, na: p.na, k: p.k, cap: p.cap }], eff.moe, LAT_MEAS, 'seq');
+    const moeZone = (p) => layerMs('moe', ctx(p.T, p.na), [{ n: p.T, na: p.na, k: p.k, cap: p.cap }], eff.moe, LAT_MEAS, 'request');
     // 1) MoE-only stages: stage_ms = nMoE * (a + b*5120/T) * moeZone + o0   (o0 >= 0: per-chunk stage overhead)
     const moeS = samples.filter((p) => p.nd === 0);
     const X = moeS.map((p) => { const z = moeZone(p); return [p.n * z, p.n * z * 5120 / p.T, 1]; });
@@ -290,7 +290,7 @@
     const pre = dense.map((p) => {
       const c = ctx(p.T, p.na), s = { n: p.T, na: p.na, k: p.k, cap: p.cap };
       return {
-        R: layerMs('dense', c, [s], off, LAT_MEAS, 'seq') + ov(p.T),
+        R: layerMs('dense', c, [s], off, LAT_MEAS, 'request') + ov(p.T),
         A: roofSeg('ring_c', c, s) * 1e3 * waveFactor(s.n, c) / waveFactor(ZONE_T, c),
         B: roofSeg('ring_scan', c, s) * 1e3, ly: Math.log(p.y),
       };
@@ -325,7 +325,7 @@
   function rmse(X, y, beta) { let e = 0; for (let i = 0; i < X.length; i++) { let p = 0; for (let j = 0; j < beta.length; j++) p += X[i][j] * beta[j]; e += (p - y[i]) ** 2; } return Math.sqrt(e / X.length); }
 
   // ------------------------------------------------------------------------------------------------------
-  // Layer cost (ms) for a batch of segments.  kind: 'moe' | 'dense'; attn: 'seq' | 'fused'
+  // Layer cost (ms) for a batch of segments.  kind: 'moe' | 'dense'; attn: 'fused' = one call for all segments, else one per segment
   // ------------------------------------------------------------------------------------------------------
   function opMs(op, roofS, eff, lat, c) {
     return (isCcl(op) ? cclLat(op, c, lat) : lat.op) + roofS * 1e3 / eff[op];
@@ -399,17 +399,19 @@
     // reqPad: what each request's tokens in a pass (its segment) are padded to. 'chunk' (today) = a multiple of the
     //   chunk C, which is also the block-cyclic KV slab (C/SP rows per SP rank); 'tile' = whole 32-row tiles on every
     //   SP rank (see placement).
-    chunk: 5120, reqPad: 'chunk', batch: false, budget: 16384, attn: 'seq', policy: 'rr',
+    // attn: attention calls in a batched pass. 'unit' = one call per C-unit of each request, each re-gathering the
+    //   request's cached prefix (a request that takes several C-units of a chunk-padded batch; today's kernels process
+    //   one chunk at a time); 'request' = one call per request per pass (its prefix gathered once); 'fused' = one call
+    //   for the whole pass. 'unit' and 'request' differ only with batching and chunk padding.
+    chunk: 5120, reqPad: 'chunk', batch: false, budget: 16384, attn: 'request', policy: 'rr',
     // placement (tile padding only): where a segment's new tokens are computed. 'even' = split evenly over the SP
     //   ranks (segments padded to 32*SP), then an all-to-all writes each K/V row to the rank that owns it (none is
     //   needed when C = 32*SP). 'owner' = each token goes to the rank that owns its KV row (as chunk padding does), so
     //   no all-to-all and segments padded only to 32, but ranks are uneven: every rank is padded to the busiest one,
     //   and each rank holds at most budget/SP rows (C/SP without batching). Chunk padding always places by owner.
     placement: 'even',
-    // kvDedup: a request that takes several C-units of a batched chunk-padded pass makes ONE attention call (one
-    //   gather of its cached prefix); false = one call and one prefix gather per C-unit (today's kernels process
-    //   one chunk at a time). prefetchKV: overlap the KV-prefix gathers with the layer's non-collective compute.
-    kvDedup: true, prefetchKV: false,
+    // prefetchKV: overlap the KV-prefix gathers with the layer's non-collective compute
+    prefetchKV: false,
     // batchDynShape: a batch that is not full (e.g. a single request) runs at the tokens it holds (whole chunks /
     //   32*SP granules), as ops do without tracing; false = padded to the full budget, as a traced build with one
     //   fixed shape must be
@@ -700,6 +702,7 @@
     const tokOf = (bytesPerGalaxy) => bytesPerGalaxy * gpr / (M3.L * kvbHost);
     const hostTok = offload ? tokOf(hostBudget.kv * GB) : 0;
     const ssdTok = offload ? tokOf(cfg.ssdTBPerGalaxy * 1e12) : 0;
+    if (!['unit', 'request', 'fused'].includes(cfg.attn)) errors.push(`attn must be 'unit', 'request' or 'fused', got ${cfg.attn}`);
     if (!['chunk', 'tile'].includes(cfg.reqPad)) errors.push(`reqPad must be 'chunk' or 'tile', got ${cfg.reqPad}`);
     if (!['even', 'owner'].includes(cfg.placement)) errors.push(`placement must be 'even' or 'owner', got ${cfg.placement}`);
     if (owner && cfg.chunk % (32 * sp)) errors.push(`owner placement needs whole 32-row KV blocks: chunk ${cfg.chunk} is not a multiple of 32 x SP = ${32 * sp}`);
@@ -1455,7 +1458,7 @@
         cs.forEach((c, i) => { c.nl = Math.max(...segs[i].rows); c.nlf = segs[i].rows[rb]; pad += c.n; real += c.na; });
         trl = Math.max(...ch.load) * real / pad;
       }
-      if (!cfg.kvDedup && cfg.reqPad === 'chunk' && cs.some((s) => s.n > cfg.chunk)) { // one attention call per C-unit
+      if (cfg.attn === 'unit' && cfg.reqPad === 'chunk' && cs.some((s) => s.n > cfg.chunk)) { // one attention call per C-unit
         const C = cfg.chunk;
         cs = cs.flatMap((s) => Array.from({ length: s.n / C }, (_, u) => ({ n: C, na: Math.max(0, Math.min(C, s.na - u * C)), k: s.k + u * C, cap: s.cap })));
       }

@@ -467,7 +467,7 @@ Takeaways (study numbers are from this run, the third Oct 8 study, unless marked
      * Chunk 1024 is extrapolated: the model was calibrated at 2048 and 5120.
    * **Batch size and compute:** per-token MoE cost at [4,2] (today's kernels) falls 12% from 4k to 8k, 6% from 8k to 16k and 3% from 16k to 32k. The expert matmuls cross from weight-bound to compute-bound at about 8k tokens per chunk. With today's kernels goodput is 6–9% higher at 16k than at 8k, 4k is 20% worse, and 32k loses 5–24%, because the longer period pushes p90 TTFT over the SLO. With per-request attention and roofline kernels 8k is best: at 4 gx 4k and 16k are within 1% and 32k is −2%; at 8 gx 16k is −1.8%, 32k −7% and 4k −5%. (With fused attention the study's grid prefers 4k for 32×[2,4] at 8 gx with roofline kernels: 282.8k vs 280.3k at 8k, both with a 4M arena.)
    * **Smaller chunks (down to 32·SP = 128)** only cut padding once a request's chunk-units form one attention call. C=128 matches tile padding and is about 3% better than C=1024.
-   * **One prefix gather per request per chunk (`kvDedup`) is essential for small chunks.** With one attention call and prefix gather per chunk-unit instead:
+   * **One attention call and prefix gather per request (`attn: 'request'`) is essential for small chunks.** With one per chunk-unit (`attn: 'unit'`) instead:
      * small chunks collapse, e.g. C=128 at 16k gives 2.0k instead of 140.2k at 8 gx today;
      * the best choice becomes C=2048, which is 20–26% below the de-duplicated best (8 gx today: 104.0k vs 140.2k); only at 4 gx with roofline kernels, where the SSD binds, is it within 1% (132.5k).
      * Example: a cold 16k-token segment at 140k context pays 2.7 ms of gather per MoE layer as one call, but 41 ms as 16 × 1024 units.
@@ -490,14 +490,14 @@ Takeaways (study numbers are from this run, the third Oct 8 study, unless marked
        * +1.4% at 4 gx roofline.
        * This relies on that per-call cost being launch/setup-like, which is not verified.
      * **Prefetching the KV-prefix gathers: 0–3.5%** on top of chunk + fused (4 gx today 75.2 → 77.8k, 4 gx roofline +1.5%, 8 gx today 151.9 → 156.4k, 8 gx roofline −0.1%), about as much as with the real cache.
-     * **One prefix gather per request per chunk (`kvDedup`) matters even more.** Without it, the best setup is chunk 2048 and is 22–29% lower.
+     * **One prefix gather per request (`attn: 'request'` rather than `'unit'`) matters even more.** Without it, the best setup is chunk 2048 and is 22–29% lower.
      * **Peak throughput (any TTFT), infinite cache** (`tools/layout_ab.js --inf --slo none --budgets …,65536`, `results/layout_ab_inf_peak.{json,txt}`). Same conclusions:
        * Best fixed setup: chunk 128, budget 64k (still rising 0.6–3.9% from 32k) except at 4 gx today, where 16k is best (32k −6.0%, 64k −4.5%; at 64k the split becomes [1,1,3,5,…], with five MoE layers on some stages). Peak: 71.2k / 251.4k / 152.5k / 341.8k.
        * Relative to that: chunk 1024 is 4–9% lower, chunk 2048 is 9–18% lower.
        * Tile padding alone: −1.1 to +0.5%.
        * Fused attention with chunk padding: +6.7% at 4 gx today, +1.6% at 4 gx roofline, +9.9% at 8 gx today and +12.9% at 8 gx roofline.
        * Prefetch: 0–4.5%.
-       * Without `kvDedup`: 18–29% lower.
+       * Per chunk-unit (`attn: 'unit'`): 18–29% lower.
        * **Where fused attention and prefetch act** (`tools/attn_diag.js`, `results/attn_diag.txt`; the 8-gx best configs, 32×[4,2] with today's kernels and 32×[2,4] with roofline kernels):
          * **Sparse (MSA) layers:** each request gathers its own K/V + index prefix, which takes longer than its indexer + sparse attention (2.4 vs 1.3 ms per request at 140k with today's kernels, 0.4 vs 0.1 with roofline kernels on [2,4]). A fused call cannot share those gathers, so fused attention saves only 0–3% of an MSA layer (latency floors, core fill).
          * **Dense layers:** fused attention saves 11–17% at 4–10 requests per batch. That is almost entirely the fitted fixed cost of about 2.75 ms per ring-joint call, paid once per chunk instead of once per request. It is not verified that this cost is per call: time a dense layer with 1 vs several segments.

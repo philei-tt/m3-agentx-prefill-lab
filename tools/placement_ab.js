@@ -31,16 +31,16 @@ async function main() {
     const topo = { stages: g.stages, mesh: g.mesh, replicas: g.replicas, cache: 'inf', hostTier: false, laneArena: false };
     const budget = peak.scenarios[key].filter((r) => r.mode === 'base' && r.reqPad === 'tile' && r.attn === 'fused').sort((a, b) => b.goodput - a.goodput)[0].budget;
     const jobs = [];
-    for (const attn of ['seq', 'fused']) {
+    for (const attn of ['request', 'fused']) {
       const b = { batch: true, budget, attn };
       jobs.push(Object.assign({ v: 'chunk', reqPad: 'chunk', chunk: 128 }, b));
       jobs.push(Object.assign({ v: 'even', reqPad: 'tile', chunk: 5120 }, b));
       for (const C of OWNER_CHUNKS) if (C % (32 * sp) === 0) jobs.push(Object.assign({ v: 'owner', reqPad: 'tile', placement: 'owner', chunk: C }, b));
     }
     for (const C of [2048, 5120]) {
-      jobs.push({ v: 'chunk', reqPad: 'chunk', chunk: C, batch: false, attn: 'seq' });
-      jobs.push({ v: 'even', reqPad: 'tile', chunk: C, batch: false, attn: 'seq' });
-      jobs.push({ v: 'owner', reqPad: 'tile', placement: 'owner', chunk: C, batch: false, attn: 'seq' });
+      jobs.push({ v: 'chunk', reqPad: 'chunk', chunk: C, batch: false, attn: 'request' });
+      jobs.push({ v: 'even', reqPad: 'tile', chunk: C, batch: false, attn: 'request' });
+      jobs.push({ v: 'owner', reqPad: 'tile', placement: 'owner', chunk: C, batch: false, attn: 'request' });
     }
     out[key] = await Promise.all(jobs.map((j) => {
       const { v, ...d } = j;
@@ -59,7 +59,7 @@ async function main() {
     const S = study.scenarios[key], g = S.grid[0].extra;
     const B = rows.find((r) => r.budget).budget;
     console.log(`\n== ${key} (${S.label}), ${g.stages}x[${g.mesh}], peak useful k tok/s, infinite cache`);
-    for (const attn of ['seq', 'fused']) {
+    for (const attn of ['request', 'fused']) {
       const f = (v, C) => rows.find((r) => r.budget && r.attn === attn && r.v === v && (C === undefined || r.chunk === C));
       console.log(`  batched B=${B / 1024}k, ${attn}: chunk C=128 ${kk(f('chunk'))}${at(f('chunk'))} | even C=5120 ${kk(f('even'))}${at(f('even'))}`);
       console.log('    owner: ' + OWNER_CHUNKS.map((C) => (f('owner', C) ? `C=${C} ${kk(f('owner', C))}${at(f('owner', C))}` : null)).filter(Boolean).join(' | '));
