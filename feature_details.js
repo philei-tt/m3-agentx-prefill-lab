@@ -10,7 +10,7 @@ module.exports = {
       'Page allocator and page table per stage in device DRAM; prefix index from block hash to page on the host.',
       'A page-list gather/scatter op that copies many pages into or out of a lane in one launch (per-page host copies would be dispatch-bound).',
       'A per-stage lane table: each stage allocates a lane only while it works on the request (today slot_id is global across stages). This is required once batching is on: a global lane table drops the best 4-galaxy config from 45k to about 14k useful tok/s (8 galaxies: 102k to 28k).',
-      'Pool copies double-buffered: copy-in of the next batch and copy-out of the previous one overlap compute. The peak lane memory is about 2x the computing lanes, briefly; sequential copies (1x) cost about 1% on the best configs.',
+      'Pool copies double-buffered: copy-in of the next batch and copy-out of the previous one overlap compute. The peak lane memory is about 2x the computing lanes, briefly; sequential copies (1x) cost under 1% on the best configs.',
       'Scheduler: LRU eviction, pinning of in-flight prefixes, copy-in of the next request while the current chunk computes, copy-out after the last chunk.',
       'KV migration to decode reads from lane or pool pages instead of a fixed slot.',
     ],
@@ -18,7 +18,7 @@ module.exports = {
   },
   host: {
     what: 'Two KV tiers behind the device pool or the static slots: host DRAM, then NVMe SSDs in the galaxy hosts. With the pool, pages the device evicts move to host DRAM over PCIe, host DRAM evicts to SSD, and SSD drops; with static slots, a reclaimed slot moves the same way and is read back when its conversation returns (one copy per conversation, no prefix sharing). When a request hits an offloaded prefix, those pages are read back into its lane while the request waits in the queue. Defaults per galaxy: about 370 GB of the 576 GB host DRAM (8 galaxies), 16 TB of SSD (planned), PCIe 63 GB/s each way, SSD 31.5 GB/s read and 27.2 GB/s write.',
-    why: 'M3 KV is about 98 KB per token on device today (bf8 index_k replicated over TP). 4 galaxies hold about 30M tokens on device, but the live working set of AgentX near the throughput limit is several times larger, so the device pool alone still evicts conversations that come back minutes later. Host DRAM adds about 18M tokens per pipeline at 4 galaxies (40M at 8; tier copies store index_k once, about 73 KB per token), and 16 TB of SSD per galaxy adds over a billion. A hit costs a read: a 150k-token prefix is about 11 GB, about 45 ms over 4 × 63 GB/s of PCIe from host DRAM, or about 100 ms from SSD at 4 × 31.5 GB/s, done while the request is queued. In the Oct 8 study 64 TB per galaxy changes nothing on the best configs and 4 TB costs 1-5% with roofline kernels (nothing with today\'s kernels); bandwidth matters with roofline kernels (half the SSD bandwidth costs 24%, no host DRAM tier 16-19%) and barely with today\'s kernels (under 1%).',
+    why: 'M3 KV is about 98 KB per token on device today (bf8 index_k replicated over TP). 4 galaxies hold about 30M tokens on device, but the live working set of AgentX near the throughput limit is several times larger, so the device pool alone still evicts conversations that come back minutes later. Host DRAM adds about 18M tokens per pipeline at 4 galaxies (40M at 8; tier copies store index_k once, about 73 KB per token), and 16 TB of SSD per galaxy adds over a billion. A hit costs a read: a 150k-token prefix is about 11 GB, about 45 ms over 4 × 63 GB/s of PCIe from host DRAM, or about 100 ms from SSD at 4 × 31.5 GB/s, done while the request is queued. In the Oct 8 study 64 TB per galaxy changes nothing on the best configs and 4 TB costs 0.5-11% with roofline kernels (under 0.5% with today\'s kernels); bandwidth matters with roofline kernels (half the SSD bandwidth costs 23-24%, no host DRAM tier 15-18%) and barely with today\'s kernels (under 1%).',
     todo: [
       'SSD page store with its own LRU and an index from block hash to file offset.',
       'Asynchronous device→SSD write-back on eviction and SSD→device read before admission (GPUDirect-style or a pinned host bounce buffer).',
@@ -42,7 +42,7 @@ module.exports = {
   },
   async: {
     what: 'Today each stage receives a chunk, computes it, then sends the activation to the next stage (about 63 MB for a 5120-token chunk), and the send blocks the stage. Fitted from runs A/B/C: about 23 ms per chunk at 5120 (8 ms at 2048) of blocking send, plus 14-19 ms of hop latency. With async handoff the send overlaps with computing the next chunk.',
-    why: 'The blocking send adds 10-35% to the pipeline period. Its share grows with more stages (fewer layers per stage) and with faster kernels: ×1.34-1.49 at 4 galaxies with today\'s kernels, ×1.90-2.35 at 8 galaxies with roofline kernels. It also cuts TTFT, since 32 hops × 15 ms is about 0.5 s.',
+    why: 'The blocking send adds 10-35% to the pipeline period. Its share grows with more stages (fewer layers per stage) and with faster kernels: ×1.34-1.50 at 4 galaxies with today\'s kernels, ×1.89-2.21 at 8 galaxies with roofline kernels. It also cuts TTFT, since 32 hops × 15 ms is about 0.5 s.',
     todo: [
       'Double-buffered D2D send/receive: post the send and start the next chunk immediately; the receiver pre-posts buffers.',
       'Make sure the transfer uses enough links (the activation is spread over the stage\'s chips).',
@@ -52,17 +52,17 @@ module.exports = {
   },
   batch: {
     what: 'Put several requests\' new tokens into one chunk, up to a token budget (8-16k works best). Projections, norms and the whole MoE run on the concatenated tokens; attention runs per request (sequential).',
-    why: 'Most AgentX requests are small (median 1600 new tokens), so most chunks are small. An MoE layer has a large per-chunk cost that does not depend on tokens: expert weights (16 experts × 32 MB per chip per layer at [2,4]) and about 10 collectives per layer with ~40 µs latency each. More tokens per chunk amortise it. At chunk 2048 each expert sees only about 64 tokens (T×4/128), far below the 260-460 tokens per expert where the matmuls become compute-bound. Measured: ×1.08-1.42 when added, ×1.15-1.62 when removed from the full stack, at slightly higher TTFT. With sequential attention it does not matter which requests share a chunk.',
+    why: 'Most AgentX requests are small (median 1600 new tokens), so most chunks are small. An MoE layer has a large per-chunk cost that does not depend on tokens: expert weights (16 experts × 32 MB per chip per layer at [2,4]) and about 10 collectives per layer with ~40 µs latency each. More tokens per chunk amortise it. At chunk 2048 each expert sees only about 64 tokens (T×4/128), far below the 260-460 tokens per expert where the matmuls become compute-bound. Measured: ×1.05-1.42 when added, ×1.12-1.64 when removed from the full stack, at slightly higher TTFT. With sequential attention it does not matter which requests share a chunk.',
     todo: [
       'Chunk metadata per segment: lane/slot, start position, length.',
       'An attention loop over segments; each segment\'s KV is read and written in its own lane.',
       'MoE dispatch/combine buffers and activations sized for the budget instead of the chunk.',
-      'Traces per chunk size (or a few buckets, e.g. 4k/8k/16k), so a partly filled batch is not padded to the budget. With one static 16k shape the batches here (1.2-3 requests) are 40-65% padding: -6% on the best stacks, and below no batching on today\'s config.',
+      'Traces per chunk size (or a few buckets, e.g. 4k/8k/16k), so a partly filled batch is not padded to the budget. With one static 16k shape today\'s config (about 1.9 requests per batch) is 55% padding and falls below no batching; on the best stacks, which fill batches better, it costs 0-2%.',
       'One attention call per request per chunk, so a request\'s several chunk-units share one KV-prefix gather.',
       'A packing scheduler: fill the budget, split long requests across chunks, keep segments of one request in order.',
       'Needs the variable layout for token packing; with the fixed layout only whole chunks can be packed.',
     ],
-    notes: 'Each request in a chunk needs a lane on the stage, so batching wants more (or variable-size) lanes. Fused multi-user attention adds nothing on top.',
+    notes: 'Each request in a chunk needs a lane on the stage, so batching wants more (or variable-size) lanes. Fused multi-user attention adds up to 11% on top (most at 4 galaxies with today\'s kernels).',
   },
   var: {
     what: 'Today the chunk size is fixed per launch. KV is laid out block-cyclically over SP with period chunk/SP, RoPE is built with the same layout, the MoE dispatch buffers are sized by the chunk, and the MSA cache read requires cached_len % chunk == 0. Variable layout allows any segment length (a multiple of 32·SP tokens), and each layer\'s new K/V rows are routed to the SP device that owns them with a small all-to-all.',
@@ -73,7 +73,7 @@ module.exports = {
       'MSA cache read and ring attention without chunk-aligned starts.',
       'MoE buffers sized for the maximum budget; compile/trace buckets for variable token counts.',
     ],
-    notes: 'Includes unaligned resume. Most of its value is realised together with batching. A small fixed chunk plus batching gets nearly all of it, as long as a request\'s chunk-units in one batch form one attention call (its prefix is gathered once). With the same attention, fixed chunk 128-256 plus batching matches the variable layout in every scenario (within 0.5% with fused ("ragged") attention; 0.1-0.4% ahead with per-request attention), and chunk 1024 is 3-4% behind (tools/layout_ab.js, Oct 8 best configs with the new auto split; at 4 galaxies with roofline kernels, where SSD reads bind, every chunk from 128 to 2048 is within 0.4%). Chunks below 2048 are extrapolated (calibrated at 2048 and 5120).',
+    notes: 'Includes unaligned resume. Most of its value is realised together with batching. A small fixed chunk plus batching gets nearly all of it, as long as a request\'s chunk-units in one batch form one attention call (its prefix is gathered once). With the same attention, fixed chunk 128-256 plus batching matches the variable layout in every scenario (within 0.3% with fused ("ragged") attention; within 0.4% with per-request attention), and chunk 1024 is about 3% behind (tools/layout_ab.js, best configs of the third Oct 8 study; at 4 galaxies with roofline kernels, where SSD reads bind, every chunk from 128 to 2048 is within 0.3%). Chunks below 2048 are extrapolated (calibrated at 2048 and 5120).',
   },
   arena: {
     what: 'Instead of fixed 1M lanes, give each request a lane of its actual length from one contiguous arena per stage (2-8M tokens).',
@@ -86,7 +86,7 @@ module.exports = {
   },
   msa: {
     what: 'Today every MSA layer all-gathers the whole cached K/V and index keys over SP for each request (ag_kv / ag_index_k). Instead, each SP rank scores its own index keys, a small top-k merge picks the 16 blocks per query, and only those blocks are fetched.',
-    why: 'The gather grows with context: at [2,4] about 0.007 ms per 1k cached tokens per layer, so about 1 ms per layer at 140k, against an 18 ms layer today. The gain is ×1.00-1.09 in the full stack at SP=2; one early greedy step shows ×1.10, but that is a configuration still dominated by cache thrashing; it would matter more with larger SP or much faster kernels.',
+    why: 'The gather grows with context: at [2,4] about 0.007 ms per 1k cached tokens per layer, so about 1 ms per layer at 140k, against an 18 ms layer today. The gain is ×1.00-1.04 in the study at SP=2 (when added and leave-one-out); it would matter more with larger SP or much faster kernels.',
     todo: [
       'A distributed top-k merge.',
       'A block-fetch op for the selected K/V blocks.',
@@ -96,7 +96,7 @@ module.exports = {
   },
   fused: {
     what: 'One attention kernel over all requests in a batched chunk, instead of one attention call per request.',
-    why: 'It could save launches and fill cores better for short segments. The model includes both effects (per-op latency and a 110-core wave-quantisation penalty for short segments). It finds ≤9% (×1.00-1.09 leave-one-out), because batched segments average about 1.6k tokens, which already fill the cores.',
+    why: 'It could save launches and fill cores better for short segments. The model includes both effects (per-op latency and a 110-core wave-quantisation penalty for short segments). It finds ≤11% (×1.00-1.11 leave-one-out), because batched segments average about 1.6k tokens, which already fill the cores.',
     todo: ['New multi-user MSA and ring-joint kernels.'],
     notes: 'Not recommended: sequential per-request attention is as good. That confirms the "batch the MoE, attention per request" plan.',
   },

@@ -24,60 +24,60 @@ k1 8gx 2x16x[2,4]   off    0k   30.4 (337.3k) /  360 | off  100k   31.6 (323.8k)
 k1 8gx 32x[4,2]     off    0k   11.3 (453.3k) /  334 | off  100k   14.2 (359.4k) /  400 | axes   0k   10.0 (511.0k) /  297 | axes 100k   14.2 (359.4k) /  355
 k1 8gx 2x8x[4,4]    off    0k   27.7 (370.1k) /  206 | off  100k   30.6 (334.3k) /  242 | full   0k   25.9 (395.1k) /  173 | full 100k   28.4 (360.2k) /  204
 
-== g4_k0 (4 galaxies, today's kernels): best stack {"stages":16,"mesh":[4,2],"replicas":1,"arenaTokens":2000000,"budget":16384}
-  16x[4,2]     off   goodput   73.9k  at C=832 p90 9.9 s
-  16x[4,2]     axes  goodput   73.4k  at C=808 p90 9.9 s
-  16x[2,4]     axes  goodput   69.7k  at C=768 p90 9.9 s
-  2x8x[2,4]    axes  goodput   68.8k  at C=744 p90 9.8 s
-  16x[2,4]     off   goodput   65.1k  at C=696 p90 9.8 s
-  8x[4,4]      full  goodput   61.8k  at C=656 p90 9.5 s
-  2x4x[4,4]    full  goodput   60.0k  at C=640 p90 9.8 s
-  2x8x[2,4]    off   goodput   58.6k  at C=624 p90 9.1 s
-  8x[4,4]      off   goodput   50.9k  at C=520 p90 9.2 s
-  2x4x[4,4]    off   goodput   49.5k  at C=504 p90 9.8 s
-  4x[8,4]      axes  goodput   40.8k  at C=440 p90 9.3 s
-  4x[8,4]      off   goodput   38.3k  at C=408 p90 9.0 s
+== g4_k0 (4 galaxies, today's kernels): best stack {"stages":16,"mesh":[4,2],"replicas":1,"arenaTokens":4000000,"budget":16384}
+  16x[4,2]     off   goodput   74.2k  at C=840 p90 9.8 s
+  16x[4,2]     axes  goodput   73.3k  at C=816 p90 9.6 s
+  16x[2,4]     axes  goodput   70.0k  at C=800 p90 9.9 s
+  2x8x[2,4]    axes  goodput   67.7k  at C=744 p90 10.0 s
+  16x[2,4]     off   goodput   66.4k  at C=744 p90 10.0 s
+  8x[4,4]      full  goodput   62.5k  at C=672 p90 9.8 s
+  2x4x[4,4]    full  goodput   60.6k  at C=648 p90 9.4 s
+  2x8x[2,4]    off   goodput   58.0k  at C=632 p90 9.4 s
+  8x[4,4]      off   goodput   53.0k  at C=576 p90 9.8 s
+  2x4x[4,4]    off   goodput   48.3k  at C=496 p90 9.7 s
+  4x[8,4]      axes  goodput   40.7k  at C=448 p90 9.9 s
+  4x[8,4]      off   goodput   38.2k  at C=416 p90 9.9 s
 
 == g4_k1 (4 galaxies, roofline kernels): best stack {"stages":8,"mesh":[4,4],"replicas":1,"arenaTokens":2000000,"budget":8192}
-  8x[4,4]      full  goodput  137.8k  at C=1416 p90 9.3 s
-  8x[4,4]      off   goodput  136.4k  at C=1400 p90 8.5 s
-  16x[4,2]     off   goodput  131.6k  at C=1320 p90 6.8 s
-  16x[4,2]     axes  goodput  131.2k  at C=1352 p90 10.0 s
-  16x[2,4]     axes  goodput  130.9k  at C=1352 p90 9.8 s
-  4x[8,4]      axes  goodput  130.5k  at C=1336 p90 6.5 s
-  16x[2,4]     off   goodput  130.2k  at C=1336 p90 8.7 s
-  2x4x[4,4]    full  goodput  126.2k  at C=1264 p90 5.1 s
-  4x[8,4]      off   goodput  124.8k  at C=1264 p90 6.1 s
-  2x8x[2,4]    off   goodput  121.5k  at C=1240 p90 6.0 s
-  2x4x[4,4]    off   goodput  118.6k  at C=1200 p90 3.1 s
-  2x8x[2,4]    axes  goodput  118.2k  at C=1200 p90 3.8 s
+  8x[4,4]      full  goodput  133.3k  at C=1384 p90 7.1 s
+  8x[4,4]      off   goodput  132.0k  at C=1384 p90 8.3 s
+  4x[8,4]      axes  goodput  131.0k  at C=1384 p90 9.8 s
+  16x[4,2]     axes  goodput  127.7k  at C=1320 p90 9.4 s
+  16x[2,4]     axes  goodput  127.5k  at C=1320 p90 8.9 s
+  4x[8,4]      off   goodput  127.2k  at C=1336 p90 7.5 s
+  16x[4,2]     off   goodput  127.1k  at C=1320 p90 9.8 s
+  16x[2,4]     off   goodput  127.0k  at C=1320 p90 9.5 s
+  2x4x[4,4]    off   goodput  121.8k  at C=1256 p90 5.3 s
+  2x4x[4,4]    full  goodput  119.0k  at C=1304 p90 7.4 s
+  2x8x[2,4]    axes  goodput  117.9k  at C=1232 p90 4.8 s
+  2x8x[2,4]    off   goodput  116.8k  at C=1248 p90 6.9 s
 
 == g8_k0 (8 galaxies, today's kernels): best stack {"stages":32,"mesh":[4,2],"replicas":1,"arenaTokens":2000000,"budget":16384}
-  32x[4,2]     axes  goodput  173.9k  at C=2024 p90 9.9 s
-  32x[4,2]     off   goodput  150.3k  at C=1704 p90 9.8 s
-  32x[2,4]     axes  goodput  143.2k  at C=1624 p90 9.6 s
-  2x16x[2,4]   axes  goodput  139.9k  at C=1592 p90 9.8 s
-  32x[2,4]     off   goodput  134.2k  at C=1544 p90 9.8 s
-  2x16x[2,4]   off   goodput  129.5k  at C=1432 p90 9.3 s
-  16x[4,4]     full  goodput  128.5k  at C=1432 p90 9.8 s
-  2x8x[4,4]    full  goodput  127.6k  at C=1400 p90 9.4 s
-  16x[4,4]     off   goodput  105.8k  at C=1192 p90 9.9 s
-  2x8x[4,4]    off   goodput  104.2k  at C=1128 p90 9.7 s
-  8x[8,4]      axes  goodput   80.5k  at C=864 p90 9.8 s
-  8x[8,4]      off   goodput   76.3k  at C=840 p90 9.8 s
+  32x[4,2]     axes  goodput  174.7k  at C=2024 p90 9.3 s
+  32x[4,2]     off   goodput  150.8k  at C=1768 p90 9.5 s
+  32x[2,4]     axes  goodput  143.7k  at C=1640 p90 9.4 s
+  2x16x[2,4]   axes  goodput  139.8k  at C=1608 p90 10.0 s
+  32x[2,4]     off   goodput  133.9k  at C=1536 p90 9.4 s
+  2x16x[2,4]   off   goodput  129.2k  at C=1448 p90 9.6 s
+  16x[4,4]     full  goodput  127.8k  at C=1432 p90 9.2 s
+  2x8x[4,4]    full  goodput  127.5k  at C=1432 p90 9.7 s
+  16x[4,4]     off   goodput  105.6k  at C=1200 p90 9.5 s
+  2x8x[4,4]    off   goodput  103.7k  at C=1136 p90 9.3 s
+  8x[8,4]      axes  goodput   80.1k  at C=864 p90 8.9 s
+  8x[8,4]      off   goodput   76.2k  at C=840 p90 8.8 s
 
-== g8_k1 (8 galaxies, roofline kernels): best stack {"stages":32,"mesh":[4,2],"replicas":1,"arenaTokens":2000000,"budget":8192}
-  32x[4,2]     axes  goodput  295.1k  at C=3128 p90 8.2 s
-  32x[4,2]     off   goodput  294.4k  at C=3128 p90 8.3 s
-  32x[2,4]     axes  goodput  294.1k  at C=3128 p90 8.5 s
-  32x[2,4]     off   goodput  293.5k  at C=3128 p90 8.6 s
-  2x8x[4,4]    full  goodput  273.4k  at C=2936 p90 8.2 s
-  16x[4,4]     full  goodput  273.3k  at C=2872 p90 9.2 s
-  2x8x[4,4]    off   goodput  269.9k  at C=2872 p90 6.2 s
-  16x[4,4]     off   goodput  263.0k  at C=2752 p90 3.5 s
-  2x16x[2,4]   axes  goodput  258.0k  at C=2776 p90 8.7 s
-  2x16x[2,4]   off   goodput  255.4k  at C=2776 p90 9.7 s
-  8x[8,4]      axes  goodput  254.6k  at C=2680 p90 4.4 s
-  8x[8,4]      off   goodput  243.7k  at C=2584 p90 7.9 s
+== g8_k1 (8 galaxies, roofline kernels): best stack {"stages":32,"mesh":[2,4],"replicas":1,"arenaTokens":2000000,"budget":4096}
+  32x[4,2]     axes  goodput  285.1k  at C=3072 p90 8.3 s
+  32x[2,4]     axes  goodput  284.8k  at C=3072 p90 8.3 s
+  32x[2,4]     off   goodput  284.4k  at C=3072 p90 8.0 s
+  32x[4,2]     off   goodput  284.4k  at C=3072 p90 8.9 s
+  2x8x[4,4]    full  goodput  261.3k  at C=2808 p90 5.9 s
+  16x[4,4]     full  goodput  259.8k  at C=2808 p90 8.9 s
+  2x16x[2,4]   axes  goodput  245.7k  at C=2584 p90 3.4 s
+  2x8x[4,4]    off   goodput  235.5k  at C=2456 p90 2.0 s
+  2x16x[2,4]   off   goodput  235.3k  at C=2456 p90 1.9 s
+  16x[4,4]     off   goodput  235.0k  at C=2560 p90 9.2 s
+  8x[8,4]      axes  goodput  216.8k  at C=2320 p90 7.6 s
+  8x[8,4]      off   goodput  202.5k  at C=2168 p90 7.7 s
 
-62 s
+73 s
