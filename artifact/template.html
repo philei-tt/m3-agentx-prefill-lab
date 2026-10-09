@@ -263,17 +263,18 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
   <fieldset>
     <legend>Decode</legend>
     <div class="row"><label for="decodeTps">Decode tokens/s/u (per user)</label><input id="decodeTps" type="number" min="5" step="5"></div>
-    <div class="row"><label for="decodeCurve">Decode TSU</label><select id="decodeCurve"><option value="flat">constant</option><option value="m3">adapt to KV length</option></select></div>
+    <div class="row"><label for="decodeCurve">Decode TSU Model</label><select id="decodeCurve"><option value="flat">constant</option><option value="m3">adapt to KV length</option></select></div>
     <div class="hint">Constant: every session decodes at the tokens/s/u above. Adapt to KV length: the measured M3 curve, where time per token grows linearly with the session's context (116 tokens/s/u at 8k, 98 at 100k, 55 at 550k at 64 users), scaled so the tokens/s/u above is the speed at 100k: 180 gives about 214 at 8k, 168 at 140k, 101 at 550k.</div>
     <div class="row"><label for="decodeStages">Decode pipeline stages (0 = unlimited)</label><input id="decodeStages" type="number" min="0" step="1"></div>
-    <div class="hint">The decode ring carries one token per stage, so up to this many sessions decode at the full tokens/s/u above (one token per trip through the ring); with more, they share it and each slows to tokens/s/u × stages / sessions, holding its KV longer. A 64-stage ring: 64 (× m with m-row batched decode). Its memory holds about 85 slots of 1M tokens.</div>
+    <div class="row"><label for="decodeBatch">Decode batch (users per stage)</label><input id="decodeBatch" type="number" min="1" step="1"></div>
+    <div class="hint">The ring carries stages × batch sessions at full speed; more share it. A fuller batch slows each user (attention × batch, more experts read). Slots must fit stages × batch.</div>
     <div class="row"><label for="decodeCache">Decode KV layout</label><select id="decodeCache"><option value="slots">fixed 1M slots</option><option value="paging">paged</option></select></div>
-    <div class="row"><label for="decodeSlots">Decode KV memory, 1M slots (0 = unlimited)</label><input id="decodeSlots" type="number" min="0" step="1"></div>
+    <div class="hint" id="decMemHint"></div>
     <div class="row check"><input id="decodeHostTier" type="checkbox"><label for="decodeHostTier">Decode offload tiers (host DRAM + SSD of the decode galaxies)</label></div>
     <div class="row"><label for="decodeBackpressure">Decode backpressure</label><select id="decodeBackpressure"><option value="slot">slot (wait for a free slot)</option><option value="queue">queue (park KV on SSD)</option></select></div>
     <div class="row"><label for="decodeQueueMax">Decode queue limit (0 = no limit; default 100)</label><input id="decodeQueueMax" type="number" min="0" step="1"></div>
-    <div class="hint">Slot (fixed slots only, today): a request waits for a free decode slot before its prefill starts. Queue (fixed slots or paged, needs the decode offload tiers): prefill starts a request as long as the decode queue (requests holding slots or pages, or parked) is under the limit. Its KV goes into free slots or pages, else to the decode SSDs; after prefill a parked request waits for slots or pages (oldest first) and reads its KV back before its first token. Requests holding slots or pages decode round robin on the ring, so the limit also caps how many share it.</div>
-    <div class="hint">A request reserves its decode KV before its prefill may start (tt-d-gen reserves it up front to start KV migration eagerly) and releases it when decode ends; waiting for room counts in TTFT. Fixed slots: one 1M slot per request (M3 decode today: about 64 sessions, one per pipeline stage). Paged: the whole memory is a paged pool; the request's pages are pinned (shared prefixes once), so memory is request-sized and every session past prefill decodes at once, sharing the ring. Released slots and pages stay cached and, with the offload tiers, go on to host DRAM and SSD of the decode galaxies (Revenue &amp; cost); a later request with the same prefix finds them there, which saves only KV migration (not modelled).</div>
+    <div class="hint">Slot: prefill waits for a free decode slot. Queue: prefill runs while the decode queue is under the limit; KV goes to free slots/pages, else to SSD until room frees.</div>
+    <div class="hint">Decode KV is reserved at admission and freed when decode ends. Slots: 1M each. Paged: request-sized pages. Freed KV stays cached (host DRAM/SSD with the tiers).</div>
   </fieldset>
   <fieldset>
     <details class="reveal">
@@ -285,7 +286,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
         <div class="hint">Defaults: MiniMax's own M3 price on OpenRouter (Oct 2026). New tokens (cache misses, re-prefill included) bill at the input price, prefix hits at the cached price. The Net Revenue tile nets input and output revenue against the galaxy cost of prefill and decode.</div>
         <div class="row"><label for="galaxyUsd">$ / galaxy-hour</label><input id="galaxyUsd" type="number" min="0" step="0.5"></div>
         <div class="row"><label for="decodeGalaxies">Decode galaxies</label><input id="decodeGalaxies" type="number" min="0" step="1"></div>
-        <div class="hint">One M3 decode instance: 64 sessions on 16 galaxies; set the decode KV memory to match. The decode galaxies also size the decode offload tiers. Margin = input + output revenue − (prefill + decode galaxies) × $/galaxy-hour. Prices and the galaxy cost apply without re-running.</div>
+        <div class="hint">One M3 decode instance on 16 galaxies; its KV memory is modelled. The decode galaxies also size the decode offload tiers. Margin = input + output revenue − (prefill + decode galaxies) × $/galaxy-hour. Prices and the galaxy cost apply without re-running.</div>
       </div>
     </details>
   </fieldset>
@@ -479,7 +480,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Primers and warmup.</b> Every conversation active at t* first re-sends its last request before t* as a primer: a full prefill with max_tokens=1. That warms the cache the way the benchmark does. Measurement starts when all primers are done.</li>
       <li><b>Think time.</b> Each next request waits for its predecessor to end, then for the recorded gap: <span class="mono">max(0, t<sub>k</sub> − t<sub>k−1</sub> − api_time<sub>k−1</sub>)</span>. The gaps are <b>not capped</b>, as AgentX requires. Main-agent gaps have a median of 4.9 s but a mean of 395 s (p99 54 min), because humans think and tools run. The only cap is AIPerf's rule that if the whole system is idle, the next request fires within 10 s.</li>
       <li><b>Sub-agents.</b> A sub-agent starts when the main-agent turn that spawned it returns. The main agent's next dependent turn fires as soon as the last sub-agent in its group finishes.</li>
-      <li><b>End of a request.</b> Prefill finishes, then decode runs for the recorded output length at a decode speed per user that follows the session's context (default 180 tokens/s/u at 100k, on the measured M3 curve; see Decode TSU). The output's KV is not reused: the benchmark sends synthetic assistant text in the next turn, which is prefilled like any other new text.</li>
+      <li><b>End of a request.</b> Prefill finishes, then decode runs for the recorded output length at a decode speed per user that follows the session's context (default 180 tokens/s/u at 100k, on the measured M3 curve; see Decode TSU Model). The output's KV is not reused: the benchmark sends synthetic assistant text in the next turn, which is prefilled like any other new text.</li>
       <li><b>Recycle.</b> When a session's whole tree is finished, the lane moves to the next session in the corpus and starts at turn 0 with a fresh cache-bust marker, so different lanes never share cache.</li>
       <li><b>Window.</b> 1800 s of profiling (the AgentX default). Goodput counts requests whose prefill ends inside the window.</li>
     </ul>
@@ -687,7 +688,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
         <ul>
           <li><b>Input tokens</b> bill new tokens (cache misses, re-prefill included) at the input price, cached prefix hits ("cache") at the cache-read price. The defaults are MiniMax's own endpoint for <span class="mono">minimax/minimax-m3</span> on OpenRouter, on Oct 7 2026: $0.30 per M input tokens and $0.06 per M cache reads. That is also the model-level price and most providers' (the cheapest third-party provider is about 20% lower). There is no cache-write charge. A better cache bills less per token: a hit pays a fifth of a miss, so a higher hit rate raises revenue only by letting the same hardware serve more requests.</li>
           <li><b>Output tokens</b> bill at $1.20 per M (MiniMax's own price on OpenRouter), counted as decoded in the window. Decode generates them, so they belong next to the decode galaxies' cost. AgentX requests average about 1.1k output tokens against 120k-150k input tokens at the study's goodput points, so output adds roughly 10-15% to a request's bill. The precomputed baseline has no output counts, so its net needs a live run.</li>
-          <li><b>Cost</b> is the prefill galaxies of the run plus the decode galaxies, at $12 per galaxy-hour by default (a rough operating cost). The default decode is one M3 instance, 64 sessions on 16 galaxies, so set the decode KV memory to 64 slots to match it (unlimited decode overstates what 16 decode galaxies serve).</li>
+          <li><b>Cost</b> is the prefill galaxies of the run plus the decode galaxies, at $12 per galaxy-hour by default (a rough operating cost). The default decode is one M3 instance on 16 galaxies: set its pipeline stages (62) so its KV memory is modelled (unlimited decode overstates what 16 decode galaxies serve).</li>
         </ul>
         Set other prices and costs in the Revenue &amp; cost fields; the tile, the points table (input $/h and net $/h) and the Roadmap hourly table (input revenue) update without re-running, and Copy link keeps them.</li>
       <li><b>Copy link.</b> Copies a URL holding every setting that differs from the defaults (plus SLO, concurrency grid, the infinite-cache option, the prices and costs); the address bar also tracks it. Opening the link loads that configuration and runs the sweep.</li>
@@ -812,8 +813,8 @@ function mkWorker() {
 
 // ---------------------------------------------------------------- form <-> cfg
 const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'reqPad', 'placement', 'chunk', 'batch', 'budget', 'batchMaxReqs', 'batchDynShape', 'batchChunksPerRequest', 'batchTokensPerRequest', 'attn', 'prefetchKV', 'policy',
-  'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeStages', 'decodeCurve', 'decodeCache', 'decodeHostTier', 'decodeBackpressure', 'decodeQueueMax', 'duration', 'seed'];
-const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchMaxReqs', 'batchChunksPerRequest', 'batchTokensPerRequest', 'lanes', 'arenaTokens', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeStages', 'decodeQueueMax', 'duration', 'seed']);
+  'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'decodeStages', 'decodeBatch', 'decodeCurve', 'decodeCache', 'decodeHostTier', 'decodeBackpressure', 'decodeQueueMax', 'duration', 'seed'];
+const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchMaxReqs', 'batchChunksPerRequest', 'batchTokensPerRequest', 'lanes', 'arenaTokens', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeStages', 'decodeBatch', 'decodeQueueMax', 'duration', 'seed']);
 function setForm(cfg) {
   const c = Object.assign({}, SIM.DEFAULTS, cfg);
   for (const f of FIELDS) {
@@ -979,9 +980,14 @@ function updatePlan() {
   let plan;
   try { plan = SIM.makePlan(cfg, CAL); } catch (e) { plan = { errors: [String(e)] }; }
   const fatal = plan.errors.filter((x) => !x.startsWith('no profile'));
+  // decode KV memory is modelled from the decode chips' DRAM (sim_core DEC_DRAM), not entered
+  $('decMemHint').textContent = plan.decSlots > 0
+    ? `Decode KV memory (modelled): ${plan.decSlots} × 1M slots${cfg.decodeCache === 'paging' ? ` = ${(plan.decMemTok / 1e6).toFixed(0)}M tokens of pages` : ''}; the ring carries ${cfg.decodeBatch * cfg.decodeStages} sessions.`
+    : plan.decSlotsModel ? 'Decode KV memory: unlimited (0 stages = unlimited decode).' : '';
   $('cfgErr').hidden = !fatal.length; $('runBtn').disabled = !!fatal.length || $('runBtn').dataset.busy === '1';
   if (fatal.length) {
-    const fix = fatal.some((x) => x.startsWith('out of memory'))
+    const fix = fatal.some((x) => x.startsWith('decode out of memory')) ? 'Use paged decode KV or a smaller decode batch.'
+      : fatal.some((x) => x.startsWith('out of memory'))
       ? 'Use a smaller token budget or a larger chunk (fewer requests per batch), fewer stages, or another KV residency.'
       : 'Adjust galaxies, replicas, mesh or stages (stages × chips per stage must fit in 32 × galaxies / replicas chips), or set the layer split to auto.';
     $('cfgErr').innerHTML = `<b>This configuration cannot run:</b> ${esc(fatal.join('; '))}. ${fix}`;

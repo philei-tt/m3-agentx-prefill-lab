@@ -25,3 +25,4 @@ run --set policy=rr --set cache=paging
 run --set cache=pool --set hostTier=true --set decodeStages=62 --set decodeSlots=75 --set decodeHostTier=true
 run --set cache=pool --set decodeStages=62 --set decodeSlots=75 --set decodeCache=paging --set decodeHostTier=true
 run --set cache=pool --set hostTier=true --set decodeStages=62 --set decodeSlots=86 --set decodeHostTier=true --set decodeBackpressure=queue
+run --set cache=pool --set hostTier=true --set decodeStages=62 --set decodeCache=paging --set decodeBackpressure=queue --set decodeHostTier=true --set decodeBatch=4 --set decodeQueueMax=400

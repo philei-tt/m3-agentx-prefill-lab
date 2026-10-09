@@ -1,20 +1,35 @@
 
 == 6 prefill galaxies (24x[2,4]) + 16 decode galaxies: best prefill config per decode layout, at its goodput point (p90 TTFT <= 10 s)
   fixed slots, slot backpressure (today)
-    prefill chunk 512, batch 4k | goodput 41.8k @C=456 | p50/p90 TTFT 5.8/9.6 s | 33,906 req/h
-    revenue $325/h = input $283 + output $41.83 (9,683 tok/s decoded) | cost $264 | net $60.88/h
-    decode: held 85 / max 86, decoding 63 at 153 tokens/s/u (p10 128, p50 168), ring full 62% | 95% waited 4.2 s before prefill | decode-side hit 95.2%
-    every prefill config (net $/h at goodput): chunk 1024, no batching $17.50; chunk 2048, no batching $46.71; chunk 512, batch 4k $60.88; chunk 512, batch 8k $51.48; chunk 512, batch 16k $29.94; chunk 1024, batch 4k $60.83; chunk 1024, batch 8k $51.44; chunk 1024, batch 16k $29.22
+    prefill chunk 512, batch 4k | goodput 41.9k @C=456 | p50/p90 TTFT 5.7/9.3 s | 34,048 req/h
+    revenue $326/h = input $284 + output $42.00 (9,721 tok/s decoded) | cost $264 | net $62.25/h
+    decode: held 86 / max 87, decoding 64 at 151 tokens/s/u (p10 127, p50 166), ring full 65% | 94% waited 4.0 s before prefill | decode-side hit 95.2%
+    every prefill config (net $/h at goodput): chunk 1024, no batching $17.43; chunk 2048, no batching $48.15; chunk 512, batch 4k $62.25; chunk 512, batch 8k $53.03; chunk 512, batch 16k $31.38; chunk 1024, batch 4k $61.17; chunk 1024, batch 8k $51.82; chunk 1024, batch 16k $30.98
   fixed slots, queue backpressure (limit 100)
-    prefill chunk 512, batch 4k | goodput 42.7k @C=464 | p50/p90 TTFT 5.0/9.9 s | 34,694 req/h
-    revenue $333/h = input $290 + output $42.81 (9,910 tok/s decoded) | cost $264 | net $69.29/h
-    decode: held 85 / max 86, decoding 71 at 140 tokens/s/u (p10 116, p50 152), ring full 77% | 82% waited 3.4 s before prefill | 50% parked on SSD (12 on average), decode SSD 11% busy | 48% waited for slots / pages after prefill, first token +163 ms | decode-side hit 47.9%
-    every prefill config (net $/h at goodput): chunk 1024, no batching $17.02; chunk 2048, no batching $51.79; chunk 512, batch 4k $69.29; chunk 512, batch 8k $65.37; chunk 512, batch 16k $48.49; chunk 1024, batch 4k $68.77; chunk 1024, batch 8k $65.15; chunk 1024, batch 16k $47.73
+    prefill chunk 512, batch 4k | goodput 42.8k @C=456 | p50/p90 TTFT 3.9/7.7 s | 34,846 req/h
+    revenue $334/h = input $291 + output $42.96 (9,945 tok/s decoded) | cost $264 | net $70.07/h
+    decode: held 86 / max 87, decoding 71 at 139 tokens/s/u (p10 115, p50 152), ring full 79% | 72% waited 2.5 s before prefill | 47% parked on SSD (11 on average), decode SSD 11% busy | 42% waited for slots / pages after prefill, first token +134 ms | decode-side hit 50.5%
+    every prefill config (net $/h at goodput): chunk 1024, no batching $16.88; chunk 2048, no batching $51.49; chunk 512, batch 4k $70.07; chunk 512, batch 8k $65.62; chunk 512, batch 16k $48.15; chunk 1024, batch 4k $68.42; chunk 1024, batch 8k $64.43; chunk 1024, batch 16k $48.16
   paged, queue backpressure (limit 100)
     prefill chunk 512, batch 4k | goodput 43.2k @C=464 | p50/p90 TTFT 4.5/9.6 s | 34,805 req/h
     revenue $335/h = input $292 + output $42.99 (9,952 tok/s decoded) | cost $264 | net $70.65/h
-    decode: held 97 / max 100, decoding 73 at 137 tokens/s/u (p10 113, p50 148), ring full 79% | 82% waited 3.2 s before prefill | decode-side hit 96.3% | pool in use 16.1M of 90.2M
+    decode: held 97 / max 100, decoding 73 at 137 tokens/s/u (p10 113, p50 148), ring full 79% | 82% waited 3.2 s before prefill | decode-side hit 96.3% | pool in use 16.1M of 91.3M
     every prefill config (net $/h at goodput): chunk 1024, no batching $17.05; chunk 2048, no batching $51.78; chunk 512, batch 4k $70.65; chunk 512, batch 8k $66.40; chunk 512, batch 16k $49.68; chunk 1024, batch 4k $69.67; chunk 1024, batch 8k $65.62; chunk 1024, batch 16k $48.46
+  paged, batch 2, queue limit 200
+    prefill chunk 512, batch 8k | goodput 50.6k @C=624 | p50/p90 TTFT 5.1/9.9 s | 39,571 req/h
+    revenue $385/h = input $338 + output $46.91 (10,859 tok/s decoded) | cost $264 | net $121/h
+    decode: held 189 / max 200, decoding 130 at 84 tokens/s/u (p10 64, p50 89), ring full 57% | 43% waited 1.2 s before prefill | decode-side hit 96.2% | pool in use 31.2M of 91.3M
+    every prefill config (net $/h at goodput): chunk 1024, no batching $24.43; chunk 2048, no batching $53.14; chunk 512, batch 4k $117; chunk 512, batch 8k $121; chunk 512, batch 16k $120; chunk 1024, batch 4k $117; chunk 1024, batch 8k $117; chunk 1024, batch 16k $117
+  paged, batch 4, queue limit 400
+    prefill chunk 512, batch 8k | goodput 51.1k @C=624 | p50/p90 TTFT 4.5/9.0 s | 39,935 req/h
+    revenue $389/h = input $341 + output $47.56 (11,010 tok/s decoded) | cost $264 | net $125/h
+    decode: held 191 / max 242, decoding 130 at 85 tokens/s/u (p10 66, p50 92), ring full 0% | 0% waited 0.0 s before prefill | decode-side hit 96.2% | pool in use 31.5M of 91.3M
+    every prefill config (net $/h at goodput): chunk 1024, no batching $24.43; chunk 2048, no batching $53.14; chunk 512, batch 4k $119; chunk 512, batch 8k $125; chunk 512, batch 16k $123; chunk 1024, batch 4k $117; chunk 1024, batch 8k $121; chunk 1024, batch 16k $120
+  paged, batch 8, queue limit 800
+    prefill chunk 512, batch 8k | goodput 51.1k @C=624 | p50/p90 TTFT 4.5/9.0 s | 39,935 req/h
+    revenue $389/h = input $341 + output $47.56 (11,010 tok/s decoded) | cost $264 | net $125/h
+    decode: held 191 / max 242, decoding 130 at 85 tokens/s/u (p10 66, p50 92), ring full 0% | 0% waited 0.0 s before prefill | decode-side hit 96.2% | pool in use 31.5M of 91.3M
+    every prefill config (net $/h at goodput): chunk 1024, no batching $24.43; chunk 2048, no batching $53.14; chunk 512, batch 4k $119; chunk 512, batch 8k $125; chunk 512, batch 16k $123; chunk 1024, batch 4k $117; chunk 1024, batch 8k $121; chunk 1024, batch 16k $120
   (ref) unlimited decode
     prefill chunk 512, batch 8k | goodput 54.0k @C=592 | p50/p90 TTFT 6.4/9.7 s | 42,418 req/h
     revenue $430/h = input $378 + output $52.22 (12,088 tok/s decoded) | cost $264 | net $166/h
@@ -23,24 +38,39 @@
 
 == 8 prefill galaxies (32x[2,4]) + 16 decode galaxies: best prefill config per decode layout, at its goodput point (p90 TTFT <= 10 s)
   fixed slots, slot backpressure (today)
-    prefill chunk 2048, no batching | goodput 43.9k @C=464 | p50/p90 TTFT 5.0/9.0 s | 35,096 req/h
-    revenue $338/h = input $295 + output $43.47 (10,064 tok/s decoded) | cost $288 | net $50.20/h
-    decode: held 85 / max 86, decoding 69 at 147 tokens/s/u (p10 123, p50 162), ring full 85% | 90% waited 4.0 s before prefill | decode-side hit 95.1%
-    every prefill config (net $/h at goodput): chunk 1024, no batching $41.51; chunk 2048, no batching $50.20; chunk 512, batch 4k $48.44; chunk 512, batch 8k $35.69; chunk 512, batch 16k $5.75; chunk 1024, batch 4k $48.12; chunk 1024, batch 8k $34.15; chunk 1024, batch 16k $6.15
+    prefill chunk 2048, no batching | goodput 44.1k @C=464 | p50/p90 TTFT 4.8/8.9 s | 35,140 req/h
+    revenue $338/h = input $295 + output $43.53 (10,076 tok/s decoded) | cost $288 | net $50.28/h
+    decode: held 86 / max 87, decoding 69 at 145 tokens/s/u (p10 122, p50 160), ring full 87% | 89% waited 3.9 s before prefill | decode-side hit 95.1%
+    every prefill config (net $/h at goodput): chunk 1024, no batching $40.31; chunk 2048, no batching $50.28; chunk 512, batch 4k $48.95; chunk 512, batch 8k $37.78; chunk 512, batch 16k $7.80; chunk 1024, batch 4k $49.52; chunk 1024, batch 8k $37.35; chunk 1024, batch 16k $7.88
   fixed slots, queue backpressure (limit 100)
-    prefill chunk 2048, no batching | goodput 44.7k @C=480 | p50/p90 TTFT 5.3/10.0 s | 35,928 req/h
-    revenue $342/h = input $298 + output $43.91 (10,165 tok/s decoded) | cost $288 | net $54.15/h
-    decode: held 85 / max 86, decoding 78 at 130 tokens/s/u (p10 110, p50 144), ring full 95% | 89% waited 4.3 s before prefill | 65% parked on SSD (13 on average), decode SSD 15% busy | 64% waited for slots / pages after prefill, first token +226 ms | decode-side hit 32.2%
-    every prefill config (net $/h at goodput): chunk 1024, no batching $47.16; chunk 2048, no batching $54.15; chunk 512, batch 4k $53.71; chunk 512, batch 8k $49.94; chunk 512, batch 16k $25.10; chunk 1024, batch 4k $53.88; chunk 1024, batch 8k $49.64; chunk 1024, batch 16k $25.21
+    prefill chunk 2048, no batching | goodput 44.7k @C=480 | p50/p90 TTFT 5.3/9.9 s | 35,938 req/h
+    revenue $342/h = input $298 + output $43.91 (10,165 tok/s decoded) | cost $288 | net $54.14/h
+    decode: held 86 / max 87, decoding 79 at 129 tokens/s/u (p10 109, p50 143), ring full 95% | 89% waited 4.3 s before prefill | 62% parked on SSD (12 on average), decode SSD 15% busy | 60% waited for slots / pages after prefill, first token +192 ms | decode-side hit 35.4%
+    every prefill config (net $/h at goodput): chunk 1024, no batching $46.55; chunk 2048, no batching $54.14; chunk 512, batch 4k $53.61; chunk 512, batch 8k $49.90; chunk 512, batch 16k $25.68; chunk 1024, batch 4k $53.74; chunk 1024, batch 8k $49.82; chunk 1024, batch 16k $25.71
   paged, queue backpressure (limit 100)
     prefill chunk 2048, no batching | goodput 44.7k @C=480 | p50/p90 TTFT 5.0/9.7 s | 35,984 req/h
     revenue $342/h = input $298 + output $43.92 (10,166 tok/s decoded) | cost $288 | net $54.38/h
-    decode: held 99 / max 100, decoding 80 at 127 tokens/s/u (p10 106, p50 139), ring full 95% | 89% waited 4.2 s before prefill | decode-side hit 96.2% | pool in use 16.5M of 90.2M
+    decode: held 99 / max 100, decoding 80 at 127 tokens/s/u (p10 106, p50 139), ring full 95% | 89% waited 4.2 s before prefill | decode-side hit 96.2% | pool in use 16.5M of 91.3M
     every prefill config (net $/h at goodput): chunk 1024, no batching $46.62; chunk 2048, no batching $54.38; chunk 512, batch 4k $54.20; chunk 512, batch 8k $50.92; chunk 512, batch 16k $27.35; chunk 1024, batch 4k $54.11; chunk 1024, batch 8k $50.44; chunk 1024, batch 16k $27.69
+  paged, batch 2, queue limit 200
+    prefill chunk 1024, batch 4k | goodput 53.2k @C=712 | p50/p90 TTFT 5.5/8.0 s | 41,250 req/h
+    revenue $394/h = input $346 + output $48.11 (11,137 tok/s decoded) | cost $288 | net $106/h
+    decode: held 196 / max 200, decoding 168 at 66 tokens/s/u (p10 55, p50 73), ring full 93% | 87% waited 3.7 s before prefill | decode-side hit 96.1% | pool in use 33.8M of 91.3M
+    every prefill config (net $/h at goodput): chunk 1024, no batching $61.73; chunk 2048, no batching $100; chunk 512, batch 4k $105; chunk 512, batch 8k $105; chunk 512, batch 16k $97.39; chunk 1024, batch 4k $106; chunk 1024, batch 8k $105; chunk 1024, batch 16k $96.95
+  paged, batch 4, queue limit 400
+    prefill chunk 1024, batch 4k | goodput 60.4k @C=960 | p50/p90 TTFT 5.6/9.4 s | 47,810 req/h
+    revenue $434/h = input $382 + output $51.82 (11,995 tok/s decoded) | cost $288 | net $146/h
+    decode: held 385 / max 400, decoding 312 at 38 tokens/s/u (p10 31, p50 41), ring full 82% | 66% waited 1.5 s before prefill | decode-side hit 96.0% | pool in use 62.1M of 91.3M
+    every prefill config (net $/h at goodput): chunk 1024, no batching $61.83; chunk 2048, no batching $106; chunk 512, batch 4k $145; chunk 512, batch 8k $144; chunk 512, batch 16k $134; chunk 1024, batch 4k $146; chunk 1024, batch 8k $143; chunk 1024, batch 16k $134
+  paged, batch 8, queue limit 800
+    prefill chunk 512, batch 4k | goodput 63.5k @C=1040 | p50/p90 TTFT 4.3/9.2 s | 49,362 req/h
+    revenue $449/h = input $395 + output $53.87 (12,471 tok/s decoded) | cost $288 | net $161/h
+    decode: held 436 / max 496, decoding 356 at 35 tokens/s/u (p10 28, p50 38), ring full 0% | 0% waited 0.0 s before prefill | decode-side hit 95.9% | pool in use 70.0M of 91.3M
+    every prefill config (net $/h at goodput): chunk 1024, no batching $61.83; chunk 2048, no batching $106; chunk 512, batch 4k $161; chunk 512, batch 8k $160; chunk 512, batch 16k $156; chunk 1024, batch 4k $156; chunk 1024, batch 8k $156; chunk 1024, batch 16k $152
   (ref) unlimited decode
     prefill chunk 512, batch 8k | goodput 72.9k @C=816 | p50/p90 TTFT 7.0/9.0 s | 59,231 req/h
     revenue $582/h = input $510 + output $71.41 (16,529 tok/s decoded) | cost $288 | net $294/h
     decode: held 221 / max 270, decoding 101 at 164 tokens/s/u (p10 140, p50 182), ring full 0% | 0% waited 0.0 s before prefill
     every prefill config (net $/h at goodput): chunk 1024, no batching $65.54; chunk 2048, no batching $150; chunk 512, batch 4k $261; chunk 512, batch 8k $294; chunk 512, batch 16k $292; chunk 1024, batch 4k $228; chunk 1024, batch 8k $271; chunk 1024, batch 16k $259
 
-42 s
+116 s

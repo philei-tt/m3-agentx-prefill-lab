@@ -31,13 +31,32 @@
     const b = sxy / sxx; return [my - b * mx, b];
   })();
   const DECODE_REF_CTX = 100000;
-  // decode speed per user (tokens/s/u) for a session with `ctx` tokens of context while the ring has room
-  function decodeSpeed(cfg, ctx) {
-    if (cfg.decodeCurve !== 'm3') return cfg.decodeTps;
-    const [a, b] = M3_DECODE_TRIP;
-    return cfg.decodeTps * (a + b * DECODE_REF_CTX) / (a + b * ctx);
+  // Batched decode, m sessions per stage per step (tt-blaze #4220; not measured yet), from the batch-1 trip a + b*ctx:
+  //   - the context term is attention over each session's own KV, so m sessions read m x as much: m * b * ctx;
+  //   - the fixed term is mostly weight reads (llm_perf's M3 batch-1 decode breakdown: the MoE layer is ~all of the
+  //     token time). A share decodeMoeFrac of it is routed-expert weights, read once per distinct expert the batch
+  //     selects, 128 * (1 - (1 - 4/128)^m) experts against 4 at m = 1; the rest (dense weights, collective and hop
+  //     latency) is shared by the batch.
+  const decodeExperts = (m) => M3.Ex * (1 - Math.pow(1 - M3.topk / M3.Ex, m));
+  // decode speed per user (tokens/s/u) for a session with `ctx` tokens of context while the ring has room, in a batch
+  // of m sessions per stage (m = 1 when omitted; fractional m = a partly filled batch)
+  function decodeSpeed(cfg, ctx, m) {
+    const [a, b] = M3_DECODE_TRIP, mm = m > 1 ? m : 1, c = cfg.decodeCurve === 'm3' ? ctx : DECODE_REF_CTX;
+    const f = cfg.decodeMoeFrac === undefined ? DEFAULTS.decodeMoeFrac : cfg.decodeMoeFrac;
+    const g = mm > 1 ? 1 - f + f * decodeExperts(mm) / decodeExperts(1) : 1;
+    if (cfg.decodeCurve !== 'm3' && mm === 1) return cfg.decodeTps;
+    return cfg.decodeTps * (a + b * DECODE_REF_CTX) / (a * g + mm * b * c);
   }
   const MB = 1e6, GB = 1e9;
+  // Decode KV memory, modelled from tt-blaze's M3 decode (one 4x2 mesh, 8 chips, per stage). The sparse (MSA/MoE)
+  // stages bind: per chip, 8 DRAM banks x 4080 MiB (Blackhole SoC descriptor), minus all 128 routed experts at half
+  // the intermediate width (bf4), the 1M x 64 bf16 RoPE table, Wo (bf8), router and norms (~1.5 MiB), and the per-chip
+  // reserve (reserveGB); q/k/v, indexer and shared-expert weights live in SRAM. KV per token per chip, bf8: K and V
+  // (one head per chip, replicated over the 2 columns) 136 B each + index_k split over the columns 68 B = 340 B.
+  // Dense stages hold 136 B/token/chip (they fit ~2.7x more); the embedding and LM-head stages hold none.
+  const DEC_DRAM = 8 * 4080 * 2 ** 20;
+  const DEC_KVB_CHIP = 2 * 128 * BF8 + 128 * BF8 / 2;
+  const decodeWeightsChip = () => M3.Ex * 3 * M3.E * (M3.I / 2) * BF4 + M3.maxCtx * 64 * BF16 + 1024 * M3.E * BF8 + 1.5 * 2 ** 20;
 
   const OPS_MOE = ['norm_ag', 'qkv', 'idx_branch', 'misc', 'o_proj', 'attn_rs', 'shared', 'router', 'dispatch', 'experts', 'combine', 'moe_reduce'];
   const OPS_MSA_SEG = ['ag_kv', 'ag_idx', 'indexer', 'sparse', 'kv_a2a'];
@@ -478,11 +497,10 @@
     // reserveGB: per-chip DRAM kept free besides the modelled weights and activations; 1 GB reproduces the measured
     // slot fit (35 x 1M slots on 16x[2,4], bf8 index_k, even split; CCL scratch + transient buffers)
     reserveGB: 1, expertImb: IMB0, maxInflight: 0,
-    // decodeSlots: KV slots on the decode side (0 = unlimited). A request takes one before it may start prefill (it
-    //   waits in FIFO order, inside its TTFT, while all are held) and frees it when decode ends: prefill only runs
-    //   requests decode has room for. As in tt-d-gen, which needs the decode slot up front to start KV migration
-    //   eagerly. M3 decode today holds ~62-64 sessions (one per pipeline stage, tt-blaze #4220) on 16 galaxies.
-    decodeSlots: 0,
+    // decodeSlots: decode KV memory, in 1M-token slots. 'auto' (default) = modelled from the decode chips' DRAM (see
+    //   DEC_DRAM; 87 slots today, ~91M tokens paged) when the ring is finite (decodeStages > 0), unlimited otherwise; a
+    //   number overrides it (0 = unlimited). See decodeCache and decodeBackpressure for how requests use it.
+    decodeSlots: 'auto',
     // decode ring: decodeTps = tokens per second per user (TSU) while the ring has room, i.e. one token per trip
     //   through the pipeline (trip time 1 / TSU); decodeStages = the most sessions the ring carries at once, one
     //   token per stage (64 for a 64-stage ring, m x 64 with m-row batched decode; 0 = unlimited). Every request
@@ -490,6 +508,12 @@
     //   sharing), so an oversubscribed ring slows everyone and its sessions hold their KV slots longer. Aggregate
     //   decode throughput is at most decodeStages x TSU.
     decodeStages: 0,
+    // decodeBatch: m sessions per stage per decode step (batched decode, tt-blaze #4220): the ring carries
+    //   m x decodeStages sessions at once, and each runs slower in a fuller batch (decodeSpeed: m x the attention,
+    //   more distinct experts' weights). A batch fills as sessions arrive: with N decoding, m = min(decodeBatch,
+    //   max(1, N / decodeStages)). Fixed slots must hold the full ring, m x decodeStages slots. decodeMoeFrac: share of
+    //   the batch-1 fixed trip time that is routed-expert weight reads (estimate).
+    decodeBatch: 1, decodeMoeFrac: 0.8,
     // decodeCurve: 'flat' = every session decodes at decodeTps; 'm3' = speed falls with the session's context along
     //   the measured M3 curve (M3_DECODE_TSU), with decodeTps the speed at 100k context (180 -> about 213 at 8k, 169
     //   at 140k, 132 at 310k, 101 at 550k). KV migration to decode is not modelled: it streams layer by layer during
@@ -735,8 +759,19 @@
     const hostTok = offload ? tokOf(hostBudget.kv * GB) : 0;
     const ssdTok = offload ? tokOf(cfg.ssdTBPerGalaxy * 1e12) : 0;
     // decode side (see DEFAULTS.decodeCache): memory, pool and the decode galaxies' offload tiers
-    const dc = cfg.decodeCache, decMem = cfg.decodeSlots > 0 ? cfg.decodeSlots * M3.maxCtx : Infinity;
+    const dc = cfg.decodeCache, autoDec = cfg.decodeSlots === 'auto';
+    const decFreeB = DEC_DRAM - cfg.reserveGB * GB - decodeWeightsChip();
+    const decSlotsModel = Math.max(0, Math.floor(decFreeB / (M3.maxCtx * DEC_KVB_CHIP)));
+    const decSlots = autoDec ? (cfg.decodeStages > 0 ? decSlotsModel : 0) : cfg.decodeSlots;
+    // memory in tokens: modelled = every free byte (pages) / whole slots; a set slot count = that many 1M slots
+    const decMem = !(decSlots > 0) ? Infinity : autoDec && dc === 'paging' ? Math.floor(decFreeB / DEC_KVB_CHIP) : decSlots * M3.maxCtx;
     const decPoolTok = dc === 'slots' ? 0 : decMem;
+    if (!(autoDec || cfg.decodeSlots >= 0)) errors.push(`decodeSlots must be 'auto' or a number >= 0, got ${cfg.decodeSlots}`);
+    if (!(cfg.decodeBatch >= 1) || cfg.decodeBatch !== Math.floor(cfg.decodeBatch)) errors.push('decode batch must be a whole number >= 1');
+    if (cfg.decodeBatch > 1 && !(cfg.decodeStages > 0)) errors.push('batched decode needs the decode pipeline stages (decodeStages > 0)');
+    if (!(cfg.decodeMoeFrac >= 0 && cfg.decodeMoeFrac <= 1)) errors.push('decodeMoeFrac must be in [0, 1]');
+    // fixed slots: the ring carries decodeBatch x decodeStages sessions, each in its own 1M slot
+    if (dc === 'slots' && decSlots > 0 && cfg.decodeBatch > 1 && cfg.decodeBatch * cfg.decodeStages > decSlots) errors.push(`decode out of memory: a batch of ${cfg.decodeBatch} x ${cfg.decodeStages} stages = ${cfg.decodeBatch * cfg.decodeStages} sessions in flight, but only ${decSlots} 1M decode slots fit (use paged decode KV)`);
     if (!['slots', 'paging'].includes(dc)) errors.push(`decodeCache must be 'slots' or 'paging', got ${dc}`);
     if (cfg.decodeHostTier && !(cfg.decodeGalaxies >= 1)) errors.push('decode offload tiers need decodeGalaxies >= 1');
     if (!['slot', 'queue'].includes(cfg.decodeBackpressure)) errors.push(`decodeBackpressure must be 'slot' or 'queue', got ${cfg.decodeBackpressure}`);
@@ -764,7 +799,7 @@
       // in-flight chunks: round robin on static slots mirrors tt-d-gen's ChunkFifo, max(8, 4 x max_slots)
       maxInflight: cfg.maxInflight > 0 ? cfg.maxInflight : cfg.policy === 'rr' && cfg.cache === 'slots' ? Math.max(8, 4 * nSlots) : 2 * S + 4,
       // decode side: pool tokens, offload tiers (tokens) and links of the decode galaxies
-      decPoolTok, decHostTok, decSsdTok, decHostKvGB,
+      decSlots, decSlotsModel, decMemTok: decMem, decPoolTok, decHostTok, decSsdTok, decHostKvGB,
       decPcieBps: cfg.pcieGBsPerGalaxy * GB * cfg.decodeGalaxies, decSsdRdBps: cfg.ssdReadGBsPerGalaxy * GB * cfg.decodeGalaxies, decSsdWrBps: cfg.ssdWriteGBsPerGalaxy * GB * cfg.decodeGalaxies,
       tokensPerSec: null,
     };
@@ -1128,7 +1163,7 @@
       return t;
     }
     const decOffload = plan.decHostTok + plan.decSsdTok > 0;
-    const decSlots = cfg.decodeCache === 'slots' && cfg.decodeSlots > 0 ? new SlotCache(cfg.decodeSlots) : null;
+    const decSlots = cfg.decodeCache === 'slots' && plan.decSlots > 0 ? new SlotCache(plan.decSlots) : null;
     const decOff = decSlots && decOffload ? slotTiers(plan.decHostTok, plan.decSsdTok, decDemote) : null;
     if (decOff) decSlots.onEvict = decOff.evict;
     const decPool = cfg.decodeCache !== 'slots' ? new PoolCache(TR, plan.decPoolTok / B, plan.decHostTok / B, plan.decSsdTok / B) : null;
@@ -1143,14 +1178,16 @@
     // decode slots: held from admission to prefill (TTFT clock already running) until decode ends; time-weighted
     // occupancy over the window, for slots held and for requests actually decoding (prefill done, not yet ended)
     let decHeld = 0, decoding = 0, decT = 0, decSpeedSum = 0; const decQ = [];
-    // share of its full speed each decoding session gets: min(1, decodeStages / sessions decoding)
-    const decShare = () => (cfg.decodeStages > 0 && decoding > cfg.decodeStages ? cfg.decodeStages / decoding : 1);
+    // share of its full speed each decoding session gets: min(1, ring capacity / sessions decoding), the ring carrying
+    // decodeBatch sessions per stage
+    const decCap = cfg.decodeStages * cfg.decodeBatch;
+    const decShare = () => (cfg.decodeStages > 0 && decoding > decCap ? decCap / decoding : 1);
     function decTick() {
       if (warmDone) {
         const a = Math.max(decT, t0), b = Math.min(now, tEnd);
         if (b > a) {
           st.decArea += decHeld * (b - a); st.decingArea += decoding * (b - a); st.decTokArea += decSpeedSum * decShare() * (b - a);
-          if (cfg.decodeStages > 0 && decoding >= cfg.decodeStages) st.ringFull += b - a;
+          if (cfg.decodeStages > 0 && decoding >= decCap) st.ringFull += b - a;
           if (decPool) st.decPoolArea += (decPool.pinnedB + decResvB) * B * (b - a);
           st.parkArea += parkedN * (b - a);
         }
@@ -1168,6 +1205,21 @@
       if (ring.length) { ring[0] = last; for (let i = 0; ;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < ring.length && ring[l].thr < ring[m].thr) m = l; if (r < ring.length && ring[r].thr < ring[m].thr) m = r; if (m === i) break; [ring[m], ring[i]] = [ring[i], ring[m]]; i = m; } }
       return top;
     };
+    // batched decode: the batch per stage fills as sessions arrive, m = min(decodeBatch, max(1, N / decodeStages)),
+    // and every session's speed follows it; re-rate the ring when it changes (each session keeps its tokens left).
+    // Call after decAdvance, with `decoding` updated.
+    let decM = 1;
+    function decRerate() {
+      if (!(cfg.decodeBatch > 1)) return;
+      const m = Math.min(cfg.decodeBatch, Math.max(1, decoding / cfg.decodeStages));
+      if (m === decM) return;
+      decM = m; decSpeedSum = 0;
+      for (const e of ring) {
+        const sp = decodeSpeed(cfg, e.q.decCtx, m);
+        e.thr = decV + (e.thr - decV) * e.q.decSpeed / sp; e.q.decSpeed = sp; decSpeedSum += sp;
+      }
+      ring.sort((x, y) => x.thr - y.thr); // a sorted array is a heap
+    }
     function decAdvance() { if (decoding > 0) decV += decShare() * (now - decVT); decVT = now; }
     function decSchedule() { decGen++; if (ring.length) ev.push(now + Math.max(0, ring[0].thr - decV) / decShare(), { e: EV_DEC, gen: decGen }); }
     function onDecodeEvent(gen) {
@@ -1792,10 +1844,10 @@
       }
       const ctx = TR.req_blocks[q.r] * B, speed = decodeSpeed(cfg, ctx); // its context: the prompt (output adds ~1k)
       if (!q.decSlot) { ev.push(now + TR.req_out[q.r] / speed, { e: EV_END, q }); return; }
-      q.decBeginT = now;
+      q.decBeginT = now; q.decCtx = ctx;
       if (cfg.decodeStages > 0) {
-        decAdvance(); decTick(); decoding++;
-        q.decSpeed = speed; decSpeedSum += speed;
+        decAdvance(); decTick(); decoding++; decRerate();
+        q.decSpeed = decodeSpeed(cfg, ctx, decM); decSpeedSum += q.decSpeed;
         ringPush({ thr: decV + TR.req_out[q.r] / q.decSpeed, q }); decSchedule(); return;
       }
       q.decSpeed = speed;
@@ -1809,6 +1861,7 @@
         // decode speed this session got, output tokens / decode time (reported as tsuP10, tsuP50)
         if (warmDone && now >= t0 && now <= tEnd && TR.req_out[r] > 0) st.tsu.push(TR.req_out[r] / Math.max(1e-9, now - q.decBeginT));
         decTick(); decHeld--; decoding--; decSpeedSum -= q.decSpeed || 0; q.decSlot = false;
+        if (cfg.decodeStages > 0) decRerate();
         decRelease(q); decDrain();
       }
       if (tree.ended) {
