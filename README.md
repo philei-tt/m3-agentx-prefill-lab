@@ -60,8 +60,10 @@ million tokens) on `run.js`, `analyze.js` and `tools/feature_table.js`, or with 
 **Net revenue per hour** (the page's Net Revenue tile, `economics()` in `sim_core.js`) is input + output revenue of the requests completed per hour, minus
 (prefill galaxies + decode galaxies) × USD per galaxy-hour. Defaults (`SIM.COST`): **$12 per galaxy-hour** (a rough
 operating cost) and **16 decode galaxies**, one M3 decode instance of 64 sessions, so pair it with `decodeSlots: 64`
-(unlimited slots overstate what 16 decode galaxies serve). Each run reports `outTps`, the output tokens of the requests
-completed in the window; study points from before it have no margin. Override with `--price-out`, `--galaxy-usd` and
+(unlimited slots overstate what 16 decode galaxies serve). Output revenue bills `outDecTps`, the output tokens decoded
+in the window. Runs also report `outTps`, the output tokens of the requests completed in the window, which is what runs
+before `outDecTps` bill. The two agree in steady state, but `outTps` runs ahead while a decode backlog grows. Study
+points from before both have no margin. Override with `--price-out`, `--galaxy-usd` and
 `--decode-galaxies` on `run.js`, or the Revenue & cost fields on the page.
 
 ## Files
@@ -84,7 +86,7 @@ completed in the window; study points from before it have no margin. Override wi
 | `lib/price.js` | `--price-in` / `--price-cached` / `--price-out` / `--galaxy-usd` / `--decode-galaxies` overrides of `SIM.PRICE` and `SIM.COST` for the CLIs. |
 | `lib/paths.js` | Where data and results are read from: env `M3SIM_DATA` / `M3SIM_RESULTS`, else `./data` and `./results`, else the exabox scratch copies. |
 | `on_node.sh` | `JOB=<slurm id> ./on_node.sh <cmd>` runs on the compute node with soft ulimits raised to the hard limits. |
-| `tools/` | Helpers: `feature_table.js` (README tables), `study_detail.js`, `grid_by_topology.js`, `dump_cells.js` (per-cell stage medians), `traffic_stats.js`, `smoke.sh` (every feature path), `investigate.sh`. |
+| `tools/` | Helpers: `feature_table.js` (README tables), `study_detail.js`, `grid_by_topology.js`, `dump_cells.js` (per-cell stage medians), `traffic_stats.js`, `smoke.sh` (every feature path), `investigate.sh`, `decode_layout_ab.js` (decode KV layouts vs revenue). |
 
 Data:
 * `data/traffic.bin` + `traffic.json`: the preprocessed corpus, 5 MB, derived from the Apache-2.0 HF dataset.
@@ -131,6 +133,30 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
   what tt-d-gen does: it needs the decode slot up front to start KV migration eagerly. Every run reports the slots held (mean and max over
   the window), how many of them are decoding, and the share of requests that waited and their mean wait. M3 decode
   today holds about 64 sessions, one per pipeline stage (tt-blaze #4220); batched decode (m = 8) targets about 504.
+* **Decode KV layouts** (`decodeCache`; page: "Decode KV layout"). `decodeSlots` is the decode KV memory in 1M-token
+  slots (0 = unlimited). Every layout reserves a request's decode KV when it is admitted to prefill and releases it when
+  its decode ends; the released KV stays cached.
+  * `'slots'` (default, today): one 1M slot per request. A released slot keeps its stream's KV, LRU over idle slots
+    (as prefill's static slots).
+  * `'hybrid'`: `decodeLanes` 1M lanes, with the rest of the memory a content-addressed paged pool (prefill's pool).
+    A request's pages (and its output's) are pinned from admission, with shared prefixes counted once. Admission waits
+    in FIFO order while the pinned and reserved pages would not fit. `decodeLaneScope`:
+    * `'global'` (default): a session takes a lane when its decode starts (default `decodeStages` lanes, × batches once
+      decode is batched). It copies its context in once (every stage in parallel, about 0.3 ms at 100k) and unpins its
+      pages. At most `decodeLanes` sessions decode; the rest wait for a lane in FIFO order. That wait delays the first
+      token, so it counts in TTFT (`decLaneWaitFrac`, `decStartDelayMean`).
+    * `'stage'`: `decodeLanes` lanes per stage (default 1). Once more sessions decode than there are lanes, every token
+      copies the session's whole context pool → lane on every stage, as prefill's per-stage lanes do for every chunk.
+      At 340 B per token per layer per chip, read and written at 50% of DRAM bandwidth, that adds 60 × context × 680 B
+      / 256 GB/s to each token's trip: about 16 ms at 100k, against a 5.6 ms trip at 180 tokens/s/u.
+  * `'paging'`: an ideal paged decode kernel; the whole memory is the pool.
+  * `decodeHostTier`: released slots and unpinned pages go on to host DRAM, then SSD, of the decode galaxies
+    (`hostTier` specs × `decodeGalaxies`, default 16). They are read back over the decode side's PCIe and SSDs (before
+    decode starts) when a later request needs that prefix. KV migration is not modelled, so decode-side hits
+    (`decHitRate`; `migTps` = tokens still migrated per second) change no throughput. A read-back delays decode start
+    only if it has not landed by the end of prefill.
+  * Runs also report `decPoolTokMean` (pool pages pinned or reserved by sessions) and `decPcieH2DUtil`,
+    `decPcieD2HUtil`, `decSsdUtil`. TTFT runs to the start of decode: prefill, plus any wait for a lane or a read-back.
 * **Decode ring.** `decodeTps` is the speed per user (TSU) while the ring has room: one token per trip through the
   decode pipeline, so 1 / TSU is the trip time. `decodeStages` (default 0 = unlimited) is how many sessions the ring
   carries at once, one token per stage: 64 for a 64-stage ring, m × 64 with m-row batched decode. Every request past
@@ -346,6 +372,48 @@ Revenue at $0.30/M input, $0.06/M cached.
 | 8 galaxies, roofline kernels | greedy full stack | 3000 | 28.97B | 1.01B | 27.97B | 96.5% | 228.2k | $1,979 |
 | 8 galaxies, roofline kernels | best grid config | 3072 | 30.13B | 1.05B | 29.08B | 96.5% | 237.3k | $2,060 |
 
+**Decode KV layouts and revenue** (`tools/decode_layout_ab.js`, `results/decode_layout_ab.{json,txt}`, Oct 9). The
+decode side is a 62-stage ring with 75 × 1M slots of KV memory, decode offload tiers, and 180 tokens/s/u @100k on the
+M3 curve. The prefill side is as in the decode backpressure table below: pool + host DRAM + SSD tiers, today's kernels
+and round robin. For each decode layout the table shows the best prefill config by net revenue at its goodput point
+(p90 TTFT ≤ 10 s, which includes any wait for a decode lane), at $12 per galaxy-hour with 16 decode galaxies. Output is
+billed as decoded.
+
+| decode KV layout | prefill gx | best prefill | goodput | requests/h | output decoded, tok/s | decoding, at tokens/s/u | ring full | waits | revenue/h, in + out | net/h |
+|---|---|---|---|---|---|---|---|---|---|---|
+| fixed slots: 62 stages / 75 slots | 6 | chunk 512, batch 4k | 39.5k @ C=432 | 32.2k | 9.2k | 56 at 163 | 26% | 98% wait 4.4 s for KV | $270 + $39.79 | **$45.36** |
+| hybrid, global lanes: 62 stages / 62 lanes | 6 | chunk 1024, batch 4k | 43.0k @ C=464 | 34.6k | 10.0k | 61 at 165 | 86% | 84% wait 3.4 s for a lane | $291 + $43.18 | **$70.25** |
+| hybrid, per-stage lanes: 62 stages / 1 lane | 6 | chunk 1024 | 18.4k @ C=680 | 13.9k | 2.7k | 374 at 7 | 99% | 17% wait 9.1 s for KV | $95.40 + $11.59 | **−$157** |
+| (ref) paged: 62 stages / 75M-token pool | 6 | chunk 512, batch 16k | 50.7k @ C=744 | 39.6k | 10.3k | 218 at 47 | 98% | – | $324 + $44.29 | **$104** |
+| (ref) unlimited decode | 6 | chunk 512, batch 8k | 54.0k @ C=592 | 42.4k | 12.1k | 75 at 162 | 0% | – | $378 + $52.22 | **$166** |
+| fixed slots: 62 stages / 75 slots | 8 | chunk 2048 | 41.8k @ C=456 | 33.7k | 9.7k | 60 at 162 | 43% | 98% wait 5.3 s for KV | $282 + $41.81 | **$35.79** |
+| hybrid, global lanes: 62 stages / 62 lanes | 8 | chunk 2048 | 43.5k @ C=464 | 35.0k | 10.1k | 61 at 165 | 94% | 93% wait 4.2 s for a lane | $294 + $43.67 | **$49.80** |
+| hybrid, per-stage lanes: 62 stages / 1 lane | 8 | chunk 1024 | 18.5k @ C=680 | 13.9k | 2.7k | 377 at 7 | 100% | 16% wait 9.4 s for KV | $95.27 + $11.61 | **−$181** |
+| (ref) paged: 62 stages / 75M-token pool | 8 | chunk 1024, batch 4k | 53.9k @ C=992 | 42.0k | 10.4k | 394 at 26 | 99% | 31% wait 3.4 s for KV | $332 + $44.88 | **$88.94** |
+| (ref) unlimited decode | 8 | chunk 512, batch 8k | 72.9k @ C=816 | 59.2k | 16.5k | 101 at 164 | 0% | – | $510 + $71.41 | **$294** |
+
+* **The 62-stage ring is the limit in all three scenarios.** It decodes at most about 62 × 165 = 10.2k tokens/s, so
+  the layouts differ in how full they keep it and how much prefill they let through. Most of the revenue is input
+  revenue (prefill); output adds 10–15%.
+* **Global lanes beat fixed slots: +$25/h at 6 prefill galaxies (+55%), +$14/h at 8 (+39%).** With fixed slots a
+  request holds its 1M slot from admission, so 15–19 of the 75 slots hold requests still queued or in prefill. Only
+  56–60 sessions decode and the ring is full only 26–43% of the time, while 98% of requests wait 4–5 s for a slot.
+  With 62 global lanes the 13.6M-token pool holds the sessions in prefill (120–124 held, 7–8M tokens of pool in use),
+  so a lane is free whenever a session finishes. The ring stays full 86–94% of the time with 61 decoding: +4–9%
+  output and +4–8% requests. The cost moves to the first token: 84–93% of requests wait 3.4–4.2 s for a lane, inside
+  the 10 s TTFT.
+* **Per-stage lanes with one lane are not viable for decode (−$157 / −$181 per hour).** Every token copies its
+  session's whole context in on every stage, so a session decodes about 4× slower even before the ring is shared
+  (about 25 ms per token at 120k instead of 6). The 74M-token pool admits 380 sessions; they share the ring at 7
+  tokens/s/u, and output falls to 2.7k tokens/s. These points are not steady: tokens decoded are 80% of those
+  completed, so the backlog is still growing and the real loss is larger.
+* **Paging (reference)** keeps more sessions in the ring (218–394 decoding) and serves more requests ($104 / $89),
+  but every session then decodes at 26–47 tokens/s/u. Nothing here caps time per output token, so a TPOT SLO would
+  take most of that gain back. Unlimited decode ($166 / $294) shows what the decode limit costs.
+* **The decode tiers change nothing here.** The decode side finds 95–96% of each request's context already cached
+  (the pool 96%, shared across sub-agents; slots 95%, a stream's own previous request), but that only saves KV
+  migration, which is not modelled.
+
 **Decode backpressure with the decode ring** (`decodeSlots`, `decodeStages`; not part of the study base). Pool + host
 DRAM + SSD tiers, today's kernels, decode following context at 180 tokens/s/u @100k, goodput at p90 TTFT ≤ 10 s, net
 revenue per hour at MiniMax's prices, $12 per galaxy-hour and 16 decode galaxies; best of no batching (chunk 1024 /
@@ -555,9 +623,9 @@ Takeaways (study numbers are from this run, the third Oct 8 study, unless marked
 * Offload tiers: capacities and bandwidths come from the Galaxy Blackhole documentation and the drive datasheet, but the host DRAM reserves (OS, runtime, KV staging) are estimates, and transfers are ideal page DMAs. The PCIe figure assumes each chip moves its own KV over its own link; measure the sustained rate.
 * Pool copies are page-list gathers at 50% DRAM efficiency. Arena fragmentation is not modelled.
 * Decode speed is the measured M3 shape scaled to a 180 tokens/s/u @100k target, and the ring is ideal processor
-  sharing (no per-step overheads, no batched-decode slowdown). Decode capacity is a slot count (`decodeSlots`), not KV
-  bytes per context length (today's decode slots hold 64k positions; AgentX contexts average about 130k). KV
-  migration to decode is not modelled.
+  sharing (no per-step overheads, no batched-decode slowdown, no TPOT limit). Decode KV is a memory of 1M slots in one
+  of three layouts (`decodeCache`); per-stage lane copies are DRAM-bound page gathers at 50% efficiency. KV migration to
+  decode is not modelled, so decode-side prefix hits and the decode offload tiers do not change throughput.
 * Meshes without a profile ([4,4], [1,4], …) are extrapolated. TP=2 stages use the [4,2] single-stage profile.
 * Ring-collective speed-ups on the torus are textbook link-load ratios, not measured; profile a [4,4] stage with ring CCLs to pin them down.
 * Batched chunks larger than 5120 are extrapolated from the roofline scaling of each op.

@@ -38,6 +38,11 @@
     return cfg.decodeTps * (a + b * DECODE_REF_CTX) / (a + b * ctx);
   }
   const MB = 1e6, GB = 1e9;
+  // Decode KV per token per layer on one chip (tt-blaze M3 decode, bf8: K/V sharded by head over the 4 mesh rows and
+  // replicated over the 2 columns, index_k split over the columns): 1088 / 4 + 136 / 2 = 340 B. Copying a context of
+  // `tok` tokens pool -> lane over `layers` layers reads and writes it in DRAM at 50% (as prefill's pool copies).
+  const DEC_KVB_CHIP = 2 * M3.Hkv * M3.d * BF8 / 4 + M3.di * BF8 / 2;
+  const decCopyS = (tok, layers) => tok * layers * DEC_KVB_CHIP * 2 / (HW.dram * 0.5);
 
   const OPS_MOE = ['norm_ag', 'qkv', 'idx_branch', 'misc', 'o_proj', 'attn_rs', 'shared', 'router', 'dispatch', 'experts', 'combine', 'moe_reduce'];
   const OPS_MSA_SEG = ['ag_kv', 'ag_idx', 'indexer', 'sparse', 'kv_a2a'];
@@ -497,6 +502,26 @@
     //   Default 'm3' at decodeTps 180: the decode target (180 tokens/s/u @100k) with the measured shape; decodeTps 98
     //   reproduces the measured table.
     decodeCurve: 'm3',
+    // decodeCache: the decode side's KV layout. decodeSlots sizes its memory in 1M-token slots (0 = unlimited). Every
+    //   layout reserves a request's decode KV when the request is admitted to prefill and releases it when its decode
+    //   ends; released KV stays cached (LRU) and a later request with the same prefix finds it there.
+    //   'slots'  = (today) decodeSlots fixed 1M slots, one per request; a released slot keeps its stream's KV, LRU over
+    //              idle slots (as prefill's static slots).
+    //   'hybrid' = decodeLanes 1M lanes the decode kernels run on, the rest of the memory a content-addressed paged
+    //              pool (as prefill's pool); a request's pages are pinned in the pool from admission.
+    //              decodeLaneScope 'global': a decoding session holds a lane for its whole decode (its context copied
+    //                in once when decode starts, then its pages are unpinned); at most decodeLanes sessions decode and
+    //                the rest wait for a lane (counted in TTFT). decodeLanes 0 = decodeStages (one per ring stage;
+    //                x the batches once decode is batched).
+    //              decodeLaneScope 'stage': decodeLanes lanes per stage (0 = 1). With more sessions decoding than
+    //                lanes, every token copies the session's whole context pool -> lane on each stage, as prefill's
+    //                per-stage lanes do for every chunk, which slows every session (decCopyTrip).
+    //   'paging' = an ideal paged decode kernel: all of the memory is the pool, no lanes, no copies.
+    // decodeHostTier: released slots and unpinned pages go on to the decode galaxies' host DRAM, then SSD (the
+    //   hostTier specs per galaxy, decodeGalaxies of them), and are read back (before decode starts) when their prefix
+    //   is needed again. KV migration from prefill is not modelled, so a decode-side hit only saves migration
+    //   (reported as decHitRate and migTps).
+    decodeCache: 'slots', decodeLanes: 0, decodeLaneScope: 'global', decodeHostTier: false, decodeGalaxies: 16,
     concurrency: 64, decodeTps: 180, duration: 1800, seed: 1, idleCap: 10, startMin: 0, startMax: 1, maxWarmup: 1e6,
     gapCap: Infinity,      // AgentX forbids capping recorded idle gaps (only the 10 s system-idle cap applies)
     // policy: 'rr' (default) = round robin, see below; 'rtc' = run to completion (no preemption), oldest first
@@ -713,6 +738,23 @@
     const tokOf = (bytesPerGalaxy) => bytesPerGalaxy * gpr / (M3.L * kvbHost);
     const hostTok = offload ? tokOf(hostBudget.kv * GB) : 0;
     const ssdTok = offload ? tokOf(cfg.ssdTBPerGalaxy * 1e12) : 0;
+    // decode side (see DEFAULTS.decodeCache): memory, lanes, pool and the decode galaxies' offload tiers
+    const dc = cfg.decodeCache, decMem = cfg.decodeSlots > 0 ? cfg.decodeSlots * M3.maxCtx : Infinity;
+    const decLanes = dc !== 'hybrid' ? 0 : cfg.decodeLanes > 0 ? cfg.decodeLanes : cfg.decodeLaneScope === 'global' ? cfg.decodeStages : 1;
+    const decPoolTok = dc === 'slots' ? 0 : decMem - decLanes * M3.maxCtx;
+    if (!['slots', 'hybrid', 'paging'].includes(dc)) errors.push(`decodeCache must be 'slots', 'hybrid' or 'paging', got ${dc}`);
+    if (!['global', 'stage'].includes(cfg.decodeLaneScope)) errors.push(`decodeLaneScope must be 'global' or 'stage', got ${cfg.decodeLaneScope}`);
+    if (!(cfg.decodeLanes >= 0) || cfg.decodeLanes !== Math.floor(cfg.decodeLanes)) errors.push('decode lanes must be a whole number >= 0 (0 = derived)');
+    if (dc === 'hybrid' && !(cfg.decodeStages > 0)) errors.push('hybrid decode needs the decode pipeline stages (decodeStages > 0)');
+    if (dc !== 'slots' && decPoolTok < MAX_REQ) errors.push(`the decode pool (${decPoolTok / M3.maxCtx} 1M slots after ${decLanes} lanes) must hold the largest request (${MAX_REQ} tokens)`);
+    if (cfg.decodeHostTier && !(cfg.decodeGalaxies >= 1)) errors.push('decode offload tiers need decodeGalaxies >= 1');
+    const decOffload = cfg.decodeHostTier && decMem !== Infinity;
+    // decode galaxies' host DRAM left for KV: the prefill reserves, with this galaxy's share of the whole model's weights
+    const hb = hostBudget;
+    const decHostKvGB = Math.max(0, hb.dram - hb.headroom - hb.os - hb.runtime - hb.staging - hb.pinned - (cfg.hostStageWeights ? wTot / GB / cfg.decodeGalaxies : 0));
+    const decHostTok = decOffload ? decHostKvGB * GB * cfg.decodeGalaxies / (M3.L * kvbHost) : 0;
+    const decSsdTok = decOffload ? cfg.ssdTBPerGalaxy * 1e12 * cfg.decodeGalaxies / (M3.L * kvbHost) : 0;
+    const decLayers = cfg.decodeStages > 0 ? Math.ceil(M3.L / cfg.decodeStages) : M3.L; // most layers on one decode stage
     if (!['chunk', 'request', 'fused'].includes(cfg.attn)) errors.push(`attn must be 'chunk', 'request' or 'fused', got ${cfg.attn}`);
     if (!['chunk', 'tile'].includes(cfg.reqPad)) errors.push(`reqPad must be 'chunk' or 'tile', got ${cfg.reqPad}`);
     if (!['even', 'owner'].includes(cfg.placement)) errors.push(`placement must be 'even' or 'owner', got ${cfg.placement}`);
@@ -727,6 +769,12 @@
       pcieBps: cfg.pcieGBsPerGalaxy * GB * gpr, ssdRdBps: cfg.ssdReadGBsPerGalaxy * GB * gpr, ssdWrBps: cfg.ssdWriteGBsPerGalaxy * GB * gpr,
       // in-flight chunks: round robin on static slots mirrors tt-d-gen's ChunkFifo, max(8, 4 x max_slots)
       maxInflight: cfg.maxInflight > 0 ? cfg.maxInflight : cfg.policy === 'rr' && cfg.cache === 'slots' ? Math.max(8, 4 * nSlots) : 2 * S + 4,
+      // decode side: lanes, pool tokens, offload tiers (tokens) and links of the decode galaxies; copy times (s) of a
+      // context of `tok` tokens pool -> lane: on one stage (a global lane's copy-in, all stages in parallel) and summed
+      // over every layer (what each token of a session adds to its trip with per-stage lanes)
+      decLanes, decPoolTok, decHostTok, decSsdTok, decHostKvGB,
+      decPcieBps: cfg.pcieGBsPerGalaxy * GB * cfg.decodeGalaxies, decSsdRdBps: cfg.ssdReadGBsPerGalaxy * GB * cfg.decodeGalaxies, decSsdWrBps: cfg.ssdWriteGBsPerGalaxy * GB * cfg.decodeGalaxies,
+      decLaneCopyS: (tok) => decCopyS(tok, decLayers), decCopyTrip: (tok) => decCopyS(tok, M3.L),
       tokensPerSec: null,
     };
   }
@@ -831,7 +879,7 @@
       this.n = 0; this.tier = new Uint8Array(1 << 16); this.t = new Float64Array(1 << 16); this.pk = new Int32Array(1 << 16);
       this.len = new Int32Array(1 << 16); this.dep = new Int32Array(1 << 16); this.pin = new Int32Array(1 << 16);
       this.used = 0; this.hused = 0; this.heap = new LruHeap(); this.hheap = new LruHeap(); this.path = new Int32Array(1024);
-      this.evictedBlocks = 0;
+      this.evictedBlocks = 0; this.pinnedB = 0; // blocks of the pinned pieces (each counted once)
     }
     allocNs(trace) {
       const TR = this.TR, np = TR.trPieces[trace], p0 = TR.tr_pc0[trace];
@@ -881,10 +929,26 @@
     // Returns the pinned keys; this.pinB = blocks of the prefix they cover.
     pinPrefix(n, blocks) {
       const keys = []; let acc = 0;
-      for (let i = n - 1; i >= 0 && acc < blocks; i--) { const k = this.path[i]; if (this.tier[k] !== 1) break; this.pin[k]++; keys.push(k); acc += this.len[k]; }
+      for (let i = n - 1; i >= 0 && acc < blocks; i--) { const k = this.path[i]; if (this.tier[k] !== 1) break; if (this.pin[k]++ === 0) this.pinnedB += this.len[k]; keys.push(k); acc += this.len[k]; }
       this.pinB = Math.min(acc, blocks); return keys;
     }
-    unpin(keys) { for (const k of keys) if (--this.pin[k] === 0 && this.tier[k] === 1) this.heap.push(this.t[k], this.dep[k], k); }
+    // decode: put every piece of the path on the device and pin it (host DRAM / SSD pieces are read back, missing ones
+    // arrive by migration from prefill); this.got = [device, host, SSD] blocks of it that were already cached.
+    pinAll(n, now) {
+      const keys = []; let dev = 0, host = 0, ssd = 0;
+      for (let i = 0; i < n; i++) {
+        const k = this.path[i], L = this.len[k], tr = this.tier[k];
+        if (tr === 1) dev += L;
+        else { this.used += L; if (tr === 2) { host += L; this.hused -= L; } else if (tr === 3) { ssd += L; this.sused -= L; } }
+        this.tier[k] = 1; this.t[k] = now; this.heap.push(now, this.dep[k], k);
+        if (this.pin[k]++ === 0) this.pinnedB += L;
+        keys.push(k);
+      }
+      this.got = [dev, host, ssd]; this.evict(); return keys;
+    }
+    // blocks of the path not pinned yet: what pinning it would add to the pinned total
+    unpinnedB(n) { let b = 0; for (let i = 0; i < n; i++) { const k = this.path[i]; if (this.pin[k] === 0) b += this.len[k]; } return b; }
+    unpin(keys) { for (const k of keys) if (--this.pin[k] === 0) { this.pinnedB -= this.len[k]; if (this.tier[k] === 1) this.heap.push(this.t[k], this.dep[k], k); } }
     // space held by KV that is being written but not yet inserted (paging: pages written in place)
     reserve(blocks) { this.used += blocks; this.evict(); }
     unreserve(blocks) { this.used -= blocks; }
@@ -949,7 +1013,7 @@
   // ------------------------------------------------------------------------------------------------------
   // The replay simulation
   // ------------------------------------------------------------------------------------------------------
-  const EV_READY = 1, EV_DONE = 2, EV_END = 3, EV_PUMP = 4, EV_LANE = 5, EV_FETCHED = 6, EV_SEG = 7, EV_DEC = 8;
+  const EV_READY = 1, EV_DONE = 2, EV_END = 3, EV_PUMP = 4, EV_LANE = 5, EV_FETCHED = 6, EV_SEG = 7, EV_DEC = 8, EV_DSTART = 9;
 
   function simulate(TR, cal, cfgIn, opts) {
     opts = opts || {};
@@ -1006,31 +1070,43 @@
       return t;
     }
     for (const rp of reps) if (rp.pool && offload) rp.pool.onDemote = (blocks, from, to) => { offDemote(rp, blocks, from, to); };
-    // behind static slots: an evicted slot's KV (its stream's latest request) goes to host DRAM, LRU over hostTok,
-    // overflowing to SSD, LRU over ssdTok, one copy per stream (no prefix sharing); the stream's next request reads
-    // back the prefix it shares with it. The new occupant waits for the PCIe write-back.
-    for (const rp of reps) if (rp.slots && offload) {
-      rp.off = { host: new Map(), hostUsed: 0, ssd: new Map(), ssdUsed: 0 }; // streamKey -> blocks, in LRU order
-      rp.slots.onEvict = (key, blocks) => {
+    // Offload tiers behind static slots: an evicted slot's KV (its stream's latest request), one copy per stream, in
+    // host DRAM (LRU over hostTok) overflowing to SSD (LRU over ssdTok), no prefix sharing. demote(blocks, from, to)
+    // moves the bytes and returns when the device write-back ends; evict() returns that time (the slot's new occupant
+    // waits for it).
+    function slotTiers(hostTok, ssdTok, demote) {
+      const o = { host: new Map(), hostUsed: 0, ssd: new Map(), ssdUsed: 0 }; // streamKey -> blocks, in LRU order
+      o.has = (key) => o.host.has(key) || o.ssd.has(key);
+      o.take = (key) => { // remove the stream's copy -> { inHost, stored }
+        const inHost = o.host.has(key), m = inHost ? o.host : o.ssd, stored = m.get(key);
+        m.delete(key); if (inHost) o.hostUsed -= stored; else o.ssdUsed -= stored;
+        return { inHost, stored };
+      };
+      o.evict = (key, blocks) => {
         if (!(blocks > 0)) return 0;
-        const o = rp.off, toHost = plan.hostTok > 0;
-        const t = offDemote(rp, blocks, 1, toHost ? 2 : 3);
+        const toHost = hostTok > 0;
+        const t = demote(blocks, 1, toHost ? 2 : 3);
         if (toHost) { o.host.set(key, blocks); o.hostUsed += blocks; } else { o.ssd.set(key, blocks); o.ssdUsed += blocks; }
         for (const [k, b] of o.host) {
-          if (o.hostUsed * B <= plan.hostTok) break;
+          if (o.hostUsed * B <= hostTok) break;
           o.host.delete(k); o.hostUsed -= b;
-          if (plan.ssdTok > 0) { offDemote(rp, b, 2, 3); o.ssd.set(k, b); o.ssdUsed += b; }
+          if (ssdTok > 0) { demote(b, 2, 3); o.ssd.set(k, b); o.ssdUsed += b; }
         }
-        for (const [k, b] of o.ssd) { if (o.ssdUsed * B <= plan.ssdTok) break; o.ssd.delete(k); o.ssdUsed -= b; }
+        for (const [k, b] of o.ssd) { if (o.ssdUsed * B <= ssdTok) break; o.ssd.delete(k); o.ssdUsed -= b; }
         return t;
       };
+      return o;
+    }
+    // prefill: the stream's next request reads back the prefix it shares with its slot's evicted KV
+    for (const rp of reps) if (rp.slots && offload) {
+      rp.off = slotTiers(plan.hostTok, plan.ssdTok, (blocks, from, to) => offDemote(rp, blocks, from, to));
+      rp.slots.onEvict = rp.off.evict;
     }
     const slotKey = (q) => q.tree.key * 4096 + (TR.req_stream[q.r] - q.tree.s0);
-    const offHas = (rep, key) => !!rep.off && (rep.off.host.has(key) || rep.off.ssd.has(key));
+    const offHas = (rep, key) => !!rep.off && rep.off.has(key);
     // read a stream's KV back from host DRAM or SSD (the prefix the request shares with it); returns the fetch's end
     function slotFetch(q, rep, key) {
-      const o = rep.off, inHost = o.host.has(key), m = inHost ? o.host : o.ssd;
-      const stored = m.get(key); m.delete(key); if (inHost) o.hostUsed -= stored; else o.ssdUsed -= stored;
+      const { inHost, stored } = rep.off.take(key);
       const blocks = Math.min(stored, TR.req_lcp_prev[q.r]);
       q.ssdBlocks = blocks;
       return inHost ? offFetch(rep, blocks, 0) : offFetch(rep, 0, blocks);
@@ -1040,7 +1116,37 @@
       h2dFreeBusy: 0, d2hFreeBusy: 0, ssdFreeBusy: 0,
       ttft: [], chunks: 0, segs: 0, laneWait: 0, reqs: 0, primers: 0, warmupS: 0, idleWarps: 0, primerTok: 0,
       gated: 0, gateWait: 0, legacyStarts: 0, skippedTraces: 0, rrSegs: 0, rrReuse: 0, rrCopyIn: 0,
-      outTok: 0, decArea: 0, decingArea: 0, decMax: 0, decWaits: 0, decWait: 0, decWaited: 0, decTokArea: 0, ringFull: 0, pfSlot: 0, pfNone: 0, sendBlock: 0 };
+      outTok: 0, decArea: 0, decingArea: 0, decMax: 0, decWaits: 0, decWait: 0, decWaited: 0, decTokArea: 0, ringFull: 0, pfSlot: 0, pfNone: 0, sendBlock: 0,
+      decCtxTok: 0, decHitTok: 0, decHostTok: 0, decSsdTok: 0, dH2dBusy: 0, dD2hBusy: 0, dSsdBusy: 0, decPoolArea: 0,
+      decStarts: 0, decStartDelay: 0, decLaneWaited: 0 };
+    const decWin = () => warmDone && now >= t0 && now <= tEnd;
+    // ---------- decode KV (DEFAULTS.decodeCache): reserved when a request is admitted to prefill (TTFT clock already
+    // running), released when its decode ends, then cached: released slots keep their stream's KV, released pages
+    // stay in the pool (LRU), and with decode tiers both go on to the decode galaxies' host DRAM and SSD
+    const decGlobal = cfg.decodeCache === 'hybrid' && cfg.decodeLaneScope === 'global';
+    const decStage = cfg.decodeCache === 'hybrid' && !decGlobal;
+    const decLinks = { dH2d: 0, dD2h: 0, dSsd: 0 }; // the decode galaxies' PCIe (one per direction) and SSDs
+    function decFetch(host, ssd) { // as offFetch, on the decode side
+      const tS = useLink(decLinks, 'dSsd', offBytes(ssd), plan.decSsdRdBps);
+      const tP = useLink(decLinks, 'dH2d', offBytes(host + ssd), plan.decPcieBps);
+      if (decWin()) { st.decHostTok += host * B; st.decSsdTok += ssd * B; }
+      return Math.max(tS, tP);
+    }
+    function decDemote(blocks, from, to) { // as offDemote, on the decode side
+      const b = offBytes(blocks);
+      const t = from === 1 ? useLink(decLinks, 'dD2h', b, plan.decPcieBps) : now;
+      if (to === 3) useLink(decLinks, 'dSsd', b, plan.decSsdWrBps, t);
+      return t;
+    }
+    const decOffload = plan.decHostTok + plan.decSsdTok > 0;
+    const decSlots = cfg.decodeCache === 'slots' && cfg.decodeSlots > 0 ? new SlotCache(cfg.decodeSlots) : null;
+    const decOff = decSlots && decOffload ? slotTiers(plan.decHostTok, plan.decSsdTok, decDemote) : null;
+    if (decOff) decSlots.onEvict = decOff.evict;
+    const decPool = cfg.decodeCache !== 'slots' ? new PoolCache(TR, plan.decPoolTok / B, plan.decHostTok / B, plan.decSsdTok / B) : null;
+    if (decPool && decOffload) decPool.onDemote = (blocks, from, to) => { decDemote(blocks, from, to); };
+    // decResvB: pool blocks reserved for the output of sessions not yet in a lane; global lanes in use, and the
+    // sessions past prefill waiting for one (FIFO); pendTtft: requests counted in the window whose decode has not begun
+    let decResvB = 0, decLanesUsed = 0; const decLaneQ = [], pendTtft = new Set();
     // decode slots: held from admission to prefill (TTFT clock already running) until decode ends; time-weighted
     // occupancy over the window, for slots held and for requests actually decoding (prefill done, not yet ended)
     let decHeld = 0, decoding = 0, decT = 0, decSpeedSum = 0; const decQ = [];
@@ -1052,6 +1158,7 @@
         if (b > a) {
           st.decArea += decHeld * (b - a); st.decingArea += decoding * (b - a); st.decTokArea += decSpeedSum * decShare() * (b - a);
           if (cfg.decodeStages > 0 && decoding >= cfg.decodeStages) st.ringFull += b - a;
+          if (decPool) st.decPoolArea += (decPool.pinnedB + decResvB) * B * (b - a);
         }
       }
       decT = now;
@@ -1075,9 +1182,85 @@
       while (ring.length && ring[0].thr <= decV + 1e-9) { const { q } = ringPop(); onEnd(q); decAdvance(); }
       decSchedule();
     }
+    // per-stage decode lanes: once more sessions decode than there are lanes per stage, every token copies its
+    // session's context in on every stage (decCopySpeed), until they are back within the lanes. Re-rates the ring:
+    // each session keeps its tokens left, at its new speed (call after decAdvance, with `decoding` updated).
+    let decCopying = false;
+    function decRerate() {
+      const c = decStage && decoding > plan.decLanes;
+      if (c === decCopying) return;
+      decCopying = c; decSpeedSum = 0;
+      for (const e of ring) {
+        const s = c ? e.q.decCopySpeed : e.q.decBase;
+        e.thr = decV + (e.thr - decV) * e.q.decSpeed / s; e.q.decSpeed = s; decSpeedSum += s;
+      }
+      ring.sort((a, b) => a.thr - b.thr); // a sorted array is a heap
+    }
+    // reserve the request's decode KV at admission; false if decode has no room for it now. q.decReadyAt: when its
+    // cached KV is back from host DRAM / SSD (and a reclaimed slot's write-back is done); decode cannot start before.
+    function decTryTake(q) {
+      decTick();
+      const key = slotKey(q);
+      let hitB = 0, ready = 0;
+      if (decSlots) {
+        const a = decSlots.acquire(key, now); if (!a) return false;
+        q.decSlotIdx = a.slot; ready = decSlots.evictEnd;
+        if (a.warm) hitB = TR.req_lcp_prev[q.r];
+        else if (decOff && decOff.has(key)) {
+          const { inHost, stored } = decOff.take(key);
+          hitB = Math.min(stored, TR.req_lcp_prev[q.r]);
+          ready = Math.max(ready, inHost ? decFetch(hitB, 0) : decFetch(0, hitB));
+        }
+      } else if (decPool) { // the whole context pinned in the pool (shared pieces once), plus the output's pages
+        const pool = decPool, n = pool.walk(q.tree.dns, TR.req_leaf[q.r] - TR.tr_pc0[q.tree.trace]), outB = Math.ceil(TR.req_out[q.r] / B);
+        const held = pool.pinnedB + decResvB;
+        if (held > 0 && held + pool.unpinnedB(n) + outB > pool.cap) return false;
+        q.decPins = pool.pinAll(n, now); q.decOutB = outB; decResvB += outB; pool.reserve(outB);
+        const [dev, host, ssd] = pool.got; hitB = dev + host + ssd;
+        if (host + ssd > 0) ready = decFetch(host, ssd);
+      }
+      q.decReadyAt = ready;
+      if (decWin() && (decSlots || decPool)) { st.decCtxTok += TR.req_blocks[q.r] * B; st.decHitTok += hitB * B; }
+      return true;
+    }
     function decTake(q) {
       decTick(); decHeld++; q.decSlot = true;
       if (warmDone && now >= t0 && now <= tEnd && decHeld > st.decMax) st.decMax = decHeld;
+    }
+    // admit waiting requests (FIFO) while decode has room
+    function decDrain() {
+      while (decQ.length && decTryTake(decQ[0])) {
+        const w = decQ.shift();
+        if (warmDone && now >= t0 && now <= tEnd) { st.decWaited++; st.decWait += now - w.decWaitAt; }
+        decTake(w); admit(w);
+      }
+    }
+    // a primer (max_tokens = 1) leaves its KV on the decode side like any finished request
+    function decWarm(q) {
+      if (decSlots) {
+        const key = slotKey(q), a = decSlots.acquire(key, now);
+        if (a) { if (!a.warm && decOff && decOff.has(key)) decOff.take(key); decSlots.release(a.slot, now, TR.req_blocks[q.r]); }
+      } else if (decPool) decPool.touch(decPool.walk(q.tree.dns, TR.req_leaf[q.r] - TR.tr_pc0[q.tree.trace]), now);
+    }
+    // global lane: the session's context is copied pool -> lane (every stage in parallel), then its pages and output
+    // reservation leave the pinned set (they stay cached), which may let waiting requests in
+    function decLaneTake(q) {
+      decTick(); decLanesUsed++; q.decLane = true;
+      if (q.decPins) { decPool.unpin(q.decPins); q.decPins = null; }
+      if (q.decOutB) { decPool.unreserve(q.decOutB); decResvB -= q.decOutB; q.decOutB = 0; }
+      q.decReadyAt = now + plan.decLaneCopyS(TR.req_blocks[q.r] * B);
+      decStep(q);
+      decDrain();
+    }
+    // decode ends: free the slot / pages / lane (the KV stays cached) and hand the lane to the next waiting session
+    function decRelease(q) {
+      if (decSlots) decSlots.release(q.decSlotIdx, now, TR.req_blocks[q.r]);
+      if (q.decPins) { decPool.unpin(q.decPins); q.decPins = null; }
+      if (q.decOutB) { decPool.unreserve(q.decOutB); decResvB -= q.decOutB; q.decOutB = 0; }
+      if (q.decLane) {
+        decLanesUsed--; q.decLane = false;
+        while (decLaneQ.length && decLanesUsed < plan.decLanes) decLaneTake(decLaneQ.shift());
+      }
     }
     let nextTrace = 0; const nsKey = { v: 0 };
     const scratch = new Float64Array(S);
@@ -1090,7 +1273,7 @@
     function newTree(lane, trace, tstar, now) {
       const rep = reps.reduce((a, b) => (b.trees < a.trees ? b : a), reps[0]);
       rep.trees++;
-      const tree = { lane, trace, rep, ns: rep.pool ? rep.pool.allocNs(trace) : 0, key: nsKey.v++, live: 0, waiting: new Map(), pend: new Map(),
+      const tree = { lane, trace, rep, ns: rep.pool ? rep.pool.allocNs(trace) : 0, dns: decPool ? decPool.allocNs(trace) : 0, key: nsKey.v++, live: 0, waiting: new Map(), pend: new Map(),
         r0: TR.tr_req0[trace], ended: TR.hasPred ? new Uint8Array(TR.trReqs[trace]) : null, waiters: new Map() };
       const s0 = TR.tr_st0[trace], ns = TR.trStreams[trace];
       tree.s0 = s0;
@@ -1209,8 +1392,8 @@
       if (!q.primer && TR.req_stream[r] === tree.s0) {
         for (let s = TR.spawnHead[r]; s >= 0; s = TR.spawnNext[s]) if (TR.st_ovl[s]) dispatch(tree, TR.st_first[s], now + TR.st_off[s]);
       }
-      if (!q.primer) {
-        if (cfg.decodeSlots > 0 && decHeld >= cfg.decodeSlots) { q.decWaitAt = now; decQ.push(q); return; }
+      if (!q.primer) { // decode KV first (FIFO behind requests already waiting for it)
+        if (decQ.length || !decTryTake(q)) { q.decWaitAt = now; decQ.push(q); return; }
         decTake(q);
       }
       admit(q);
@@ -1576,21 +1759,41 @@
       if (rep.slots) { rep.slots.release(q.slot, now, TR.req_blocks[r]); pump(rep); }
       else if (cfg.laneScope !== 'stage') insertKV(q, rep); // global lanes: KV visible at completion, lane freed by EV_LANE
       const inTok = TR.req_blocks[r] * B;
-      if (q.primer) { st.primerTok += inTok - q.hitTok; primersLeft--; if (primersLeft === 0 && !warmDone) startProfiling(now); ev.push(now, { e: EV_END, q }); return; }
+      if (q.primer) { decWarm(q); st.primerTok += inTok - q.hitTok; primersLeft--; if (primersLeft === 0 && !warmDone) startProfiling(now); ev.push(now, { e: EV_END, q }); return; }
       if (warmDone && now >= t0 && now <= tEnd) {
         const useful = (TR.req_blocks[r] - TR.req_lcp_best[r]) * B;
         st.done++; st.laneWait += q.waitS || 0; st.useful += Math.min(useful, inTok - q.hitTok); st.newTok += inTok - q.hitTok; st.hitTok += q.hitTok; st.inTok += inTok; st.outTok += TR.req_out[r];
         st.infHitTok += TR.req_lcp_best[r] * B; st.reprefill += Math.max(0, (inTok - q.hitTok) - useful);
         if (cfg.logRequests) (st.reqLog || (st.reqLog = [])).push(r); // opt-in: request ids completed in the window
-        st.ttft.push(now - q.tReady);
+        q.ttftWin = true; pendTtft.add(q); // TTFT is taken when decode begins (the first token)
       }
-      decodeStart(q);
+      q.prefillEnd = now;
+      decStep(q);
     }
-    function decodeStart(q) {
-      const speed = decodeSpeed(cfg, TR.req_blocks[q.r] * B); // its context: the prompt (output adds ~1k)
+    // decode begins once the request's decode KV is on the device (read-backs and write-backs landed) and, with global
+    // lanes, once it holds a lane (copied in); EV_DSTART re-enters here when the wait is over
+    function decStep(q) {
+      if (q.decReadyAt > now + 1e-12) { ev.push(q.decReadyAt, { e: EV_DSTART, q }); return; }
+      if (decGlobal && q.decSlot && !q.decLane) {
+        if (decLanesUsed >= plan.decLanes || decLaneQ.length) { q.laneWaited = true; decLaneQ.push(q); return; }
+        decLaneTake(q); return;
+      }
+      decBegin(q);
+    }
+    function decBegin(q) {
+      if (q.ttftWin) {
+        q.ttftWin = false; pendTtft.delete(q); st.ttft.push(now - q.tReady);
+        st.decStarts++; st.decStartDelay += now - q.prefillEnd; if (q.laneWaited) st.decLaneWaited++;
+      }
+      const ctx = TR.req_blocks[q.r] * B, speed = decodeSpeed(cfg, ctx); // its context: the prompt (output adds ~1k)
       if (!q.decSlot) { ev.push(now + TR.req_out[q.r] / speed, { e: EV_END, q }); return; }
+      q.decBase = speed; q.decCopySpeed = decStage ? 1 / (1 / speed + plan.decCopyTrip(ctx)) : speed;
+      if (cfg.decodeStages > 0) {
+        decAdvance(); decTick(); decoding++; decRerate();
+        q.decSpeed = decCopying ? q.decCopySpeed : speed; decSpeedSum += q.decSpeed;
+        ringPush({ thr: decV + TR.req_out[q.r] / q.decSpeed, q }); decSchedule(); return;
+      }
       q.decSpeed = speed;
-      if (cfg.decodeStages > 0) { decAdvance(); decTick(); decoding++; decSpeedSum += speed; ringPush({ thr: decV + TR.req_out[q.r] / speed, q }); decSchedule(); return; }
       decTick(); decoding++; decSpeedSum += speed;
       ev.push(now + TR.req_out[q.r] / speed, { e: EV_END, q });
     }
@@ -1599,11 +1802,8 @@
       inflightReqs--; tree.live--;
       if (q.decSlot) {
         decTick(); decHeld--; decoding--; decSpeedSum -= q.decSpeed || 0; q.decSlot = false;
-        while (decQ.length && (cfg.decodeSlots <= 0 || decHeld < cfg.decodeSlots)) {
-          const w = decQ.shift();
-          if (warmDone && now >= t0 && now <= tEnd) { st.decWaited++; st.decWait += now - w.decWaitAt; }
-          decTake(w); admit(w);
-        }
+        if (cfg.decodeStages > 0) decRerate();
+        decRelease(q); decDrain();
       }
       if (tree.ended) {
         tree.ended[r - tree.r0] = 1;
@@ -1674,6 +1874,7 @@
         case EV_DONE: onDone(p.q); break;
         case EV_END: onEnd(p.q); break;
         case EV_DEC: onDecodeEvent(p.gen); break;
+        case EV_DSTART: decStep(p.q); break;
         case EV_PUMP: if (p.rep.pumpAt === t) p.rep.pumpAt = -1; pump(p.rep); break;
         case EV_LANE: onLaneFree(p.q, p.rep); break;
         case EV_SEG: onSegFree(p); break;
@@ -1682,6 +1883,9 @@
     // ---------- results
     const D = warmDone ? Math.min(cfg.duration, Math.max(1e-9, now - t0)) : 1;
     decTick();
+    // requests whose decode had not begun when the window closed: TTFT at least up to the close
+    const tCut = Math.max(now, Math.min(tEnd, ev.size ? ev.peekT() : now));
+    for (const q of pendTtft) st.ttft.push(tCut - q.tReady);
     const tt = Float64Array.from(st.ttft).sort();
     const pct = (p) => (tt.length ? tt[Math.min(tt.length - 1, Math.floor(p * (tt.length - 1)))] : NaN);
     const util = []; for (let s = 0; s < S; s++) { let u = 0; for (const rp of reps) u += rp.busy[s]; util.push(u / (D * reps.length)); }
@@ -1708,6 +1912,17 @@
       // speed follows the context) and the
       // share of the window it carried decodeStages or more sessions
       decodeTpsMean: st.decingArea > 0 ? st.decTokArea / st.decingArea : cfg.decodeTps, ringFullFrac: cfg.decodeStages > 0 ? st.ringFull / D : 0,
+      // output tokens decoded per second in the window (what output revenue bills; outTps counts them at prefill end)
+      outDecTps: st.decTokArea / D,
+      // decode KV (decodeCache): share of the context already cached on the decode side at admission (on device or read
+      // back from its host DRAM / SSD), so not migrated from prefill; tokens migrated per second (not modelled as a
+      // cost); read-backs and the decode galaxies' link shares; pool tokens pinned or reserved by sessions (mean);
+      // mean time from prefill end to the first token, and the share of requests that waited for a global lane
+      decHitRate: st.decCtxTok ? st.decHitTok / st.decCtxTok : NaN, migTps: (st.decCtxTok - st.decHitTok) / D,
+      decHostReadTps: st.decHostTok / D, decSsdReadTps: st.decSsdTok / D,
+      decPcieH2DUtil: st.dH2dBusy / D, decPcieD2HUtil: st.dD2hBusy / D, decSsdUtil: st.dSsdBusy / D,
+      decPoolTokMean: decPool ? st.decPoolArea / D : NaN,
+      decStartDelayMean: st.decStarts ? st.decStartDelay / st.decStarts : 0, decLaneWaitFrac: st.decStarts ? st.decLaneWaited / st.decStarts : 0,
       // share of the window prefill's first stage had nothing to issue (no queued request, no started request with
       // tokens left, stage free), by cause: requests waiting for a decode KV slot, else no demand. sendBlockFrac:
       // share of time a stage is held after its compute by the synchronous handoff to the next stage
@@ -1730,6 +1945,7 @@
     return {
       S: plan.S, mesh: [plan.sp, plan.tp], counts: plan.counts, capTok: plan.capTok, nSlots: plan.nSlots, poolTok: plan.poolTok,
       lanes: plan.lanes, arena: plan.arena, hostTok: plan.hostTok, ssdTok: plan.ssdTok, hostKvGB: +plan.hostBudget.kv.toFixed(1),
+      decLanes: plan.decLanes, decPoolTok: plan.decPoolTok, decHostTok: plan.decHostTok, decSsdTok: plan.decSsdTok,
       errors: plan.errors, kvbL: plan.kvbL,
       weightsGBperChip: plan.stages.map((s) => +s.weightsGBperChip.toFixed(2)),
     };
@@ -1824,7 +2040,8 @@
     const hitTps = p.hitTps != null ? p.hitTps : inTps * p.hitRate;
     const newTok = 3600 * (inTps - hitTps), cachedTok = 3600 * hitTps;
     const newUsd = newTok * pr.inUsdPerM / 1e6, cachedUsd = cachedTok * pr.cachedUsdPerM / 1e6;
-    const outTok = p.outTps != null ? 3600 * p.outTps : NaN;
+    // output tokens decoded in the window (points from before outDecTps: those of the requests completed)
+    const outTok = p.outDecTps != null ? 3600 * p.outDecTps : p.outTps != null ? 3600 * p.outTps : NaN;
     return { inTok: 3600 * inTps, newTok, cachedTok, req: 3600 * p.reqPerS, usd: newUsd + cachedUsd, newUsd, cachedUsd, outTok, outUsd: outTok * pr.outUsdPerM / 1e6 };
   }
 

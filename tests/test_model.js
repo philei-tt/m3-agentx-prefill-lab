@@ -99,11 +99,14 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   assert.ok(Math.abs(h.usd - (h.newTok * inUsdPerM + h.cachedTok * cachedUsdPerM) / 1e6) < 1e-9 * h.usd && h.usd === h.newUsd + h.cachedUsd);
   const o = SIM.hourly(r, { inUsdPerM: 2 * inUsdPerM });
   assert.ok(Math.abs(o.newUsd - 2 * h.newUsd) < 1e-9 * h.newUsd && o.cachedUsd === h.cachedUsd);
-  // output tokens: those of the requests completed in the window; points without outTps have no output revenue
+  // output tokens: outTps = those of the requests completed in the window; output revenue bills the tokens decoded in
+  // the window (outDecTps; about the same in steady state), else outTps; points with neither have no output revenue
   const l = SIM.simulate(TR, cal, Object.assign({ cache: 'slots', chunk: 2048 }, base, { concurrency: 64, logRequests: true }));
   let out = 0; for (const q of l.reqLog) out += TR.req_out[q];
-  const { outTps, ...noOut } = old;
+  const { outTps, outDecTps, ...noOut } = old;
   assert.ok(Math.abs(l.outTps - out / l.duration) < 1e-9 * l.outTps && Number.isNaN(SIM.hourly(noOut).outUsd));
+  assert.ok(Math.abs(h.outTok - 3600 * r.outDecTps) < 1e-6 * h.outTok && Math.abs(SIM.hourly(Object.assign({ outTps }, noOut)).outTok - 3600 * outTps) < 1e-6 * h.outTok);
+  assert.ok(Math.abs(r.outDecTps / r.outTps - 1) < 0.1, `decoded ${r.outDecTps} vs completed ${r.outTps} output tok/s`);
   // margin: input + output revenue minus prefill and decode galaxy-hours
   const e = SIM.economics(r, 8, null, { galaxyUsdPerH: 10, decodeGalaxies: 16 });
   assert.ok(Math.abs(e.margin - (h.usd + h.outUsd - 240)) < 1e-9 && e.cost === 240 && e.decodeUsd === 160 && h.outUsd > 0);
@@ -145,6 +148,33 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
     assert.ok(f.every((x) => x >= 0 && x <= 1) && f[0] + f[1] <= 1 + 1e-9, `starved ${f}`);
   }
   assert.ok(c.pfStarvedSlotFrac > 0 && n.pfStarvedSlotFrac === 0 && n.sendBlockFrac > 0, 'slot limits starve prefill');
+}
+
+// 10d. decode KV layouts (decodeCache). Paged decode with room to spare changes nothing; with little memory requests
+//      wait for it and the pinned + reserved pool never exceeds it. Global lanes cap the sessions decoding at the lane
+//      count and the rest wait for a lane (first token later). Per-stage lanes copy the whole context in every token
+//      once more sessions decode than lanes, which slows every session; with lanes to spare they decode as paged.
+//      Decode-side hits: a stream's next request finds its prefix in its old slot, the pool or the decode tiers.
+{
+  const cfg = Object.assign({ cache: 'pool', chunk: 512, batch: true, budget: 8192 }, base, { concurrency: 128, decodeStages: 16 });
+  const u = SIM.simulate(TR, cal, cfg);
+  const pg = SIM.simulate(TR, cal, Object.assign({ decodeCache: 'paging', decodeSlots: 1000 }, cfg));
+  assert.ok(Math.abs(pg.usefulTps - u.usefulTps) < 1e-9 * u.usefulTps && pg.ttftP90 === u.ttftP90 && pg.decWaitPerS === 0 && pg.decHitRate > 0.5 && pg.decHitRate < 1, `paging ${pg.usefulTps} vs ${u.usefulTps}`);
+  const small = SIM.simulate(TR, cal, Object.assign({ decodeCache: 'paging', decodeSlots: 2 }, cfg));
+  assert.ok(small.decWaitPerS > 0 && small.decPoolTokMean <= 2 * SIM.M3.maxCtx && small.reqPerS < u.reqPerS, `paging 2M: waits ${small.decWaitPerS} pool ${small.decPoolTokMean}`);
+  const g = SIM.simulate(TR, cal, Object.assign({ decodeCache: 'hybrid', decodeLaneScope: 'global', decodeLanes: 4, decodeSlots: 1000 }, cfg));
+  assert.ok(g.decodingMean <= 4 + 1e-9 && g.decLaneWaitFrac > 0 && g.decStartDelayMean > 0 && g.ttftP90 > pg.ttftP90 && g.ringFullFrac === 0, `global lanes: decoding ${g.decodingMean} waits ${g.decLaneWaitFrac}`);
+  const s1 = SIM.simulate(TR, cal, Object.assign({ decodeCache: 'hybrid', decodeLaneScope: 'stage', decodeLanes: 1, decodeSlots: 1000 }, cfg));
+  const sw = SIM.simulate(TR, cal, Object.assign({ decodeCache: 'hybrid', decodeLaneScope: 'stage', decodeLanes: 500, decodeSlots: 1000 }, cfg));
+  assert.ok(s1.decodeTpsMean < 0.5 * pg.decodeTpsMean && s1.outDecTps < pg.outDecTps && Math.abs(sw.usefulTps - pg.usefulTps) < 1e-9 * pg.usefulTps, `stage lanes: ${s1.decodeTpsMean} vs ${pg.decodeTpsMean}`);
+  // copies: 340 B per token per layer per chip, read + written at 50% of DRAM bandwidth
+  const pl = SIM.makePlan(Object.assign({}, cfg, { decodeCache: 'hybrid', decodeSlots: 75, decodeStages: 62 }), cal);
+  assert.ok(Math.abs(pl.decCopyTrip(1e5) - 60 * 1e5 * 340 * 2 / 256e9) < 1e-12 && Math.abs(pl.decLaneCopyS(1e5) - pl.decCopyTrip(1e5) / 60) < 1e-12 && pl.decLanes === 62 && pl.decPoolTok === 13 * SIM.M3.maxCtx);
+  assert.ok(SIM.makePlan(Object.assign({}, cfg, { decodeCache: 'hybrid', decodeStages: 0, decodeSlots: 75 }), cal).errors.some((e) => e.includes('decode pipeline stages')));
+  assert.ok(SIM.makePlan(Object.assign({}, cfg, { decodeCache: 'hybrid', decodeSlots: 62, decodeStages: 62 }), cal).errors.some((e) => e.includes('decode pool')));
+  // fixed slots: a released slot keeps its stream's KV; the decode tiers keep reclaimed ones, so more prefix is found
+  const sl = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 24 }, cfg)), st = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 24, decodeHostTier: true }, cfg));
+  assert.ok(sl.decHitRate > 0 && st.decHitRate > sl.decHitRate && st.decPcieD2HUtil > 0 && sl.decPcieD2HUtil === 0, `slot hits ${sl.decHitRate} / tiers ${st.decHitRate}`);
 }
 
 // 10c. batchChunksPerRequest L: rounds over the queue, up to L chunks per request per round.
