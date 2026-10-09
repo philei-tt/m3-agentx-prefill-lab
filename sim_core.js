@@ -156,7 +156,7 @@
   const WAVE_OPS = new Set(['sparse', 'indexer', 'ring_c']);
   const segRows = (s, c) => (s.nl === undefined ? s.n : s.nl * c.sp); // a segment's tokens as seen by its busiest rank
   // Owner placement: each new token is computed on the SP rank that owns its KV row under the block-cyclic layout
-  // (blocks of blk = C/SP positions, block j on rank j mod SP), as tt-metal #57636 does for a chunk-length pass. Walks
+  // (blocks of blk = C/SP positions, block j on rank j mod SP), as tt-metal #57636 does for a chunk. Walks
   // positions [p, p+m) block by block and returns how many of them fit with every rank at or below cap rows, given
   // `load` (rows already on each rank); apply = add them to `load` (and to `rows`, the segment's own per-rank rows).
   // p, m, blk and cap are multiples of 32.
@@ -396,19 +396,19 @@
     // index_k cache dtype / de-replicated over TP. Today: bf8 x TP replicas (the deployed runner rejects bf16); the
     // #57827 calibration runs used bf16, so the calibration and validation replays pin idxBf16: true
     idxBf16: false, idxDerep: false,
-    // reqPad: what each request's tokens in a pass (its segment) are padded to. 'chunk' (today) = a multiple of the
+    // reqPad: what each request's tokens in a batch are padded to. 'chunk' (today) = a multiple of the
     //   chunk C, which is also the block-cyclic KV slab (C/SP rows per SP rank); 'tile' = whole 32-row tiles on every
     //   SP rank (see placement).
-    // attn: attention calls in a batched pass. 'chunk' = one call per chunk of each request, each re-gathering the
+    // attn: attention calls in a batch. 'chunk' = one call per chunk of each request, each re-gathering the
     //   request's cached prefix (a request that takes several chunks of a chunk-padded batch; today's kernels process
-    //   one chunk at a time); 'request' = one call per request per pass (its prefix gathered once); 'fused' = one call
-    //   for the whole pass. 'chunk' and 'request' differ only with batching and chunk padding.
+    //   one chunk at a time); 'request' = one call per request per batch (its prefix gathered once); 'fused' = one call
+    //   for the whole batch. 'chunk' and 'request' differ only with batching and chunk padding.
     chunk: 5120, reqPad: 'chunk', batch: false, budget: 16384, attn: 'request', policy: 'rr',
-    // placement (tile padding only): where a request's new tokens in a pass are computed. 'even' = contiguous equal
+    // placement (tile padding only): where a request's new tokens in a batch are computed. 'even' = contiguous equal
     //   slices over the SP ranks (padded to 32*SP), then an all-to-all writes each K/V row to the rank that owns it.
     //   'owner' = each token on the rank that owns its KV row (the host rotation chunk padding uses), so no
     //   all-to-all and padding only to 32, but ranks are uneven (balanced when C = 32*SP): every rank is padded to the
-    //   busiest one, and each rank holds at most budget/SP rows (C/SP without batching). Chunk padding always places
+    //   busiest one, and each rank holds at most budget/SP rows. Chunk padding always places
     //   by owner.
     placement: 'even',
     // prefetchKV: overlap the KV-prefix gathers with the layer's non-collective compute
@@ -417,21 +417,21 @@
     //   32*SP granules), as ops do without tracing; false = padded to the full budget, as a traced build with one
     //   fixed shape must be
     batchDynShape: true,
-    // batchChunksPerRequest L (round robin, batched): how a batch's budget is split among the requests waiting for
-    //   it. Rounds over the queue: in each round every request, in queue order, gets up to L more chunks
+    // batchChunksPerRequest L (round robin, batched, chunk padding): how a batch's budget is split among the requests
+    //   waiting for it. Rounds over the queue: in each round every request, in queue order, gets up to L more chunks
     //   (fewer if it needs fewer, or if the budget runs out), until the budget is used or no request needs more.
-    //   0 = no limit: the front request takes as many units as it can fill, then the next (greedy). 1 = one unit
+    //   0 = no limit: the front request takes as many chunks as it can fill, then the next (greedy). 1 = one chunk
     //   per request per round: an even split. A request alone fills the batch whatever L is. Each request makes one
-    //   attention call per batch (reading its cached prefix) for all its units, so many requests per batch cost
-    //   throughput. Units are chunks (chunk padding) or tiles (tile padding); L counts chunks of `chunk`
-    //   tokens. On the pool, a request joins a batch only if it gets a lane.
-    batchChunksPerRequest: 0,
+    //   attention call per batch (reading its cached prefix) for all its chunks, so many requests per batch cost
+    //   throughput. On the pool, a request joins a batch only if it gets a lane.
+    // batchTokensPerRequest: the same for tile padding, in tokens (rounded down to whole tiles, at least one)
+    batchChunksPerRequest: 0, batchTokensPerRequest: 0,
     // batchMaxReqs: the most requests in one batch (0 = no limit beyond the budget and, on fixed pool lanes, the lane
     //   count). With static slots a request holds its slot for the whole pipeline trip, so this bounds the slots in
     //   flight to batchMaxReqs x stages; on fixed pool lanes it sets the derived lane count.
     batchMaxReqs: 0,
     cache: 'slots',        // slots | pool | paging | inf
-    // pool lanes per stage, derived from r = the most requests a batch (one pipeline pass) holds (1 without
+    // pool lanes per stage, derived from r = the most requests a batch holds (1 without
     //   batching, the chunks per batch with chunk padding; every request in a batch needs its own lane)
     //   and b = the buffers of the copy mode (sequential 1, double 2, overlap3 3): per-stage lane table = b x r (a
     //   stage works on one batch at a time); global lane table = stages x r (a lane is held for the whole trip
@@ -569,6 +569,9 @@
     const cfg = Object.assign({}, DEFAULTS, cfgIn);
     const tile = cfg.reqPad === 'tile';
     const [sp, tp] = cfg.mesh; const P = sp * tp; const S = cfg.stages;
+    // tile padding: the chunk is only the KV slab, fixed at 128*SP (MSA needs whole 128-row KV blocks on each rank);
+    // the token budget sizes the batch, with or without batching
+    if (tile) cfg.chunk = 128 * sp;
     const chipsRep = 32 * cfg.galaxies / cfg.replicas;
     const errors = [];
     if (S * P > chipsRep + 1e-9) errors.push(`needs ${S * P} chips per replica, have ${chipsRep}`);
@@ -609,8 +612,8 @@
     const stageOv = (T) => (1 - a) * ov0(T) + a * Math.min(ov0(T), 0.3);
     const embedMs = (1 - a) * pm.embed + a * Math.min(pm.embed, 0.3);
     const actBytes = (T) => 12 * (T / sp) * M3.E * BF16;
-    // largest chunk: the budget when batching with tile padding, whole chunks otherwise
-    const Tchunk = cfg.batch ? (tile ? cfg.budget : Math.max(cfg.budget, cfg.chunk)) : cfg.chunk;
+    // largest batch: the budget with tile padding (batched or not), whole chunks otherwise
+    const Tchunk = tile ? cfg.budget : cfg.batch ? Math.max(cfg.budget, cfg.chunk) : cfg.chunk;
     const Tmax = Tchunk;
     // pool lanes per stage (see DEFAULTS.lanes): buffers x the most requests per batch, or lanesOverride
     const laneBuffers = cfg.copyMode === 'overlap3' ? 3 : cfg.copyMode === 'double' ? 2 : 1;
@@ -693,6 +696,7 @@
     if (!['flat', 'm3'].includes(cfg.decodeCurve)) errors.push(`decodeCurve must be 'flat' or 'm3', got ${cfg.decodeCurve}`);
     if (!(cfg.batchMaxReqs >= 0) || cfg.batchMaxReqs !== Math.floor(cfg.batchMaxReqs)) errors.push('max requests per batch must be a whole number >= 0 (0 = no limit)');
     if (!(cfg.batchChunksPerRequest >= 0) || cfg.batchChunksPerRequest !== Math.floor(cfg.batchChunksPerRequest)) errors.push('chunks per request per round must be a whole number >= 0 (0 = no limit)');
+    if (!(cfg.batchTokensPerRequest >= 0)) errors.push('tokens per request per round must be >= 0 (0 = no limit)');
     // every buffer that must hold a whole request has to fit the largest AgentX request (990,016 tokens)
     if (cfg.cache === 'slots' && cfg.slotLen < MAX_REQ) errors.push(`slots must hold the largest request (${MAX_REQ} tokens)`);
     if (cfg.cache === 'pool' && !cfg.laneArena && cfg.laneLen < MAX_REQ) errors.push(`lanes must hold the largest request (${MAX_REQ} tokens)`);
@@ -712,12 +716,11 @@
     if (!['chunk', 'request', 'fused'].includes(cfg.attn)) errors.push(`attn must be 'chunk', 'request' or 'fused', got ${cfg.attn}`);
     if (!['chunk', 'tile'].includes(cfg.reqPad)) errors.push(`reqPad must be 'chunk' or 'tile', got ${cfg.reqPad}`);
     if (!['even', 'owner'].includes(cfg.placement)) errors.push(`placement must be 'even' or 'owner', got ${cfg.placement}`);
-    if (owner && cfg.chunk % (32 * sp)) errors.push(`owner placement needs whole 32-row KV blocks: chunk ${cfg.chunk} is not a multiple of 32 x SP = ${32 * sp}`);
     return {
       cfg, sp, tp, P, S, counts, stages, eff, lat, layer, stageOv, embedMs, blockMs, hopMs, errors,
       capTok, nSlots, poolTok, lanes, arena, hostTok, ssdTok, hostBudget, kvbL, kvbHost, gran, laneCap, owner, maxR,
-      // owner placement: KV block per rank, and the most rows a rank holds per pass (whole 32-row tiles)
-      blk: cfg.chunk / sp, rankCap: cfg.batch ? Math.floor(cfg.budget / sp / 32) * 32 : cfg.chunk / sp,
+      // owner placement: KV block per rank, and the most rows a rank holds per batch (whole 32-row tiles)
+      blk: cfg.chunk / sp, rankCap: Math.floor(cfg.budget / sp / 32) * 32,
       // time (ms) to copy `tok` tokens of KV between pool and lane on the stage holding the most layers
       copyMs: (tok) => tok * Math.max(...stages.map((x) => x.n)) * kvbL / P * 2 / (HW.dram * 0.5) * 1e3,
       // per replica: PCIe per direction, SSD read / write
@@ -1306,7 +1309,7 @@
       const segs = []; let T = 0; const C = cfg.chunk;
       const fixed = cfg.reqPad === 'chunk';
       // chunk token budget: batching with tile padding packs up to the budget; chunk padding packs whole chunks
-      const budget = cfg.batch ? (fixed ? Math.max(cfg.budget, C) : cfg.budget) : C;
+      const budget = !fixed ? cfg.budget : cfg.batch ? Math.max(cfg.budget, C) : C;
       // owner placement: rows per SP rank in this chunk; a rank holds at most plan.rankCap
       const own = plan.owner, load = own ? new Array(plan.sp).fill(0) : null;
       const room = () => segs.length < plan.maxR && (fixed ? budget - T >= C : own ? load.some((l) => plan.rankCap - l >= 32) : budget - T >= plan.gran); // space for one more segment
@@ -1318,7 +1321,7 @@
       const take = (q, maxTok) => {
         let n, npad;
         if (fixed) { const units = Math.floor(maxTok / C); if (units < 1) return false; n = Math.min(q.rem, units * C); npad = Math.ceil(n / C) * C; }
-        else { const cap = cfg.batch ? maxTok : Math.min(maxTok, C); if (cap < plan.gran) return false; n = Math.min(q.rem, cap - (cap % plan.gran)); if (n <= 0) return false; npad = Math.ceil(n / plan.gran) * plan.gran; }
+        else { const cap = maxTok; if (cap < plan.gran) return false; n = Math.min(q.rem, cap - (cap % plan.gran)); if (n <= 0) return false; npad = Math.ceil(n / plan.gran) * plan.gran; }
         let rows;
         if (own) { // trim to what the ranks it lands on can still hold
           const m = ownerWalk(load, q.pos, npad, plan.rankCap, plan.blk, plan.sp, false);
@@ -1346,7 +1349,8 @@
         const again = [];
         if (cfg.batch) { // rounds over the queue, up to L units per request per round (batchChunksPerRequest)
           const unit = fixed ? C : plan.gran;
-          const L = cfg.batchChunksPerRequest > 0 ? Math.max(1, Math.floor(cfg.batchChunksPerRequest * C / unit)) : Infinity;
+          const L = fixed ? (cfg.batchChunksPerRequest > 0 ? cfg.batchChunksPerRequest : Infinity)
+            : cfg.batchTokensPerRequest > 0 ? Math.max(1, Math.floor(cfg.batchTokensPerRequest / unit)) : Infinity;
           const cand = [], need = [], alloc = [];
           // owner placement: the budget is per rank (sl = rows allocated so far on each rank), not a token total
           let left = own ? Infinity : Math.floor(budget / unit);

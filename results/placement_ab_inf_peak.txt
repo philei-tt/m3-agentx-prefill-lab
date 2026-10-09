@@ -1,34 +1,26 @@
 
-== g4_k0 (4 galaxies, today's kernels), 16x[4,2], peak useful k tok/s, infinite cache
-  batched B=16k, seq: fixed C=128 71.2 (pad 3.3%, 4.2 req/chunk) | even C=5120 70.8 (pad 3.5%, 4.2 req/chunk)
-    owner: C=128 69.4 (pad 2.9%, 4.5 req/chunk) | C=512 65.3 (pad 3.9%, 4.9 req/chunk) | C=2048 61.0 (pad 8.1%, 4.9 req/chunk) | C=5120 50.0 (pad 14.5%, 5.0 req/chunk)
-  batched B=16k, fused: fixed C=128 76.0 (pad 2.3%, 4.3 req/chunk) | even C=5120 75.7 (pad 1.9%, 4.4 req/chunk)
-    owner: C=128 75.1 (pad 2.3%, 4.5 req/chunk) | C=512 72.7 (pad 3.2%, 4.9 req/chunk) | C=2048 69.3 (pad 6.7%, 5.0 req/chunk) | C=5120 59.2 (pad 13.2%, 5.1 req/chunk)
-  unbatched C=2048: fixed 43.9 (pad 19.3%, 1.0 req/chunk) | even 44.7 (pad 3.5%, 1.0 req/chunk) | owner 42.8 (pad 15.6%, 1.0 req/chunk)
-  unbatched C=5120: fixed 43.9 (pad 43.0%, 1.0 req/chunk) | even 58.2 (pad 1.1%, 1.0 req/chunk) | owner 47.6 (pad 28.5%, 1.0 req/chunk)
+== g4_k0 (4 galaxies, today's kernels), 16x[4,2], peak useful k tok/s, infinite cache, KV slab 128·SP = 512
+  batched B=16k, request: chunk C=512 70.5 (pad 6.5%, 4.1 req/batch) | tile even 70.8 (pad 3.5%, 4.2 req/batch) | tile owner 65.3 (pad 3.9%, 4.9 req/batch)
+  batched B=16k, fused: chunk C=512 74.5 (pad 5.7%, 4.2 req/batch) | tile even 75.7 (pad 1.9%, 4.4 req/batch) | tile owner 72.7 (pad 3.2%, 4.9 req/batch)
+  unbatched 2048: chunk 43.9 (pad 19.3%, 1.0 req/batch) | tile even 44.7 (pad 3.5%, 1.0 req/batch) | tile owner 44.5 (pad 6.5%, 1.0 req/batch)
+  unbatched 5120: chunk 43.9 (pad 43.0%, 1.0 req/batch) | tile even 58.2 (pad 1.1%, 1.0 req/batch) | tile owner 57.5 (pad 4.2%, 1.0 req/batch)
 
-== g4_k1 (4 galaxies, roofline kernels), 8x[4,4], peak useful k tok/s, infinite cache
-  batched B=64k, seq: fixed C=128 251.4 (pad 0.7%, 14.3 req/chunk) | even C=5120 248.7 (pad 0.8%, 14.4 req/chunk)
-    owner: C=128 252.1 (pad 0.1%, 14.8 req/chunk) | C=512 249.4 (pad 0.9%, 15.6 req/chunk) | C=2048 242.8 (pad 3.2%, 15.9 req/chunk) | C=5120 222.6 (pad 8.4%, 14.5 req/chunk)
-  batched B=64k, fused: fixed C=128 255.3 (pad 0.7%, 13.6 req/chunk) | even C=5120 254.7 (pad 0.7%, 13.7 req/chunk)
-    owner: C=128 255.9 (pad 0.2%, 15.3 req/chunk) | C=512 254.7 (pad 0.9%, 14.8 req/chunk) | C=2048 249.2 (pad 3.4%, 15.2 req/chunk) | C=5120 239.8 (pad 8.2%, 14.3 req/chunk)
-  unbatched C=2048: fixed 103.2 (pad 20.0%, 1.0 req/chunk) | even 107.2 (pad 0.8%, 1.0 req/chunk) | owner 103.9 (pad 13.7%, 1.0 req/chunk)
-  unbatched C=5120: fixed 119.5 (pad 42.6%, 1.0 req/chunk) | even 147.2 (pad 0.7%, 1.0 req/chunk) | owner 126.7 (pad 28.8%, 1.0 req/chunk)
+== g4_k1 (4 galaxies, roofline kernels), 8x[4,4], peak useful k tok/s, infinite cache, KV slab 128·SP = 512
+  batched B=64k, request: chunk C=512 244.9 (pad 4.8%, 13.8 req/batch) | tile even 248.7 (pad 0.8%, 14.4 req/batch) | tile owner 249.4 (pad 0.9%, 15.6 req/batch)
+  batched B=64k, fused: chunk C=512 248.3 (pad 4.9%, 13.8 req/batch) | tile even 254.7 (pad 0.7%, 13.7 req/batch) | tile owner 254.7 (pad 0.9%, 14.8 req/batch)
+  unbatched 2048: chunk 103.2 (pad 20.0%, 1.0 req/batch) | tile even 107.2 (pad 0.8%, 1.0 req/batch) | tile owner 107.1 (pad 3.8%, 1.0 req/batch)
+  unbatched 5120: chunk 119.5 (pad 42.6%, 1.0 req/batch) | tile even 147.2 (pad 0.7%, 1.0 req/batch) | tile owner 146.0 (pad 3.7%, 1.0 req/batch)
 
-== g8_k0 (8 galaxies, today's kernels), 32x[4,2], peak useful k tok/s, infinite cache
-  batched B=64k, seq: fixed C=128 152.5 (pad 1.0%, 13.9 req/chunk) | even C=5120 151.7 (pad 1.2%, 13.8 req/chunk)
-    owner: C=128 149.6 (pad 0.8%, 14.2 req/chunk) | C=512 144.7 (pad 1.6%, 14.8 req/chunk) | C=2048 139.8 (pad 3.6%, 14.9 req/chunk) | C=5120 117.9 (pad 8.4%, 13.9 req/chunk)
-  batched B=64k, fused: fixed C=128 167.6 (pad 1.2%, 14.1 req/chunk) | even C=5120 167.5 (pad 1.2%, 14.1 req/chunk)
-    owner: C=128 166.8 (pad 0.7%, 14.5 req/chunk) | C=512 163.4 (pad 1.2%, 15.1 req/chunk) | C=2048 159.8 (pad 3.7%, 14.9 req/chunk) | C=5120 145.1 (pad 8.5%, 14.3 req/chunk)
-  unbatched C=2048: fixed 87.0 (pad 19.9%, 1.0 req/chunk) | even 89.9 (pad 2.1%, 1.0 req/chunk) | owner 86.7 (pad 13.7%, 1.0 req/chunk)
-  unbatched C=5120: fixed 87.5 (pad 42.2%, 1.0 req/chunk) | even 116.8 (pad 0.7%, 1.0 req/chunk) | owner 95.9 (pad 28.8%, 1.0 req/chunk)
+== g8_k0 (8 galaxies, today's kernels), 32x[4,2], peak useful k tok/s, infinite cache, KV slab 128·SP = 512
+  batched B=64k, request: chunk C=512 150.4 (pad 4.9%, 13.2 req/batch) | tile even 151.7 (pad 1.2%, 13.8 req/batch) | tile owner 144.7 (pad 1.6%, 14.8 req/batch)
+  batched B=64k, fused: chunk C=512 164.7 (pad 4.8%, 13.6 req/batch) | tile even 167.5 (pad 1.2%, 14.1 req/batch) | tile owner 163.4 (pad 1.2%, 15.1 req/batch)
+  unbatched 2048: chunk 87.0 (pad 19.9%, 1.0 req/batch) | tile even 89.9 (pad 2.1%, 1.0 req/batch) | tile owner 90.3 (pad 3.7%, 1.0 req/batch)
+  unbatched 5120: chunk 87.5 (pad 42.2%, 1.0 req/batch) | tile even 116.8 (pad 0.7%, 1.0 req/batch) | tile owner 115.7 (pad 3.8%, 1.0 req/batch)
 
-== g8_k1 (8 galaxies, roofline kernels), 32x[2,4], peak useful k tok/s, infinite cache
-  batched B=64k, seq: fixed C=128 341.8 (pad 0.6%, 14.1 req/chunk) | even C=5120 343.5 (pad 0.0%, 14.0 req/chunk)
-    owner: C=128 320.8 (pad 0.1%, 18.8 req/chunk) | C=512 316.1 (pad 0.3%, 19.6 req/chunk) | C=2048 297.6 (pad 1.2%, 19.0 req/chunk) | C=5120 272.3 (pad 2.9%, 17.6 req/chunk)
-  batched B=64k, fused: fixed C=128 385.8 (pad 0.7%, 14.4 req/chunk) | even C=5120 387.6 (pad 0.0%, 14.6 req/chunk)
-    owner: C=128 385.5 (pad 0.1%, 20.9 req/chunk) | C=512 384.3 (pad 0.3%, 21.2 req/chunk) | C=2048 375.4 (pad 1.2%, 20.3 req/chunk) | C=5120 361.1 (pad 3.1%, 18.4 req/chunk)
-  unbatched C=2048: fixed 219.2 (pad 18.1%, 1.0 req/chunk) | even 235.7 (pad 0.0%, 1.0 req/chunk) | owner 231.4 (pad 6.6%, 1.0 req/chunk)
-  unbatched C=5120: fixed 190.1 (pad 38.2%, 1.0 req/chunk) | even 296.4 (pad 0.0%, 1.0 req/chunk) | owner 265.5 (pad 14.6%, 1.0 req/chunk)
+== g8_k1 (8 galaxies, roofline kernels), 32x[2,4], peak useful k tok/s, infinite cache, KV slab 128·SP = 256
+  batched B=64k, request: chunk C=256 335.6 (pad 2.1%, 14.1 req/batch) | tile even 343.5 (pad 0.0%, 14.0 req/batch) | tile owner 319.6 (pad 0.2%, 20.5 req/batch)
+  batched B=64k, fused: chunk C=256 379.3 (pad 2.1%, 14.0 req/batch) | tile even 387.6 (pad 0.0%, 14.6 req/batch) | tile owner 386.1 (pad 0.2%, 21.2 req/batch)
+  unbatched 2048: chunk 219.2 (pad 18.1%, 1.0 req/batch) | tile even 235.7 (pad 0.0%, 1.0 req/batch) | tile owner 237.0 (pad 1.0%, 1.0 req/batch)
+  unbatched 5120: chunk 190.1 (pad 38.2%, 1.0 req/batch) | tile even 296.4 (pad 0.0%, 1.0 req/batch) | tile owner 295.8 (pad 1.0%, 1.0 req/batch)
 
-161 s
+130 s

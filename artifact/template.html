@@ -210,12 +210,12 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
   <fieldset>
     <legend>Chunking &amp; batching</legend>
     <div class="row"><label for="reqPad">Request padding</label><select id="reqPad"><option value="chunk">chunk (C tokens)</option><option value="tile">tile (32·SP tokens)</option></select></div>
-    <div class="hint">What each request's tokens in a pass are padded to. Chunk (today): a multiple of the chunk size. Tile: a multiple of 32·SP, one 32-row tile per SP rank (32 with owner placement). Either way the KV cache stays block-cyclic with chunk/SP rows per rank.</div>
+    <div class="hint">What each request's tokens in a batch are padded to. Chunk (today): a multiple of the chunk size. Tile: a multiple of 32·SP, one 32-row tile per SP rank (32 with owner placement); the token budget sizes the batch, with or without batching. Either way the KV cache is block-cyclic with chunk/SP rows per rank.</div>
     <div class="row"><label for="placement">Token placement</label><select id="placement"><option value="even">even split over SP (a2a KV write)</option><option value="owner">owner rank (no a2a, uneven ranks)</option></select></div>
-    <div class="hint">Tile padding only. Even split: each request's tokens in a pass are padded to 32·SP and split evenly, then an all-to-all writes each K/V row to the rank that owns it. Owner rank: each token is computed on the rank that owns its KV row (blocks of chunk/SP), so segments are padded to 32 and there is no all-to-all, but every rank is padded to the busiest one.</div>
+    <div class="hint">Tile padding only. Even split: each request's tokens in a batch are padded to 32·SP and split evenly, then an all-to-all writes each K/V row to the rank that owns it. Owner rank: each token is computed on the rank that owns its KV row (blocks of chunk/SP), so segments are padded to 32 and there is no all-to-all, but every rank is padded to the busiest one.</div>
     <div class="row"><label for="chunk">Chunk size (KV slab)</label><select id="chunk"><option>128</option><option>256</option><option>512</option><option>1024</option><option>2048</option><option>4096</option><option>5120</option><option>8192</option></select></div>
-    <div class="hint" id="chunkHint" hidden>Does not change the cost here: with batching, tile padding and an even split, the token budget sets the pass size and the all-to-all does not depend on the slab. The KV cache still has chunk/SP rows per rank.</div>
-    <div class="row check"><input id="batch" type="checkbox"><label for="batch">Batch several requests per pipeline pass</label></div>
+    <div class="hint" id="chunkHint" hidden>Fixed at 128·SP with tile padding: MSA needs whole 128-row KV blocks on each SP rank.</div>
+    <div class="row check"><input id="batch" type="checkbox"><label for="batch">Batch several requests</label></div>
     <div class="hint" id="batchHint" hidden>With static 1M slots a request holds its slot for the whole pipeline trip, so requests per batch × stages must fit in the slots; otherwise the plan reports out of memory.</div>
     <div class="row"><label for="budget">Token budget</label><select id="budget"><option>4096</option><option>5120</option><option>8192</option><option>16384</option><option>32768</option></select></div>
     <div class="row"><label for="batchMaxReqs">Max requests per batch (0 = no limit)</label><input id="batchMaxReqs" type="number" min="0" step="1"></div>
@@ -227,9 +227,10 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row check"><input id="batchDynShape" type="checkbox"><label for="batchDynShape">Dynamic batch size (no padding to the budget)</label></div>
     <div class="hint">On: a partly filled batch runs at its actual size (untraced). Off: it is padded to the full budget, as tracing requires.</div>
     <div class="row"><label for="batchChunksPerRequest">Chunks per request per round (0 = no limit)</label><input id="batchChunksPerRequest" type="number" min="0" step="1"></div>
-    <div class="hint">Round robin: a batch is filled in rounds over the queue, each request getting up to this many more chunks per round, until the budget is used. 0: the front request takes all it can (greedy); 1: an even split. A request alone fills the batch either way. Every request in a batch reads its own cached prefix, so many requests per batch cost throughput.</div>
+    <div class="row"><label for="batchTokensPerRequest">Tokens per request per round (0 = no limit)</label><input id="batchTokensPerRequest" type="number" min="0" step="32"></div>
+    <div class="hint">Round robin: a batch is filled in rounds over the queue, each request getting up to this many more chunks (chunk padding) or tokens (tile padding, rounded down to whole tiles) per round, until the budget is used. 0: the front request takes all it can (greedy); 1 chunk or 1 tile: an even split. A request alone fills the batch either way. Every request in a batch reads its own cached prefix, so many requests per batch cost throughput.</div>
     <div class="row"><label for="attn">Attention</label><select id="attn"><option value="chunk">sequential per chunk</option><option value="request">sequential per request</option><option value="fused">fused multi-request</option></select></div>
-    <div class="hint">Attention calls in a batched pass. Per chunk: a request that takes several chunks of the pass makes one call per chunk, each re-gathering its cached prefix (chunk padding only; with tile padding a request's tokens in a pass are one run, so this is per request). Per request: one call per request, prefix gathered once. Fused: one call for the whole pass.</div>
+    <div class="hint">Attention calls in a batch. Per chunk: a request that takes several chunks of the batch makes one call per chunk, each re-gathering its cached prefix (chunk padding only; with tile padding a request's tokens in a batch are contiguous, so this is per request). Per request: one call per request, prefix gathered once. Fused: one call for the whole batch.</div>
     <div class="row check"><input id="prefetchKV" type="checkbox"><label for="prefetchKV">Prefetch KV-prefix gathers (overlap with compute)</label></div>
     <div class="row"><label for="policy">Scheduling</label><select id="policy"><option value="rr">round robin</option><option value="rtc">run to completion, oldest first</option><option value="srpt">run to completion, shortest first (30 s aging)</option></select></div>
     <div class="hint">Round robin (tt-d-gen): a request enqueues at most one token budget (one chunk without batching) per turn, then goes to the back of the queue, so a request with a long sequence cannot starve shorter ones.<br>Run to completion: a request keeps enqueuing token budgets until its whole sequence is processed, which can starve shorter requests waiting in the queue.</div>
@@ -405,7 +406,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li><b>C:</b> chunk 2048, same split as B.</li>
         </ul>
         Each run measures a (new tokens × cached tokens) matrix, loaded and idle. The preset <span class="mono">today-C</span> is run C.</li>
-      <li><b>Features under consideration</b> (defined in "Features" below): batching several requests per pipeline pass; slot lanes plus a paged KV pool; request padding to 32·SP with an all-to-all KV write; plus a few more the study adds (KV offload tiers, index-cache layout, async stage handoff, and others).</li>
+      <li><b>Features under consideration</b> (defined in "Features" below): batching several requests; slot lanes plus a paged KV pool; request padding to 32·SP with an all-to-all KV write; plus a few more the study adds (KV offload tiers, index-cache layout, async stage handoff, and others).</li>
     </ul>
 
     <h2 id="m-metric">The metric: goodput</h2>
@@ -561,21 +562,21 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <h2 id="m-pipe">Pipeline and scheduling</h2>
     <ul>
       <li><b>Stages and chunks.</b> Stages process chunks in order. A chunk's time on a stage is the sum of its layers' costs plus overhead; then the blocking send runs; then the hop latency applies before the next stage can start it. At most 2S+4 chunks are in flight.</li>
-      <li><b>Chunk padding</b> (today). One request per chunk, padded to the chunk size. The chunk is also the KV block-cyclic slab, and the host rotates a pass's tokens so that each SP rank computes the rows it owns (tt-metal #57636): no KV traffic, and a pass may start at any 32-token boundary.</li>
-      <li><b>Tile padding.</b> Passes of any size. Each request's tokens in a pass are padded only to whole 32-row tiles per SP rank, and the token placement decides where its tokens are computed:
+      <li><b>Chunk padding</b> (today). One request per chunk, padded to the chunk size. The chunk is also the KV block-cyclic slab, and the host rotates a chunk's tokens so that each SP rank computes the rows it owns (tt-metal #57636): no KV traffic, and a chunk may start at any 32-token boundary.</li>
+      <li><b>Tile padding.</b> Batches of any size. Each request's tokens in a batch are padded only to whole 32-row tiles per SP rank, and the token placement decides where its tokens are computed:
         <ul>
           <li><b>Even split</b>: padded to 32·SP and split evenly; each layer pays an all-to-all that writes the new K/V rows to the SP rank that owns them.</li>
-          <li><b>Owner rank</b>: each token on the rank that owns its KV row; padded to 32 and no all-to-all, but every rank is padded to the busiest one. Balanced when chunk = 32·SP (each rank then owns one 32-row block per 32·SP tokens); close to the even split only with small chunks.</li>
+          <li><b>Owner rank</b>: each token on the rank that owns its KV row; padded to 32 and no all-to-all, but every rank is padded to the busiest one. With the KV slab at 128·SP, 0–4% behind the even split with fused attention.</li>
         </ul>
       </li>
       <li><b>Batching.</b> Several requests share a chunk, up to the token budget. Projections and MoE run on the whole batch; that is where the gain comes from, since expert weights are read once for more tokens.
         <ul>
-          <li><b>Sequential per request</b> (default): one attention call per request in the pass.</li>
-          <li><b>Fused</b>: one call for the whole pass.</li>
+          <li><b>Sequential per request</b> (default): one attention call per request in the batch.</li>
+          <li><b>Fused</b>: one call for the whole batch.</li>
           <li>Both include a penalty for short segments that leave some of the 110 cores idle.</li>
         </ul>
         With chunk padding, batching packs whole chunks: a request takes a whole number of chunks.</li>
-      <li><b>Sequential per chunk vs per request</b> (chunk padding only). A request that takes several chunks of a batched pass (a cold prefill) makes one attention call over all of them per request, so its cached prefix is gathered once; per chunk, each chunk is its own call and re-gathers the prefix (today's kernels process one chunk at a time).
+      <li><b>Sequential per chunk vs per request</b> (chunk padding only). A request that takes several chunks of a batch (a cold prefill) makes one attention call over all of them per request, so its cached prefix is gathered once; per chunk, each chunk is its own call and re-gathers the prefix (today's kernels process one chunk at a time).
         <ul>
           <li>Per request, smaller chunks only cut padding: chunk 128 (32·SP) matches tile padding, and is about 3% better than 1024.</li>
           <li>Per chunk, small chunks collapse. Chunk 2048 becomes the best, and it is 20–26% below the per-request best (within 1% at 4 galaxies with roofline kernels, where SSD reads bind).</li>
@@ -652,7 +653,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li>useful tok/s;</li>
           <li>p90 TTFT on a log scale, with the SLO line;</li>
           <li>hit rate;</li>
-          <li>requests per batch (batch fill). A batch is one pass through the pipeline: without batching it carries one request's chunk, so the value is 1; with batching it holds up to the token budget from several requests. It stays near 1 on a lightly loaded pipeline and climbs only as the bottleneck stage nears saturation. At the same concurrency, a smaller cache shows fuller batches because re-prefill makes each request longer.</li>
+          <li>requests per batch (batch fill). Without batching a batch carries one request's chunk, so the value is 1; with batching it holds up to the token budget from several requests. It stays near 1 on a lightly loaded pipeline and climbs only as the bottleneck stage nears saturation. At the same concurrency, a smaller cache shows fuller batches because re-prefill makes each request longer.</li>
         </ul>
         "Pin as comparison" keeps a run as a third line.</li>
       <li><b>Net Revenue.</b> Per hour, for the requests completed: input-token revenue + output-token revenue − galaxy cost.
@@ -781,9 +782,9 @@ function mkWorker() {
 }
 
 // ---------------------------------------------------------------- form <-> cfg
-const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'reqPad', 'placement', 'chunk', 'batch', 'budget', 'batchMaxReqs', 'batchDynShape', 'batchChunksPerRequest', 'attn', 'prefetchKV', 'policy',
+const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'reqPad', 'placement', 'chunk', 'batch', 'budget', 'batchMaxReqs', 'batchDynShape', 'batchChunksPerRequest', 'batchTokensPerRequest', 'attn', 'prefetchKV', 'policy',
   'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeStages', 'decodeCurve', 'duration', 'seed'];
-const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchMaxReqs', 'batchChunksPerRequest', 'lanes', 'arenaTokens', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeStages', 'duration', 'seed']);
+const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchMaxReqs', 'batchChunksPerRequest', 'batchTokensPerRequest', 'lanes', 'arenaTokens', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeStages', 'duration', 'seed']);
 function setForm(cfg) {
   const c = Object.assign({}, SIM.DEFAULTS, cfg);
   for (const f of FIELDS) {
@@ -821,7 +822,13 @@ function syncUi() {
   $('lanes').disabled = !pool || $('laneArena').checked;
   // every cache can batch; static slots need requests per batch x stages slots (makePlan reports out of memory)
   $('batch').disabled = false; $('batchHint').hidden = $('cache').value !== 'slots';
-  $('budget').disabled = !$('batch').checked; $('batchMaxReqs').disabled = !$('batch').checked; $('attn').disabled = !$('batch').checked; $('batchDynShape').disabled = !$('batch').checked; $('batchChunksPerRequest').disabled = !$('batch').checked || $('policy').value !== 'rr';
+  // tile padding: the token budget sizes the batch with or without batching
+  $('budget').disabled = !$('batch').checked && $('reqPad').value !== 'tile'; $('batchMaxReqs').disabled = !$('batch').checked; $('attn').disabled = !$('batch').checked; $('batchDynShape').disabled = !$('batch').checked; const tiled = $('reqPad').value === 'tile';
+  $('batchChunksPerRequest').disabled = !$('batch').checked || $('policy').value !== 'rr' || tiled;
+  $('batchTokensPerRequest').disabled = !$('batch').checked || $('policy').value !== 'rr' || !tiled;
+  // only the per-round limit that matches the padding is shown: chunks with chunk padding, tokens with tile padding
+  $('batchChunksPerRequest').closest('.row').style.display = tiled ? 'none' : '';
+  $('batchTokensPerRequest').closest('.row').style.display = tiled ? '' : 'none';
   // pool lanes per stage (as makePlan): derived = copy-mode buffers x requests per batch; the override is for batching
   // on the pool only, and tile-padded batching (no chunks) must override unless max requests per batch is set
   const fixedLanes = pool && !$('laneArena').checked, batched = $('batch').checked, maxR = Number($('batchMaxReqs').value) || 0;
@@ -840,16 +847,15 @@ function syncUi() {
     const r = !batched ? 1 : $('reqPad').value === 'tile' ? maxR : Math.min(maxR > 0 ? maxR : Infinity, Math.max(1, Math.floor(Math.max(budget, chunk) / chunk)));
     $('lanes').value = String($('laneScope').value === 'stage' ? buffers * r : Number($('stages').value) * r);
   }
-  // tile-padded batching packs to the budget; the chunk size only sets the per-request cap, if there is one, so the
-  // chunk does not change the cost (owner placement still needs it: it sets the KV block per rank). It stays editable:
-  // it is still the KV slab
-  const chunkUnused = $('batch').checked && $('reqPad').value === 'tile' && $('placement').value !== 'owner' && !(Number($('batchChunksPerRequest').value) > 0);
+  // tile padding: the chunk is only the KV slab, fixed at 128*SP (MSA needs 128-row KV blocks per rank), as makePlan
+  const slabFixed = $('reqPad').value === 'tile';
+  if (slabFixed) $('chunk').value = String(128 * Number($('mesh').value.split('x')[0]));
   $('placement').disabled = $('reqPad').value !== 'tile';
-  // tile padding has no chunks: a request's tokens in a pass are one run, so per chunk = per request
+  // tile padding has no chunks: a request's tokens in a batch are contiguous, so per chunk = per request
   const chunkOpt = $('attn').querySelector('option[value="chunk"]');
   chunkOpt.disabled = $('reqPad').value === 'tile';
   if (chunkOpt.disabled && $('attn').value === 'chunk') $('attn').value = 'request';
-  $('chunkHint').hidden = !chunkUnused;
+  $('chunk').disabled = slabFixed; $('chunkHint').hidden = !slabFixed;
 }
 // keep the pipeline valid when the hardware changes: fill each replica with stages, and drop a custom split
 // whose length no longer matches the stage count
@@ -1020,7 +1026,7 @@ function drawTriple(ids, series, slo, pick) {
   lineChart($(ids[0]), series.map((s) => ({ name: s.name, color: s.color, points: s.pts.map((p) => ({ x: p.conc, y: p.usefulTps })) })), Object.assign({ yFmt: fmtK }, pk));
   lineChart($(ids[1]), series.map((s) => ({ name: s.name, color: s.color, points: s.pts.map((p) => ({ x: p.conc, y: p.ttftP90 })) })), Object.assign({ yFmt: fmtS, yLog: true, ref: slo }, pk));
   lineChart($(ids[2]), series.map((s) => ({ name: s.name, color: s.color, points: s.pts.map((p) => ({ x: p.conc, y: p.hitRate })) })), Object.assign({ yFmt: (v) => pct(v), yMin: 0, yMax: 1 }, pk));
-  // requests per batch (one pipeline pass): batch fill, grows only as the bottleneck stage nears saturation
+  // requests per batch: batch fill, grows only as the bottleneck stage nears saturation
   if (ids[3]) lineChart($(ids[3]), series.map((s) => ({ name: s.name, color: s.color, points: s.pts.filter((p) => p.avgSegsPerChunk != null).map((p) => ({ x: p.conc, y: p.avgSegsPerChunk })) })), Object.assign({ yFmt: (v) => v.toFixed(1), yMin: 0 }, pk));
 }
 

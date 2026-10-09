@@ -220,7 +220,8 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
     assert.strictEqual(po.layer(kind, 2048, segs), pf.layer(kind, 2048, segs), kind);
     assert.ok(pe.layer(kind, 2048, segs) > po.layer(kind, 2048, segs), `${kind}: even split pays the all-to-all`);
   }
-  assert.ok(plan({ reqPad: 'tile', placement: 'owner', chunk: 96 }).errors.some((e) => e.includes('owner placement')));
+  // tile padding fixes the KV slab at 128*SP whatever chunk is asked for (MSA needs 128-row KV blocks per rank)
+  assert.strictEqual(plan({ reqPad: 'tile', chunk: 5120 }).cfg.chunk, 128 * 2);
   // replay: padding (rank imbalance included) between the even split (none) and chunk padding
   const pad = (cfg) => SIM.simulate(TR, cal, Object.assign({ cache: 'inf' }, base, { concurrency: 64 }, cfg)).padFrac;
   const [pF, pE, pO] = [pad({ reqPad: 'chunk' }), pad({ reqPad: 'tile' }), pad({ reqPad: 'tile', placement: 'owner' })];

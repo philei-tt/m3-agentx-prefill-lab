@@ -3,8 +3,8 @@
 // attention-side optimisations.
 // On each scenario's best feature stack and topology from results/study.json:
 //   chunk : chunk C in {128..5120} x batch budget in {off, 4k..32k} (a request takes whole chunks)
-//   tile  : budget in {4k..32k} (segments padded to 32*SP only), attention 'request' or 'fused' (one call per pass)
-//   modes : base     = attn 'request' (one attention call / prefix gather per request per pass), no prefetch
+//   tile  : budget in {4k..32k} (segments padded to 32*SP only), attention 'request' or 'fused' (one call per batch)
+//   modes : base     = attn 'request' (one attention call / prefix gather per request per batch), no prefetch
 //           nodedup  = one attention call and prefix gather per chunk (a cold prefill split into many chunks
 //                      re-gathers its prefix for every unit)
 //           prefetch = KV-prefix gathers overlap the layer's non-collective compute
