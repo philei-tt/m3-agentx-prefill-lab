@@ -60,6 +60,13 @@ aside.rail { background: var(--surface); border: 1px solid var(--line); border-r
 @media (max-width: 900px) { aside.rail { position: static; max-height: none; } }
 fieldset { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 legend { font-family: var(--f-mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3); padding: 0; margin-bottom: 4px; }
+/* a settings group that opens on its title: the title looks like a legend, with a caret */
+details.reveal > summary { font-family: var(--f-mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3); cursor: pointer; list-style: none; user-select: none; }
+details.reveal > summary::-webkit-details-marker { display: none; }
+details.reveal > summary::after { content: ' ▾'; }
+details.reveal[open] > summary::after { content: ' ▴'; }
+details.reveal > summary:hover { color: var(--ink-2); }
+details.reveal > .reveal-body { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 .row { display: grid; grid-template-columns: minmax(0, 1fr) 130px; align-items: center; gap: 8px; }
 .row label { color: var(--ink-2); font-size: 13px; }
 .row.check { grid-template-columns: 18px minmax(0, 1fr); }
@@ -253,14 +260,18 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row check"><input id="compareInf" type="checkbox" checked><label for="compareInf">Also run with an infinite cache</label></div>
   </fieldset>
   <fieldset>
-    <legend>Revenue &amp; cost</legend>
-    <div class="row"><label for="priceIn">Input $ / M tokens</label><input id="priceIn" type="number" min="0" step="0.01"></div>
-    <div class="row"><label for="priceCached">Cached input $ / M tokens</label><input id="priceCached" type="number" min="0" step="0.01"></div>
-    <div class="row"><label for="priceOut">Output $ / M tokens</label><input id="priceOut" type="number" min="0" step="0.01"></div>
-    <div class="hint">Defaults: MiniMax's own M3 price on OpenRouter (Oct 2026). New tokens (cache misses, re-prefill included) bill at the input price, prefix hits at the cached price. The Net Revenue tile nets input and output revenue against the galaxy cost of prefill and decode.</div>
-    <div class="row"><label for="galaxyUsd">$ / galaxy-hour</label><input id="galaxyUsd" type="number" min="0" step="0.5"></div>
-    <div class="row"><label for="decodeGalaxies">Decode galaxies</label><input id="decodeGalaxies" type="number" min="0" step="1"></div>
-    <div class="hint">One M3 decode instance: 64 sessions on 16 galaxies; set Decode KV slots to match. Margin = input + output revenue − (prefill + decode galaxies) × $/galaxy-hour. Changes apply without re-running.</div>
+    <details class="reveal">
+      <summary>Revenue &amp; cost</summary>
+      <div class="reveal-body">
+        <div class="row"><label for="priceIn">Input $ / M tokens</label><input id="priceIn" type="number" min="0" step="0.01"></div>
+        <div class="row"><label for="priceCached">Cached input $ / M tokens</label><input id="priceCached" type="number" min="0" step="0.01"></div>
+        <div class="row"><label for="priceOut">Output $ / M tokens</label><input id="priceOut" type="number" min="0" step="0.01"></div>
+        <div class="hint">Defaults: MiniMax's own M3 price on OpenRouter (Oct 2026). New tokens (cache misses, re-prefill included) bill at the input price, prefix hits at the cached price. The Net Revenue tile nets input and output revenue against the galaxy cost of prefill and decode.</div>
+        <div class="row"><label for="galaxyUsd">$ / galaxy-hour</label><input id="galaxyUsd" type="number" min="0" step="0.5"></div>
+        <div class="row"><label for="decodeGalaxies">Decode galaxies</label><input id="decodeGalaxies" type="number" min="0" step="1"></div>
+        <div class="hint">One M3 decode instance: 64 sessions on 16 galaxies; set Decode KV slots to match. Margin = input + output revenue − (prefill + decode galaxies) × $/galaxy-hour. Changes apply without re-running.</div>
+      </div>
+    </details>
   </fieldset>
   <div class="btns">
     <button class="primary" id="runBtn" type="button">Run sweep</button>
