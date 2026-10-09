@@ -226,8 +226,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="hint">On: a partly filled batch runs at its actual size (untraced). Off: it is padded to the full budget, as tracing requires.</div>
     <div class="row"><label for="batchChunksPerRequest">Chunks per request per round (0 = no limit)</label><input id="batchChunksPerRequest" type="number" min="0" step="1"></div>
     <div class="hint">Round robin: a batch is filled in rounds over the queue, each request getting up to this many more chunks per round, until the budget is used. 0: the front request takes all it can (greedy); 1: an even split. A request alone fills the batch either way. Every request in a batch reads its own cached prefix, so many requests per batch cost throughput.</div>
-    <div class="row"><label for="attn">Attention</label><select id="attn"><option value="unit">sequential per chunk-unit</option><option value="request">sequential per request</option><option value="fused">fused multi-request</option></select></div>
-    <div class="hint">Attention calls in a batched pass. Per chunk-unit: a request that takes several chunk-units of the pass makes one call per unit, each re-gathering its cached prefix (chunk padding only; with tile padding a request's tokens in a pass are one run, so this is per request). Per request: one call per request, prefix gathered once. Fused: one call for the whole pass.</div>
+    <div class="row"><label for="attn">Attention</label><select id="attn"><option value="chunk">sequential per chunk</option><option value="request">sequential per request</option><option value="fused">fused multi-request</option></select></div>
+    <div class="hint">Attention calls in a batched pass. Per chunk: a request that takes several chunks of the pass makes one call per chunk, each re-gathering its cached prefix (chunk padding only; with tile padding a request's tokens in a pass are one run, so this is per request). Per request: one call per request, prefix gathered once. Fused: one call for the whole pass.</div>
     <div class="row check"><input id="prefetchKV" type="checkbox"><label for="prefetchKV">Prefetch KV-prefix gathers (overlap with compute)</label></div>
     <div class="row"><label for="policy">Scheduling</label><select id="policy"><option value="rr">round robin</option><option value="rtc">run to completion, oldest first</option><option value="srpt">run to completion, shortest first (30 s aging)</option></select></div>
     <div class="hint">Round robin (tt-d-gen): a request enqueues at most one token budget (one chunk without batching) per turn, then goes to the back of the queue, so a request with a long sequence cannot starve shorter ones.<br>Run to completion: a request keeps enqueuing token budgets until its whole sequence is processed, which can starve shorter requests waiting in the queue.</div>
@@ -529,7 +529,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
               <li>Each stage keeps its own KV tensors, so a per-stage table is feasible. It is a prerequisite for combining the pool with batching.</li>
             </ul>
           </li>
-          <li><b>Lanes per stage.</b> With a per-stage lane table a stage works on one chunk at a time, so it needs one lane per request in that chunk: 1 without batching, up to the chunk units per batch with batching. Double and triple buffering multiply that by 2 and 3. The count is derived from these settings; with batching it can be overridden (and must be with tile padding, which has no chunk units), and it then caps the requests per batch. Each extra 1M lane comes out of the paged pool, so fewer lanes usually win: at 4 galaxies (no SSD tier) one lane beats three by 2–4%, and eight lanes cost 13–22% with batching.</li>
+          <li><b>Lanes per stage.</b> With a per-stage lane table a stage works on one chunk at a time, so it needs one lane per request in that chunk: 1 without batching, up to the chunks per batch with batching. Double and triple buffering multiply that by 2 and 3. The count is derived from these settings; with batching it can be overridden (and must be with tile padding, which has no chunks), and it then caps the requests per batch. Each extra 1M lane comes out of the paged pool, so fewer lanes usually win: at 4 galaxies (no SSD tier) one lane beats three by 2–4%, and eight lanes cost 13–22% with batching.</li>
           <li><b>Pool copies ("Pool copies" control).</b>
             <ul>
               <li><b>Sequential (default):</b> copy-out, copy-in, then prefill. The full copy time goes on the stage; lanes are held only while computing.</li>
@@ -572,11 +572,11 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li><b>Fused</b>: one call for the whole pass.</li>
           <li>Both include a penalty for short segments that leave some of the 110 cores idle.</li>
         </ul>
-        With chunk padding, batching packs whole chunks: a request takes a whole number of chunk-units.</li>
-      <li><b>Sequential per chunk-unit vs per request</b> (chunk padding only). A request that takes several chunk-units of a batched pass (a cold prefill) makes one attention call over all of them per request, so its cached prefix is gathered once; per chunk-unit, each unit is its own call and re-gathers the prefix (today's kernels process one chunk at a time).
+        With chunk padding, batching packs whole chunks: a request takes a whole number of chunks.</li>
+      <li><b>Sequential per chunk vs per request</b> (chunk padding only). A request that takes several chunks of a batched pass (a cold prefill) makes one attention call over all of them per request, so its cached prefix is gathered once; per chunk, each chunk is its own call and re-gathers the prefix (today's kernels process one chunk at a time).
         <ul>
           <li>Per request, smaller chunks only cut padding: chunk 128 (32·SP) matches tile padding, and is about 3% better than 1024.</li>
-          <li>Per chunk-unit, small chunks collapse. Chunk 2048 becomes the best, and it is 20–26% below the per-request best (within 1% at 4 galaxies with roofline kernels, where SSD reads bind).</li>
+          <li>Per chunk, small chunks collapse. Chunk 2048 becomes the best, and it is 20–26% below the per-request best (within 1% at 4 galaxies with roofline kernels, where SSD reads bind).</li>
         </ul>
       </li>
       <li><b>Dynamic batch size</b> (on by default). Decides what a batch that is not full costs, e.g. a single request. On, it runs at the tokens it holds, rounded up to whole chunks (chunk padding) or 32·SP (tile padding), as ops do without tracing. Off, it is padded to the full budget, as a traced build with one fixed shape must be.
@@ -821,7 +821,7 @@ function syncUi() {
   $('batch').disabled = false; $('batchHint').hidden = $('cache').value !== 'slots';
   $('budget').disabled = !$('batch').checked; $('attn').disabled = !$('batch').checked; $('batchDynShape').disabled = !$('batch').checked; $('batchChunksPerRequest').disabled = !$('batch').checked || $('policy').value !== 'rr';
   // pool lanes per stage (as makePlan): derived = copy-mode buffers x requests per batch; the override is for batching
-  // on the pool only, and tile-padded batching (no chunk units) must override
+  // on the pool only, and tile-padded batching (no chunks) must override
   const fixedLanes = pool && !$('laneArena').checked, batched = $('batch').checked;
   const canOverride = fixedLanes && batched, mustOverride = canOverride && $('reqPad').value === 'tile';
   if (!canOverride) $('lanesOverride').checked = false;
@@ -843,10 +843,10 @@ function syncUi() {
   // (owner placement still needs it: it sets the KV block per rank)
   const chunkUnused = $('batch').checked && $('reqPad').value === 'tile' && $('placement').value !== 'owner' && !(Number($('batchChunksPerRequest').value) > 0);
   $('placement').disabled = $('reqPad').value !== 'tile';
-  // tile padding has no chunk-units: a request's tokens in a pass are one run, so per chunk-unit = per request
-  const unitOpt = $('attn').querySelector('option[value="unit"]');
-  unitOpt.disabled = $('reqPad').value === 'tile';
-  if (unitOpt.disabled && $('attn').value === 'unit') $('attn').value = 'request';
+  // tile padding has no chunks: a request's tokens in a pass are one run, so per chunk = per request
+  const chunkOpt = $('attn').querySelector('option[value="chunk"]');
+  chunkOpt.disabled = $('reqPad').value === 'tile';
+  if (chunkOpt.disabled && $('attn').value === 'chunk') $('attn').value = 'request';
   $('chunk').disabled = chunkUnused; $('chunkHint').hidden = !chunkUnused;
 }
 // keep the pipeline valid when the hardware changes: fill each replica with stages, and drop a custom split

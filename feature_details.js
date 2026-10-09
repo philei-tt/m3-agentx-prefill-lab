@@ -58,7 +58,7 @@ module.exports = {
       'An attention loop over segments; each segment\'s KV is read and written in its own lane.',
       'MoE dispatch/combine buffers and activations sized for the budget instead of the chunk.',
       'Traces per chunk size (or a few buckets, e.g. 4k/8k/16k), so a partly filled batch is not padded to the budget. With one static 16k shape today\'s config (about 1.9 requests per batch) is 55% padding and falls below no batching; on the best stacks, which fill batches better, it costs 0-2%.',
-      'One attention call per request per chunk, so a request\'s several chunk-units share one KV-prefix gather.',
+      'One attention call per request per chunk, so a request\'s several chunks share one KV-prefix gather.',
       'A packing scheduler: fill the budget, split long requests across chunks, keep segments of one request in order.',
       'Needs request padding to 32·SP (or a small chunk) for token packing; with chunk padding only whole chunks can be packed.',
     ],
@@ -72,7 +72,7 @@ module.exports = {
       'An all-to-all KV write op; or a small chunk (C = 32·SP), which needs none.',
       'MoE buffers sized for the maximum budget; compile/trace buckets for variable token counts.',
     ],
-    notes: 'Most of its value is realised together with batching. A small chunk plus batching gets nearly all of it, as long as a request\'s chunk-units in one batch form one attention call (its prefix is gathered once). With the same attention, chunk 128-256 plus batching matches 32·SP padding in every scenario (within 0.3% with fused attention; within 0.4% with per-request attention), and chunk 1024 is about 3% behind (tools/layout_ab.js, best configs of the third Oct 8 study; at 4 galaxies with roofline kernels, where SSD reads bind, every chunk from 128 to 2048 is within 0.3%). Chunks below 2048 are extrapolated (calibrated at 2048 and 5120). Computing each token on the rank that owns its KV row instead of the all-to-all (placement: owner) is within 1% at chunk 128 but 2-22% behind at chunk 2048-5120, where a request\'s short run of tokens loads one or two ranks (tools/placement_ab.js).',
+    notes: 'Most of its value is realised together with batching. A small chunk plus batching gets nearly all of it, as long as a request\'s chunks in one batch form one attention call (its prefix is gathered once). With the same attention, chunk 128-256 plus batching matches 32·SP padding in every scenario (within 0.3% with fused attention; within 0.4% with per-request attention), and chunk 1024 is about 3% behind (tools/layout_ab.js, best configs of the third Oct 8 study; at 4 galaxies with roofline kernels, where SSD reads bind, every chunk from 128 to 2048 is within 0.3%). Chunks below 2048 are extrapolated (calibrated at 2048 and 5120). Computing each token on the rank that owns its KV row instead of the all-to-all (placement: owner) is within 1% at chunk 128 but 2-22% behind at chunk 2048-5120, where a request\'s short run of tokens loads one or two ranks (tools/placement_ab.js).',
   },
   arena: {
     what: 'Instead of fixed 1M lanes, give each request a lane of its actual length from one contiguous arena per stage (2-8M tokens).',

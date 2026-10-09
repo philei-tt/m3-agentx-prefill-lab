@@ -2,10 +2,10 @@
 // Chunk padding + batching vs tile padding (segments padded to 32*SP, even split + all-to-all KV write), and two
 // attention-side optimisations.
 // On each scenario's best feature stack and topology from results/study.json:
-//   chunk : chunk C in {128..5120} x batch budget in {off, 4k..32k} (a request takes whole C-token units)
+//   chunk : chunk C in {128..5120} x batch budget in {off, 4k..32k} (a request takes whole chunks)
 //   tile  : budget in {4k..32k} (segments padded to 32*SP only), attention 'request' or 'fused' (one call per pass)
 //   modes : base     = attn 'request' (one attention call / prefix gather per request per pass), no prefetch
-//           nodedup  = one attention call and prefix gather per C-unit (a cold prefill split into many units
+//           nodedup  = one attention call and prefix gather per chunk (a cold prefill split into many chunks
 //                      re-gathers its prefix for every unit)
 //           prefetch = KV-prefix gathers overlap the layer's non-collective compute
 //   --inf : the same with an infinite KV cache (no evictions, no lanes/arena limit, no SSD tier): compute-bound view
@@ -18,7 +18,7 @@ const { STUDY } = require('../lib/paths.js');
 
 const CHUNKS = [128, 256, 512, 1024, 2048, 5120];
 let BUDGETS = [4096, 8192, 16384, 32768];
-const MODES = { base: {}, nodedup: { attn: 'unit' }, prefetch: { prefetchKV: true } };
+const MODES = { base: {}, nodedup: { attn: 'chunk' }, prefetch: { prefetchKV: true } };
 // --slo none : peak useful tok/s at any TTFT (sweep never stops early, bisects the peak) instead of goodput
 // --budgets 4096,...,65536 ; --extra-concs 5120,6144,8192 (high-concurrency peaks with an infinite cache)
 

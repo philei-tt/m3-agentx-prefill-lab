@@ -58,7 +58,7 @@ for (const cache of ['slots', 'inf']) {
   assert.ok(fair(r.chunks), `rr/${cache} is not round robin`);
 }
 
-// 2. batched round robin: a popped request fills as many C-units as it can, as one run (never split within a batch),
+// 2. batched round robin: a popped request fills as many chunks as it can, as one run (never split within a batch),
 //    and the rotation is fair
 {
   const C = 1024, budget = 8192;
@@ -72,7 +72,7 @@ for (const cache of ['slots', 'inf']) {
 const pool = { cache: 'pool', laneScope: 'stage', copyMode: 'double', policy: 'rr' };
 const batched = Object.assign({ batch: true, chunk: 1024, budget: 8192, reqPad: 'chunk' }, pool);
 // 3a. lane count per stage (every policy): buffers of the copy mode x the most requests per batch (1 unbatched, the
-//     chunk units per batch with chunk-padded batching); lanesOverride sets it, only with batching on the pool
+//     chunks per batch with chunk-padded batching); lanesOverride sets it, only with batching on the pool
 const lanesOf = (cfg) => SIM.makePlan(cfg, cal).lanes;
 for (const [copyMode, buf] of [['sequential', 1], ['double', 2], ['overlap3', 3]]) {
   for (const policy of ['rr', 'rtc']) assert.strictEqual(lanesOf(Object.assign({ chunk: 2048 }, pool, { copyMode, policy })), buf, `${copyMode} ${policy}`);
@@ -91,7 +91,7 @@ for (const cache of ['inf', 'paging']) {
   const p = SIM.makePlan(Object.assign({}, batched, { lanesOverride: true, lanes: 4, cache, hostTier: false }), cal);
   assert.ok(!p.errors.length && p.lanes === Infinity, `override on ${cache}: ${p.errors}`);
 }
-// a tile-padded batch has no chunk units: the lane count (the most requests per batch) must be given
+// a tile-padded batch has no chunks: the lane count (the most requests per batch) must be given
 const tileBatched = Object.assign({}, batched, { reqPad: 'tile' });
 assert.ok(SIM.makePlan(tileBatched, cal).errors.some((e) => e.includes('lanesOverride')), 'tile-padded batching without a lane count');
 const tile5 = Object.assign({}, tileBatched, { lanesOverride: true, lanes: 5 });

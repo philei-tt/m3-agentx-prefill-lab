@@ -399,10 +399,10 @@
     // reqPad: what each request's tokens in a pass (its segment) are padded to. 'chunk' (today) = a multiple of the
     //   chunk C, which is also the block-cyclic KV slab (C/SP rows per SP rank); 'tile' = whole 32-row tiles on every
     //   SP rank (see placement).
-    // attn: attention calls in a batched pass. 'unit' = one call per C-unit of each request, each re-gathering the
-    //   request's cached prefix (a request that takes several C-units of a chunk-padded batch; today's kernels process
+    // attn: attention calls in a batched pass. 'chunk' = one call per chunk of each request, each re-gathering the
+    //   request's cached prefix (a request that takes several chunks of a chunk-padded batch; today's kernels process
     //   one chunk at a time); 'request' = one call per request per pass (its prefix gathered once); 'fused' = one call
-    //   for the whole pass. 'unit' and 'request' differ only with batching and chunk padding.
+    //   for the whole pass. 'chunk' and 'request' differ only with batching and chunk padding.
     chunk: 5120, reqPad: 'chunk', batch: false, budget: 16384, attn: 'request', policy: 'rr',
     // placement (tile padding only): where a segment's new tokens are computed. 'even' = split evenly over the SP
     //   ranks (segments padded to 32*SP), then an all-to-all writes each K/V row to the rank that owns it (none is
@@ -417,7 +417,7 @@
     //   fixed shape must be
     batchDynShape: true,
     // batchChunksPerRequest L (round robin, batched): how a batch's budget is split among the requests waiting for
-    //   it. Rounds over the queue: in each round every request, in queue order, gets up to L more chunk units
+    //   it. Rounds over the queue: in each round every request, in queue order, gets up to L more chunks
     //   (fewer if it needs fewer, or if the budget runs out), until the budget is used or no request needs more.
     //   0 = no limit: the front request takes as many units as it can fill, then the next (greedy). 1 = one unit
     //   per request per round: an even split. A request alone fills the batch whatever L is. Each request makes one
@@ -427,12 +427,12 @@
     batchChunksPerRequest: 0,
     cache: 'slots',        // slots | pool | paging | inf
     // pool lanes per stage, derived from r = the most requests a batch (one pipeline pass) holds (1 without
-    //   batching, the chunk units per batch with chunk padding; every request in a batch needs its own lane)
+    //   batching, the chunks per batch with chunk padding; every request in a batch needs its own lane)
     //   and b = the buffers of the copy mode (sequential 1, double 2, overlap3 3): per-stage lane table = b x r (a
     //   stage works on one batch at a time); global lane table = stages x r (a lane is held for the whole trip
     //   through the pipeline, one batch per stage in flight; sequential copies only, since a lane reserved for the
     //   whole trip gains nothing from buffering). lanesOverride (batching on
-    //   the pool only) sets `lanes` instead; tile-padded batching has no chunk units, so it must override. Arena
+    //   the pool only) sets `lanes` instead; tile-padded batching has no chunks, so it must override. Arena
     //   lanes and the other caches ignore the count and the override.
     lanes: 3, lanesOverride: false, laneScope: 'stage', laneLen: M3.maxCtx, laneArena: false, arenaTokens: 4e6,
     // resume at any 32-token boundary (tt-metal #57636, merged), so the cached prefix is used whole; false rounds it
@@ -501,7 +501,7 @@
     //   'srpt' = also run to completion, with the waiting queue sorted shortest-new-first (srptMaxWait s of aging);
     //   'rr' = round robin over the started requests (tt-d-gen PrefillQueue/PrefillWriter): a request is admitted
     //   (slot/lane acquired) at the back of the queue; each turn the front request takes one chunk, or with batching
-    //   as many of the batch's remaining C-units as it can fill (one attention call), and goes to the back if it has
+    //   as many of the batch's remaining chunks as it can fill (one attention call), and goes to the back if it has
     //   tokens left (it is never split into two runs within one batch).
     srptMaxWait: 30,
     // Round robin on the pool (policy 'rr', cache 'pool'). A lane is a per-stage KV slot the attention kernels run on
@@ -670,7 +670,7 @@
     if (cfg.cache === 'slots' && nSlots < 1) errors.push('no 1M slot fits in memory');
     // static slots: a slot is held for the request's whole trip through the pipeline (today's slot_id), so a full
     // pipeline has (requests per batch) x (stages) requests in flight, each in its own 1M slot. A tile-padded
-    // batch has no chunk units: up to budget / (32*SP) requests (budget / 32 with owner placement)
+    // batch has no chunks: up to budget / (32*SP) requests (budget / 32 with owner placement)
     if (cfg.cache === 'slots') {
       const r = !cfg.batch ? 1 : tile ? Math.floor(Tchunk / gran) : reqsPerBatch;
       if (r * S > nSlots) errors.push(`out of memory: ${r} requests per batch x ${S} stages = ${r * S} slots in flight, but only ${nSlots} 1M slots fit`);
@@ -702,7 +702,7 @@
     const tokOf = (bytesPerGalaxy) => bytesPerGalaxy * gpr / (M3.L * kvbHost);
     const hostTok = offload ? tokOf(hostBudget.kv * GB) : 0;
     const ssdTok = offload ? tokOf(cfg.ssdTBPerGalaxy * 1e12) : 0;
-    if (!['unit', 'request', 'fused'].includes(cfg.attn)) errors.push(`attn must be 'unit', 'request' or 'fused', got ${cfg.attn}`);
+    if (!['chunk', 'request', 'fused'].includes(cfg.attn)) errors.push(`attn must be 'chunk', 'request' or 'fused', got ${cfg.attn}`);
     if (!['chunk', 'tile'].includes(cfg.reqPad)) errors.push(`reqPad must be 'chunk' or 'tile', got ${cfg.reqPad}`);
     if (!['even', 'owner'].includes(cfg.placement)) errors.push(`placement must be 'even' or 'owner', got ${cfg.placement}`);
     if (owner && cfg.chunk % (32 * sp)) errors.push(`owner placement needs whole 32-row KV blocks: chunk ${cfg.chunk} is not a multiple of 32 x SP = ${32 * sp}`);
@@ -1327,7 +1327,7 @@
         // admit every waiting request that gets a slot/lane (oldest first; static slots skip a stream whose slot is busy) to
         // the back of the round-robin queue (rep.active), then serve it from the front. A request that is not done
         // goes to the back, behind everything waiting now. Batched, each popped request takes as many of the
-        // remaining C-units as it can fill, as one attention call, so it is never split into two runs in one batch.
+        // remaining chunks as it can fill, as one attention call, so it is never split into two runs in one batch.
         if (rep.queue.length) {
           const keep = []; let blocked = false;
           for (const q of rep.queue) {
@@ -1458,7 +1458,7 @@
         cs.forEach((c, i) => { c.nl = Math.max(...segs[i].rows); c.nlf = segs[i].rows[rb]; pad += c.n; real += c.na; });
         trl = Math.max(...ch.load) * real / pad;
       }
-      if (cfg.attn === 'unit' && cfg.reqPad === 'chunk' && cs.some((s) => s.n > cfg.chunk)) { // one attention call per C-unit
+      if (cfg.attn === 'chunk' && cfg.reqPad === 'chunk' && cs.some((s) => s.n > cfg.chunk)) { // one attention call per chunk
         const C = cfg.chunk;
         cs = cs.flatMap((s) => Array.from({ length: s.n / C }, (_, u) => ({ n: C, na: Math.max(0, Math.min(C, s.na - u * C)), k: s.k + u * C, cap: s.cap })));
       }
