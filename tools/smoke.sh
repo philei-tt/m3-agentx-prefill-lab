@@ -12,12 +12,12 @@ run --set boundedDense=true --set cache=pool --set lanes=3
 run --set boundedDense=true --set cache=pool --set laneArena=true --set arenaTokens=3000000
 run --set boundedDense=true --set cache=pool --set lanes=3 --set hostTier=true
 run --set boundedDense=true --set cache=inf --set unaligned=true
-run --set boundedDense=true --set cache=inf --set layout=var
-run --set boundedDense=true --set cache=inf --set layout=var --set batch=true --set budget=16384
-run --set boundedDense=true --set cache=inf --set layout=fixed --set batch=true --set budget=8192
+run --set boundedDense=true --set cache=inf --set segPad=tile
+run --set boundedDense=true --set cache=inf --set segPad=tile --set batch=true --set budget=16384
+run --set boundedDense=true --set cache=inf --set segPad=chunk --set batch=true --set budget=8192
 run --set boundedDense=true --set cache=inf --set asyncHandoff=true
 run --set boundedDense=true --set cache=inf --set opEff=1
-run --set boundedDense=true --set cache=inf --set opEff=1 --set layout=var --set batch=true --set budget=16384 --set asyncHandoff=true
+run --set boundedDense=true --set cache=inf --set opEff=1 --set segPad=tile --set batch=true --set budget=16384 --set asyncHandoff=true
 run --set boundedDense=true --set cache=inf --set policy=srpt
 run --set policy=rr --set cache=pool --set lanesOverride=true --set lanes=4 --set batch=true --set chunk=1024 --set budget=8192
 run --set policy=rr --set cache=pool --set copyMode=double --set hostTier=true

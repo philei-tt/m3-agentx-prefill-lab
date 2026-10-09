@@ -132,8 +132,8 @@
         const keys = Math.min(M3.sparseKeys, kvlen);
         return Math.max(4 * nl * (M3.Hq / tp) * keys * M3.d / HW.F_hifi, nl * keys * kvHeadB / 32 / HW.dram);
       }
-      case 'kv_a2a': // variable layout: route the new K/V/index rows to their owner SP row
-        if (!c.varLayout || sp <= 1) return 0;
+      case 'kv_a2a': // even split: route the new K/V/index rows to the SP rank that owns them
+        if (!c.evenSplit || sp <= 1) return 0;
         return sp * nl * (kvHeadB + M3.di * c.idxB) / (4 * HW.linkUni) * torusFactors(c).a2a;
       case 'ring_c': return 4 * nl * (M3.Hq / tp) * (s.k + s.n / 2) * M3.d / HW.F_hifi;
       case 'ring_scan': { // ring-joint gathers the valid prefix [0, kv_len) (op-bounded since tt-metal #47539);
@@ -182,7 +182,7 @@
 
   function zoneEff(zones, mesh, idxB) {
     const [sp, tp] = mesh;
-    const c = { sp, tp, P: sp * tp, T: ZONE_T, idxB, imb: IMB0, varLayout: false, bounded: true, msaLocal: false };
+    const c = { sp, tp, P: sp * tp, T: ZONE_T, idxB, imb: IMB0, evenSplit: false, bounded: true, msaLocal: false };
     const seg = { n: ZONE_T, k: ZONE_K, cap: ZONE_CAP };
     const eff = { moe: {}, dense: {} };
     const zm = (name) => (zones[name] ? zones[name].mean : null);
@@ -247,7 +247,7 @@
   function fitPipeline(cal, data) {
     const P = data.pipeline; if (!P || !P.B) return;
     const mesh = [2, 4];
-    const base = (T) => ({ sp: 2, tp: 4, P: 8, T, idxB: BF16, imb: IMB0, varLayout: false, bounded: true, msaLocal: false });
+    const base = (T) => ({ sp: 2, tp: 4, P: 8, T, idxB: BF16, imb: IMB0, evenSplit: false, bounded: true, msaLocal: false });
     const eff = cal.effs['2x4'];
     const ctx = (T, na) => Object.assign(base(T), { Tr: na });
     // samples: every (cell, rank, chunk position) median of the loaded blocks; actual tokens and kv are exact
@@ -338,7 +338,7 @@
     let t = 0;
     if (kind === 'moe') {
       for (const op of OPS_MSA_SEG) {
-        if (op === 'kv_a2a' && !c.varLayout) continue;
+        if (op === 'kv_a2a' && !c.evenSplit) continue;
         if ((op === 'ag_kv' || op === 'ag_idx') && c.sp <= 1) continue;
         if (op === 'ag_idx' && c.msaLocal) continue;
         const l = isCcl(op) ? cclLat(op, c, lat) : lat.op;
@@ -357,7 +357,7 @@
         const rc = roofSeg('ring_c', c, s) * 1e3 / eff.ring_c * w, rs = roofSeg('ring_scan', c, s) * 1e3 / eff.ring_scan;
         t += Math.max(rc, rs);
         if (acc) acc.g += Math.max(0, rs - rc);
-        if (c.varLayout && c.sp > 1) t += cclLat('kv_a2a', c, lat) + roofSeg('kv_a2a', c, s) * 1e3 / eff.kv_a2a;
+        if (c.evenSplit && c.sp > 1) t += cclLat('kv_a2a', c, lat) + roofSeg('kv_a2a', c, s) * 1e3 / eff.kv_a2a;
       }
       t += (fused ? 1 : segs.length) * (lat.op + (lat.denseFix || 0)); // per ring-joint call
     }
@@ -396,14 +396,17 @@
     // index_k cache dtype / de-replicated over TP. Today: bf8 x TP replicas (the deployed runner rejects bf16); the
     // #57827 calibration runs used bf16, so the calibration and validation replays pin idxBf16: true
     idxBf16: false, idxDerep: false,
-    chunk: 5120, layout: 'fixed', batch: false, budget: 16384, attn: 'seq', policy: 'rr',
-    // placement (variable layout only): where a segment's new tokens are computed. 'even' = split evenly over the SP
-    //   ranks (segments padded to 32*SP), then an all-to-all writes each K/V row to the rank that owns it. 'owner' =
-    //   each token goes to the rank that owns its KV row (as the fixed layout does), so no all-to-all, segments are
-    //   padded only to 32, but ranks are uneven: every rank is padded to the busiest one, and each rank holds at
-    //   most budget/SP rows (C/SP without batching). The fixed layout always places by owner.
+    // segPad: what each request's tokens in a pass (its segment) are padded to. 'chunk' (today) = a multiple of the
+    //   chunk C, which is also the block-cyclic KV slab (C/SP rows per SP rank); 'tile' = whole 32-row tiles on every
+    //   SP rank (see placement). The old key `layout` ('fixed' / 'var') is still accepted.
+    chunk: 5120, segPad: 'chunk', batch: false, budget: 16384, attn: 'seq', policy: 'rr',
+    // placement (tile padding only): where a segment's new tokens are computed. 'even' = split evenly over the SP
+    //   ranks (segments padded to 32*SP), then an all-to-all writes each K/V row to the rank that owns it (none is
+    //   needed when C = 32*SP). 'owner' = each token goes to the rank that owns its KV row (as chunk padding does), so
+    //   no all-to-all and segments padded only to 32, but ranks are uneven: every rank is padded to the busiest one,
+    //   and each rank holds at most budget/SP rows (C/SP without batching). Chunk padding always places by owner.
     placement: 'even',
-    // kvDedup: a request that takes several C-units of a batched fixed-layout chunk makes ONE attention call (one
+    // kvDedup: a request that takes several C-units of a batched chunk-padded pass makes ONE attention call (one
     //   gather of its cached prefix); false = one call and one prefix gather per C-unit (today's kernels process
     //   one chunk at a time). prefetchKV: overlap the KV-prefix gathers with the layer's non-collective compute.
     kvDedup: true, prefetchKV: false,
@@ -417,17 +420,17 @@
     //   0 = no limit: the front request takes as many units as it can fill, then the next (greedy). 1 = one unit
     //   per request per round: an even split. A request alone fills the batch whatever L is. Each request makes one
     //   attention call per batch (reading its cached prefix) for all its units, so many requests per batch cost
-    //   throughput. Units are chunks (fixed layout) or 32*SP granules (variable layout); L counts chunks of `chunk`
+    //   throughput. Units are chunks (chunk padding) or tiles (tile padding); L counts chunks of `chunk`
     //   tokens. On the pool, a request joins a batch only if it gets a lane.
     batchChunksPerRequest: 0,
     cache: 'slots',        // slots | pool | paging | inf
     // pool lanes per stage, derived from r = the most requests a batch (one pipeline pass) holds (1 without
-    //   batching, the chunk units per batch with fixed-layout batching; every request in a batch needs its own lane)
+    //   batching, the chunk units per batch with chunk padding; every request in a batch needs its own lane)
     //   and b = the buffers of the copy mode (sequential 1, double 2, overlap3 3): per-stage lane table = b x r (a
     //   stage works on one batch at a time); global lane table = stages x r (a lane is held for the whole trip
     //   through the pipeline, one batch per stage in flight; sequential copies only, since a lane reserved for the
     //   whole trip gains nothing from buffering). lanesOverride (batching on
-    //   the pool only) sets `lanes` instead; variable-layout batching has no chunk units, so it must override. Arena
+    //   the pool only) sets `lanes` instead; tile-padded batching has no chunk units, so it must override. Arena
     //   lanes and the other caches ignore the count and the override.
     lanes: 3, lanesOverride: false, laneScope: 'stage', laneLen: M3.maxCtx, laneArena: false, arenaTokens: 4e6,
     // resume at any 32-token boundary (tt-metal #57636, merged), so the cached prefix is used whole; false rounds it
@@ -557,6 +560,10 @@
 
   function makePlan(cfgIn, cal) {
     const cfg = Object.assign({}, DEFAULTS, cfgIn);
+    // the old name of segPad: layout 'fixed' / 'var'
+    if (cfgIn && cfgIn.layout !== undefined && cfgIn.segPad === undefined) cfg.segPad = cfgIn.layout === 'var' ? 'tile' : cfgIn.layout === 'fixed' ? 'chunk' : cfgIn.layout;
+    delete cfg.layout;
+    const tile = cfg.segPad === 'tile';
     const [sp, tp] = cfg.mesh; const P = sp * tp; const S = cfg.stages;
     const chipsRep = 32 * cfg.galaxies / cfg.replicas;
     const errors = [];
@@ -586,9 +593,12 @@
     const fix0 = cal.pipe.denseFix || 0;
     const lat = { ccl: (1 - a) * LAT_MEAS.ccl + a * LAT_TGT.ccl, op: (1 - a) * LAT_MEAS.op + a * LAT_TGT.op, denseFix: (1 - a) * fix0 + a * Math.min(fix0, 1) };
     const idxB = cfg.idxBf16 ? BF16 : BF8;
-    const owner = cfg.layout === 'var' && cfg.placement === 'owner';
-    const gran = owner ? 32 : 32 * sp; // segment padding unit on the variable layout
-    const ctxT = (T) => ({ sp, tp, P, T, idxB, imb: cfg.expertImb, varLayout: cfg.layout === 'var' && !owner, bounded: cfg.boundedDense, msaLocal: cfg.msaLocal, ringSp, ringTp, prefetch: !!cfg.prefetchKV });
+    const owner = tile && cfg.placement === 'owner';
+    const gran = owner ? 32 : 32 * sp; // tile padding: segment padding unit
+    // evenSplit: segments split evenly over SP, so their new K/V rows need an all-to-all to reach the ranks that own
+    // them (not when C = 32*SP: the split then matches the KV blocks)
+    const evenSplit = tile && !owner && cfg.chunk > 32 * sp;
+    const ctxT = (T) => ({ sp, tp, P, T, idxB, imb: cfg.expertImb, evenSplit, bounded: cfg.boundedDense, msaLocal: cfg.msaLocal, ringSp, ringTp, prefetch: !!cfg.prefetchKV });
     const pm = cal.pipe;
     // the 1/T term was fitted on chunks of 2048 and 5120 tokens; clamp so small chunks do not extrapolate it
     const moeMult = (T) => (1 - a) * (pm.moeMult[0] + pm.moeMult[1] * 5120 / Math.max(T, 2048)) + a * 1;
@@ -596,12 +606,12 @@
     const stageOv = (T) => (1 - a) * ov0(T) + a * Math.min(ov0(T), 0.3);
     const embedMs = (1 - a) * pm.embed + a * Math.min(pm.embed, 0.3);
     const actBytes = (T) => 12 * (T / sp) * M3.E * BF16;
-    // largest chunk: the budget when batching on a variable layout, whole chunks otherwise
-    const Tchunk = cfg.batch ? (cfg.layout === 'var' ? cfg.budget : Math.max(cfg.budget, cfg.chunk)) : cfg.chunk;
+    // largest chunk: the budget when batching with tile padding, whole chunks otherwise
+    const Tchunk = cfg.batch ? (tile ? cfg.budget : Math.max(cfg.budget, cfg.chunk)) : cfg.chunk;
     const Tmax = Tchunk;
     // pool lanes per stage (see DEFAULTS.lanes): buffers x the most requests per batch, or lanesOverride
     const laneBuffers = cfg.copyMode === 'overlap3' ? 3 : cfg.copyMode === 'double' ? 2 : 1;
-    const reqsPerBatch = !cfg.batch ? 1 : cfg.layout === 'var' ? 0 : Math.max(1, Math.floor(Tchunk / cfg.chunk));
+    const reqsPerBatch = !cfg.batch ? 1 : tile ? 0 : Math.max(1, Math.floor(Tchunk / cfg.chunk));
     const fixedLanes = cfg.cache === 'pool' && !cfg.laneArena;
     // handoff: measured = blocking send + hop latency (fitted, per chunk); async = link-rate transfer, overlapped
     const actXfer = (T) => T * M3.E * BF16 / (P * HW.linkUni * 0.5) * 1e3; // ms, each chip ships its shard
@@ -660,17 +670,17 @@
     else poolTok = Infinity;
     if (cfg.cache === 'slots' && nSlots < 1) errors.push('no 1M slot fits in memory');
     // static slots: a slot is held for the request's whole trip through the pipeline (today's slot_id), so a full
-    // pipeline has (requests per batch) x (stages) requests in flight, each in its own 1M slot. A variable-layout
+    // pipeline has (requests per batch) x (stages) requests in flight, each in its own 1M slot. A tile-padded
     // batch has no chunk units: up to budget / (32*SP) requests (budget / 32 with owner placement)
     if (cfg.cache === 'slots') {
-      const r = !cfg.batch ? 1 : cfg.layout === 'var' ? Math.floor(Tchunk / gran) : reqsPerBatch;
+      const r = !cfg.batch ? 1 : tile ? Math.floor(Tchunk / gran) : reqsPerBatch;
       if (r * S > nSlots) errors.push(`out of memory: ${r} requests per batch x ${S} stages = ${r * S} slots in flight, but only ${nSlots} 1M slots fit`);
     }
     // the override only applies to fixed pool lanes (other caches have none and ignore it, as they ignore `lanes`,
     // so a pool config can be re-run with cache 'inf' as is); without batching the count is derived
     if (cfg.cache === 'pool' && cfg.laneScope === 'global' && cfg.copyMode !== 'sequential') errors.push('a global lane table holds the lane for the whole pipeline trip, so it allows only sequential copies (one buffer)');
     if (cfg.lanesOverride && cfg.cache === 'pool' && !cfg.batch) errors.push('overriding the lane count needs batching (without it the count is derived)');
-    if (fixedLanes && cfg.batch && reqsPerBatch === 0 && !cfg.lanesOverride) errors.push('variable-layout batching on the pool needs the lane count set (lanesOverride)');
+    if (fixedLanes && cfg.batch && reqsPerBatch === 0 && !cfg.lanesOverride) errors.push('tile-padded batching on the pool needs the lane count set (lanesOverride)');
     if (cfg.lanesOverride && !(cfg.lanes >= 1)) errors.push('the lane count must be at least 1');
     for (const k of ['hostDramGBPerGalaxy', 'ssdTBPerGalaxy']) if (!(cfg[k] >= 0)) errors.push(`${k} must be >= 0`);
     for (const k of ['pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy']) if (!(cfg[k] > 0)) errors.push(`${k} must be > 0`);
@@ -693,6 +703,7 @@
     const tokOf = (bytesPerGalaxy) => bytesPerGalaxy * gpr / (M3.L * kvbHost);
     const hostTok = offload ? tokOf(hostBudget.kv * GB) : 0;
     const ssdTok = offload ? tokOf(cfg.ssdTBPerGalaxy * 1e12) : 0;
+    if (!['chunk', 'tile'].includes(cfg.segPad)) errors.push(`segPad must be 'chunk' or 'tile', got ${cfg.segPad}`);
     if (!['even', 'owner'].includes(cfg.placement)) errors.push(`placement must be 'even' or 'owner', got ${cfg.placement}`);
     if (owner && cfg.chunk % (32 * sp)) errors.push(`owner placement needs whole 32-row KV blocks: chunk ${cfg.chunk} is not a multiple of 32 x SP = ${32 * sp}`);
     return {
@@ -1223,7 +1234,7 @@
       let h = rawBlocks * B;
       const tot = TR.req_blocks[q.r] * B;
       if (h >= tot) h = tot - B; // always recompute the last block (logits)
-      if (cfg.layout === 'fixed' && !cfg.unaligned) { const a = Math.floor(h / cfg.chunk) * cfg.chunk; st.alignLoss += q.primer || !warmDone ? 0 : h - a; h = a; }
+      if (cfg.segPad === 'chunk' && !cfg.unaligned) { const a = Math.floor(h / cfg.chunk) * cfg.chunk; st.alignLoss += q.primer || !warmDone ? 0 : h - a; h = a; }
       return Math.max(0, h);
     }
     function tryStart(q, rep) { // acquire lane/slot, compute hit; false if blocked
@@ -1286,8 +1297,8 @@
     // pull segments into one chunk
     function formChunk(rep) {
       const segs = []; let T = 0; const C = cfg.chunk;
-      const fixed = cfg.layout === 'fixed';
-      // chunk token budget: batching on a variable layout packs up to the budget; a fixed layout packs whole chunks
+      const fixed = cfg.segPad === 'chunk';
+      // chunk token budget: batching with tile padding packs up to the budget; chunk padding packs whole chunks
       const budget = cfg.batch ? (fixed ? Math.max(cfg.budget, C) : cfg.budget) : C;
       // owner placement: rows per SP rank in this chunk; a rank holds at most plan.rankCap
       const own = plan.owner, load = own ? new Array(plan.sp).fill(0) : null;
@@ -1296,7 +1307,7 @@
       // owner placement: every rank is padded to the busiest one, so the chunk costs SP x its rows
       const done = () => ({ segs, T: own ? plan.sp * Math.max(...load) : T, load });
       // one segment per request per chunk (a request's tokens in a chunk form one attention call, whatever the
-      // layout): fixed layout = a whole number of chunks, variable layout = any multiple of 32*SP tokens
+      // padding): chunk padding = a whole number of chunks, tile padding = any multiple of 32*SP tokens (32, owner)
       const take = (q, maxTok) => {
         let n, npad;
         if (fixed) { const units = Math.floor(maxTok / C); if (units < 1) return false; n = Math.min(q.rem, units * C); npad = Math.ceil(n / C) * C; }
@@ -1435,7 +1446,7 @@
       // batchDynShape off: batched chunks have one static shape (the budget), so a partly filled batch still pays
       // the full budget in every token-proportional op and in the stage-to-stage send; routed MoE ops keep
       // trimming to the real tokens (padding_config actual_isl), as they do for a padded chunk tail today
-      const T = cfg.batch && !cfg.batchDynShape ? Math.max(ch.T, cfg.layout === 'fixed' ? Math.max(cfg.budget, cfg.chunk) : cfg.budget) : ch.T;
+      const T = cfg.batch && !cfg.batchDynShape ? Math.max(ch.T, cfg.segPad === 'chunk' ? Math.max(cfg.budget, cfg.chunk) : cfg.budget) : ch.T;
       let cs = segs.map((s) => ({ n: s.npad, na: s.n, k: s.k, cap: s.q.laneCap || plan.laneCap }));
       let trl;
       if (plan.owner) {
@@ -1447,7 +1458,7 @@
         cs.forEach((c, i) => { c.nl = Math.max(...segs[i].rows); c.nlf = segs[i].rows[rb]; pad += c.n; real += c.na; });
         trl = Math.max(...ch.load) * real / pad;
       }
-      if (!cfg.kvDedup && cfg.layout === 'fixed' && cs.some((s) => s.n > cfg.chunk)) { // one attention call per C-unit
+      if (!cfg.kvDedup && cfg.segPad === 'chunk' && cs.some((s) => s.n > cfg.chunk)) { // one attention call per C-unit
         const C = cfg.chunk;
         cs = cs.flatMap((s) => Array.from({ length: s.n / C }, (_, u) => ({ n: C, na: Math.max(0, Math.min(C, s.na - u * C)), k: s.k + u * C, cap: s.cap })));
       }
@@ -1718,7 +1729,7 @@
   // ------------------------------------------------------------------------------------------------------
   function matrixCell(cal, cfgIn, cached, nnew, users, reqsPerUser) {
     // the #57827 matrix runs used bf16 index_k (M3_INDEX_CACHE_BF16=1)
-    const plan = makePlan(Object.assign({ cache: 'inf', batch: false, layout: 'fixed', idxBf16: true }, cfgIn), cal);
+    const plan = makePlan(Object.assign({ cache: 'inf', batch: false, segPad: 'chunk', idxBf16: true }, cfgIn), cal);
     const S = plan.S, C = plan.cfg.chunk, out = new Float64Array(S);
     const cap = cached + 51200;
     const cachedA = Math.floor(cached / C) * C;
