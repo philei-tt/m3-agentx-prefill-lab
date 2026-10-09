@@ -70,7 +70,7 @@ async function main() {
       console.log(`    decode: held ${Math.round(p.decSlotsMean)} / max ${p.decSlotsMax}, decoding ${Math.round(p.decodingMean)} at ${Math.round(p.decodeTpsMean)} tokens/s/u (p10 ${Math.round(p.tsuP10)}, p50 ${Math.round(p.tsuP50)}), ring full ${pct(p.ringFullFrac)}`
         + ` | ${pct(p.decWaitPerS / p.reqPerS)} waited ${p.decWaitMean.toFixed(1)} s before prefill`
         + (p.decParkPerS > 0 ? ` | ${pct(p.decParkPerS / p.reqPerS)} parked on SSD (${Math.round(p.decParkedMean)} on average), decode SSD ${pct(p.decSsdUtil)} busy` : '')
-        + (p.decLaneWaitFrac > 0 ? ` | ${pct(p.decLaneWaitFrac)} waited for a slot after prefill, first token +${(1e3 * p.decStartDelayMean).toFixed(0)} ms` : '')
+        + (p.decSlotWaitFrac > 0 ? ` | ${pct(p.decSlotWaitFrac)} waited for a slot after prefill, first token +${(1e3 * p.decStartDelayMean).toFixed(0)} ms` : '')
         + (Number.isFinite(p.decHitRate) ? ` | decode-side hit ${(100 * p.decHitRate).toFixed(1)}%` : '')
         + (Number.isFinite(p.decPoolTokMean) ? ` | pool in use ${(p.decPoolTokMean / 1e6).toFixed(1)}M of ${(best.plan.decPoolTok / 1e6).toFixed(1)}M` : ''));
       console.log(`    every prefill config (net $/h at goodput): ${all.map((r) => `${prefillTxt(r.pf)} ${r.econ ? usd(r.econ.margin) : '–'}`).join('; ')}`);

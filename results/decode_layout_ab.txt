@@ -53,4 +53,4 @@
     decode: held 221 / max 270, decoding 101 at 164 tokens/s/u (p10 140, p50 182), ring full 0% | 0% waited 0.0 s before prefill
     every prefill config (net $/h at goodput): chunk 1024, no batching $65.54; chunk 2048, no batching $150; chunk 512, batch 4k $261; chunk 512, batch 8k $294; chunk 512, batch 16k $292; chunk 1024, batch 4k $228; chunk 1024, batch 8k $271; chunk 1024, batch 16k $259
 
-58 s
+55 s

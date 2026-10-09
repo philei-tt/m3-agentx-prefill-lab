@@ -138,25 +138,17 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
   its decode ends; the released KV stays cached.
   * `'slots'` (default, today): one 1M slot per request. A released slot keeps its stream's KV, LRU over idle slots
     (as prefill's static slots).
-  * `'hybrid'`: `decodeLanes` 1M lanes, with the rest of the memory a content-addressed paged pool (prefill's pool).
-    A request's pages (and its output's) are pinned from admission, with shared prefixes counted once. Admission waits
-    in FIFO order while the pinned and reserved pages would not fit. `decodeLaneScope`:
-    * `'global'` (default): a session takes a lane when its decode starts (default `decodeStages` lanes, × batches once
-      decode is batched). It copies its context in once (every stage in parallel, about 0.3 ms at 100k) and unpins its
-      pages. At most `decodeLanes` sessions decode; the rest wait for a lane in FIFO order. That wait delays the first
-      token, so it counts in TTFT (`decLaneWaitFrac`, `decStartDelayMean`).
-    * `'stage'`: `decodeLanes` lanes per stage (default 1). Once more sessions decode than there are lanes, every token
-      copies the session's whole context pool → lane on every stage, as prefill's per-stage lanes do for every chunk.
-      At 340 B per token per layer per chip, read and written at 50% of DRAM bandwidth, that adds 60 × context × 680 B
-      / 256 GB/s to each token's trip: about 16 ms at 100k, against a 5.6 ms trip at 180 tokens/s/u.
-  * `'paging'`: an ideal paged decode kernel; the whole memory is the pool.
+  * `'paging'`: an ideal paged decode kernel; the whole memory is a content-addressed paged pool (prefill's pool). A
+    request's pages (and its output's) are pinned from admission, with shared prefixes counted once, so memory is
+    request-sized and every session past prefill decodes at once, sharing the ring. Admission waits in FIFO order while
+    the pinned and reserved pages would not fit.
   * `decodeHostTier`: released slots and unpinned pages go on to host DRAM, then SSD, of the decode galaxies
     (`hostTier` specs × `decodeGalaxies`, default 16). They are read back over the decode side's PCIe and SSDs (before
     decode starts) when a later request needs that prefix. KV migration is not modelled, so decode-side hits
     (`decHitRate`; `migTps` = tokens still migrated per second) change no throughput. A read-back delays decode start
     only if it has not landed by the end of prefill.
   * Runs also report `decPoolTokMean` (pool pages pinned or reserved by sessions) and `decPcieH2DUtil`,
-    `decPcieD2HUtil`, `decSsdUtil`. TTFT runs to the start of decode: prefill, plus any wait for a lane or a read-back.
+    `decPcieD2HUtil`, `decSsdUtil`. TTFT runs to the start of decode: prefill, plus any wait for a slot or a read-back.
 * **Decode backpressure** (`decodeBackpressure`; page: "Decode backpressure"; fixed slots with the decode offload tiers).
   `'slot'` (default, today): a request waits for a free decode slot before its prefill starts. `'queue'`: it takes a
   free slot if there is one; otherwise its KV migrates to the decode SSDs (parked: PCIe + SSD write), and once its
@@ -425,7 +417,8 @@ billed as decoded.
   the hybrid beat slot backpressure by $14–25/h, the same effect as queue backpressure (a slot only for a session
   ready to decode). With one lane per stage every token copies the session's whole context into the lane on every
   stage, 3–4× the stage's own time at AgentX contexts (0.35 ms vs 0.09 ms at 130k; 12× at 1M), and net revenue was
-  −$157 / −$181 per hour. Neither is in the comparison any more.
+  −$157 / −$181 per hour. The hybrid layouts were removed from the simulator after that run (commit a88cb84 has them):
+  global lanes add nothing over queue backpressure, and per-stage lanes are too slow.
 
 **Decode backpressure with the decode ring** (`decodeSlots`, `decodeStages`; not part of the study base). Pool + host
 DRAM + SSD tiers, today's kernels, decode following context at 180 tokens/s/u @100k, goodput at p90 TTFT ≤ 10 s, net
@@ -636,8 +629,8 @@ Takeaways (study numbers are from this run, the third Oct 8 study, unless marked
 * Offload tiers: capacities and bandwidths come from the Galaxy Blackhole documentation and the drive datasheet, but the host DRAM reserves (OS, runtime, KV staging) are estimates, and transfers are ideal page DMAs. The PCIe figure assumes each chip moves its own KV over its own link; measure the sustained rate.
 * Pool copies are page-list gathers at 50% DRAM efficiency. Arena fragmentation is not modelled.
 * Decode speed is the measured M3 shape scaled to a 180 tokens/s/u @100k target, and the ring is ideal processor
-  sharing (no per-step overheads, no batched-decode slowdown, no TPOT limit). Decode KV is a memory of 1M slots in one
-  of three layouts (`decodeCache`); per-stage lane copies are DRAM-bound page gathers at 50% efficiency. KV migration to
+  sharing (no per-step overheads, no batched-decode slowdown, no TPOT limit). Decode KV is a memory of 1M slots, as fixed
+  slots or a paged pool (`decodeCache`). KV migration to
   decode is not modelled, so decode-side prefix hits and the decode offload tiers do not change throughput.
 * Meshes without a profile ([4,4], [1,4], …) are extrapolated. TP=2 stages use the [4,2] single-stage profile.
 * Ring-collective speed-ups on the torus are textbook link-load ratios, not measured; profile a [4,4] stage with ring CCLs to pin them down.

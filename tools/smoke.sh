@@ -23,7 +23,5 @@ run --set policy=rr --set cache=pool --set lanesOverride=true --set lanes=4 --se
 run --set policy=rr --set cache=pool --set copyMode=double --set hostTier=true
 run --set policy=rr --set cache=paging
 run --set cache=pool --set hostTier=true --set decodeStages=62 --set decodeSlots=75 --set decodeHostTier=true
-run --set cache=pool --set decodeStages=62 --set decodeSlots=75 --set decodeCache=hybrid --set decodeLanes=62 --set decodeHostTier=true
-run --set cache=pool --set decodeStages=62 --set decodeSlots=75 --set decodeCache=hybrid --set decodeLaneScope=stage --set decodeLanes=1
 run --set cache=pool --set decodeStages=62 --set decodeSlots=75 --set decodeCache=paging --set decodeHostTier=true
 run --set cache=pool --set hostTier=true --set decodeStages=62 --set decodeSlots=86 --set decodeHostTier=true --set decodeBackpressure=queue
