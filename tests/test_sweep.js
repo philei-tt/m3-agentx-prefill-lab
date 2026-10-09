@@ -30,4 +30,15 @@ const g = S.summarize([{ conc: 100, usefulTps: 100, ttftP90: 5 }, { conc: 200, u
 assert.ok(g > 100 && g < 200);
 assert.strictEqual(S.summarize([{ conc: 100, usefulTps: 100, ttftP90: 5 }, { conc: 200, usefulTps: 50, ttftP90: 20 }], 10).goodput, 100);
 
+// decode-speed SLO (tsuMin): a point must also have tsuP10 >= tsuMin; no interpolation towards a point that fails it
+{
+  const pts = [{ conc: 100, usefulTps: 100, ttftP90: 5, tsuP10: 80 }, { conc: 200, usefulTps: 200, ttftP90: 8, tsuP10: 40 }, { conc: 300, usefulTps: 250, ttftP90: 20, tsuP10: 30 }];
+  assert.strictEqual(S.summarize(pts, 10).goodput > 200, true);
+  assert.strictEqual(S.summarize(pts, 10, 50).goodput, 100);
+  assert.ok(!S.passes(pts[1], 10, 50) && S.passes(pts[1], 10) && !S.passes({ conc: 1, usefulTps: 1, ttftP90: 1 }, 10, 50));
+  const fall = (c) => ({ conc: c, usefulTps: c, ttftP90: 1, tsuP10: 200 - c / 10 });
+  const r = S.summarize(S.sweep([256, 512, 1024, 2048], 10, fall, { tsuMin: 50 }), 10, 50);
+  assert.ok(r.at.conc <= 1500 && r.at.conc >= 1024, `tsu bisection at ${r.at.conc}`);
+}
+
 console.log('test_sweep: all checks passed');

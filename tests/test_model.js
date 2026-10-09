@@ -177,6 +177,23 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   assert.ok(sl.decHitRate > 0 && st.decHitRate > sl.decHitRate && st.decPcieD2HUtil > 0 && sl.decPcieD2HUtil === 0, `slot hits ${sl.decHitRate} / tiers ${st.decHitRate}`);
 }
 
+// 10e. queue backpressure (fixed decode slots + decode SSD): no request waits before prefill without a limit; those
+//      admitted without a slot are parked on SSD and take a slot after prefill (first token later); slots held never
+//      exceed the slots, and more requests are served than with slot backpressure. A limit on parked requests holds
+//      it; the mode needs the decode SSD. Decode speed per session: decodeTps on an unshared ring, lower when shared.
+{
+  const cfg = Object.assign({ cache: 'pool', chunk: 512, batch: true, budget: 8192 }, base, { concurrency: 128, decodeStages: 8, decodeSlots: 10, decodeHostTier: true });
+  const sl = SIM.simulate(TR, cal, cfg), qu = SIM.simulate(TR, cal, Object.assign({ decodeBackpressure: 'queue' }, cfg));
+  const q4 = SIM.simulate(TR, cal, Object.assign({ decodeBackpressure: 'queue', decodeQueueMax: 4 }, cfg));
+  assert.ok(sl.decWaitPerS > 0 && sl.decParkPerS === 0 && qu.decWaitPerS === 0 && qu.decParkPerS > 0 && qu.decSlotsMax <= 10 && qu.decLaneWaitFrac > 0
+    && qu.decStartDelayMean > 0 && qu.decSsdUtil > 0 && qu.reqPerS > sl.reqPerS, `queue: parked ${qu.decParkPerS} req ${qu.reqPerS} vs ${sl.reqPerS}`);
+  assert.ok(q4.decParkedMean <= 4 + 1e-9 && q4.decWaitPerS > 0 && q4.decParkPerS > 0, `queue max 4: parked ${q4.decParkedMean}`);
+  assert.ok(SIM.makePlan(Object.assign({}, cfg, { decodeBackpressure: 'queue', decodeHostTier: false }), cal).errors.some((e) => e.includes('queue backpressure')));
+  const flat = Object.assign({}, cfg, { decodeCurve: 'flat', decodeStages: 0, decodeSlots: 0, decodeHostTier: false });
+  const f = SIM.simulate(TR, cal, flat), sh = SIM.simulate(TR, cal, Object.assign({}, flat, { decodeStages: 4 }));
+  assert.ok(Math.abs(f.tsuP10 - 180) < 1e-6 && Math.abs(f.tsuP50 - 180) < 1e-6 && sh.tsuP10 < 180 && sh.tsuP10 <= sh.tsuP50, `tsu ${f.tsuP10} / shared ${sh.tsuP10}`);
+}
+
 // 10c. batchChunksPerRequest L: rounds over the queue, up to L chunks per request per round.
 //      L = 1 is an even split: within a batch, every request not finishing in it holds the largest share (within one
 //      chunk), and a request alone takes the whole budget. L = 4: at most one request per batch gets fewer than 4

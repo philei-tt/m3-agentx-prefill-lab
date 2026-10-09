@@ -26,3 +26,4 @@ run --set cache=pool --set hostTier=true --set decodeStages=62 --set decodeSlots
 run --set cache=pool --set decodeStages=62 --set decodeSlots=75 --set decodeCache=hybrid --set decodeLanes=62 --set decodeHostTier=true
 run --set cache=pool --set decodeStages=62 --set decodeSlots=75 --set decodeCache=hybrid --set decodeLaneScope=stage --set decodeLanes=1
 run --set cache=pool --set decodeStages=62 --set decodeSlots=75 --set decodeCache=paging --set decodeHostTier=true
+run --set cache=pool --set hostTier=true --set decodeStages=62 --set decodeSlots=86 --set decodeHostTier=true --set decodeBackpressure=queue
