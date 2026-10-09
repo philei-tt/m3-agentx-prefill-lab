@@ -7,7 +7,7 @@ const study = require(require('../lib/paths.js').STUDY);
 const LAB = JSON.parse(require('fs').readFileSync(require('path').join(require('../lib/paths.js').RESULTS, 'layout_ab_inf.json')));
 const BUD = {};
 for (const [key, rows] of Object.entries(LAB.scenarios)) {
-  const b = rows.find((x) => x.mode === 'base' && x.segPad === 'chunk' && x.attn === 'seq' && x.chunk === 128).budget;
+  const b = rows.find((x) => x.mode === 'base' && x.reqPad === 'chunk' && x.attn === 'seq' && x.chunk === 128).budget;
   BUD[key] = b === Math.max(...LAB.budgets) ? [b, 2 * b] : [b];
 }
 (async () => {
@@ -15,11 +15,11 @@ for (const [key, rows] of Object.entries(LAB.scenarios)) {
   const pool = new Pool(i >= 0 ? Number(process.argv[i + 1]) : 38);
   const jobs = [];
   for (const [key, R] of Object.entries(study.scenarios)) {
-    const keys = R.bestKeys.filter((k) => !['segPad', 'fused', 'batch'].includes(k));
+    const keys = R.bestKeys.filter((k) => !['reqPad', 'fused', 'batch'].includes(k));
     const g = R.grid[0].extra;
     const base = Object.assign(withFeatures(R.base, keys), { stages: g.stages, mesh: g.mesh, replicas: g.replicas, cache: 'inf', hostTier: false, laneArena: false, batch: true });
-    for (const B of BUD[key]) for (const [v, d] of [['chunk C=128 seq', { segPad: 'chunk', chunk: 128, attn: 'seq' }], ['chunk C=128 fused', { segPad: 'chunk', chunk: 128, attn: 'fused' }],
-      ['tile seq', { segPad: 'tile', chunk: 5120, attn: 'seq' }], ['tile fused', { segPad: 'tile', chunk: 5120, attn: 'fused' }], ['chunk C=128 fused + prefetch', { segPad: 'chunk', chunk: 128, attn: 'fused', prefetchKV: true }]])
+    for (const B of BUD[key]) for (const [v, d] of [['chunk C=128 seq', { reqPad: 'chunk', chunk: 128, attn: 'seq' }], ['chunk C=128 fused', { reqPad: 'chunk', chunk: 128, attn: 'fused' }],
+      ['tile seq', { reqPad: 'tile', chunk: 5120, attn: 'seq' }], ['tile fused', { reqPad: 'tile', chunk: 5120, attn: 'fused' }], ['chunk C=128 fused + prefetch', { reqPad: 'chunk', chunk: 128, attn: 'fused', prefetchKV: true }]])
       jobs.push(pool.evalCfg(`${key} ${v} ${B}`, Object.assign({}, base, d, { budget: B }), CONCS.concat([5120, 6144]), SLO).then((r) => ({ key, v, B, s: summarize(r.points, SLO) })));
   }
   const res = await Promise.all(jobs);

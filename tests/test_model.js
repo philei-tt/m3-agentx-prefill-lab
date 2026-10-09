@@ -23,7 +23,7 @@ for (const opEff of [0, 0.5, 1]) {
 
 // 2. fused multi-user attention is never slower than per-request attention
 for (const kind of ['moe', 'dense']) {
-  const pf = plan({ attn: 'fused', batch: true, segPad: 'tile', budget: 16384 }), ps = plan({ attn: 'seq', batch: true, segPad: 'tile', budget: 16384 });
+  const pf = plan({ attn: 'fused', batch: true, reqPad: 'tile', budget: 16384 }), ps = plan({ attn: 'seq', batch: true, reqPad: 'tile', budget: 16384 });
   for (const segs of [[{ n: 8192, k: 500000 }, { n: 256, k: 1000 }], [{ n: 640, k: 50000 }, { n: 640, k: 60000 }, { n: 1600, k: 1e5 }]]) {
     const T = segs.reduce((a, s) => a + s.n, 0);
     const s2 = segs.map((s) => Object.assign({ na: s.n, cap: 0 }, s));
@@ -43,7 +43,7 @@ const oom = (cfg) => plan(cfg).errors.some((e) => e.startsWith('out of memory'))
 assert.ok(oom({ cache: 'slots', batch: true, budget: 8192 }), '4 per batch x 16 stages > 20 slots');
 assert.ok(!oom({ cache: 'slots' }) && !oom({ cache: 'slots', galaxies: 8, stages: 32 }), 'unbatched slots fit');
 assert.ok(!oom({ cache: 'slots', batch: true, budget: 8192, stages: 4, mesh: [8, 4] }), '4 per batch x 4 stages <= 22 slots');
-assert.ok(oom({ cache: 'slots', batch: true, budget: 8192, segPad: 'tile', stages: 4, mesh: [8, 4] }), 'tile padding: budget / 32SP per batch');
+assert.ok(oom({ cache: 'slots', batch: true, budget: 8192, reqPad: 'tile', stages: 4, mesh: [8, 4] }), 'tile padding: budget / 32SP per batch');
 for (const cache of ['pool', 'paging', 'inf']) assert.ok(!plan({ cache, batch: true }).errors.length, cache);
 
 // 5. replay: paging with an unbounded pool behaves exactly like the infinite cache
@@ -53,7 +53,7 @@ const b = SIM.simulate(TR, cal, Object.assign({ cache: 'paging', reserveGB: -1e6
 assert.strictEqual(a.done, b.done); assert.ok(Math.abs(a.usefulTps - b.usefulTps) < 1e-6 * a.usefulTps + 1e-9);
 
 // 6. replay: chunk-padded batching packs one segment per request per chunk, so chunks carry several requests
-const r = SIM.simulate(TR, cal, Object.assign({ cache: 'inf', batch: true, budget: 16384, segPad: 'chunk' }, base, { concurrency: 64 }));
+const r = SIM.simulate(TR, cal, Object.assign({ cache: 'inf', batch: true, budget: 16384, reqPad: 'chunk' }, base, { concurrency: 64 }));
 assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
 
 // 7. replay: offload tiers behind static slots keep evicted slots' KV, so reads happen and the hit rate improves; the
@@ -215,17 +215,17 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   assert.deepStrictEqual(W([480, 0, 0, 0], 0, 1024, 512, 512, 4, false), [32, [480, 0, 0, 0]]);
   // no all-to-all: an owner-placed layer costs what chunk padding does for the same segments
   const segs = [{ n: 2048, na: 2000, k: 30000, cap: 0 }];
-  const po = plan({ segPad: 'tile', placement: 'owner' }), pf = plan({ segPad: 'chunk' }), pe = plan({ segPad: 'tile' });
+  const po = plan({ reqPad: 'tile', placement: 'owner' }), pf = plan({ reqPad: 'chunk' }), pe = plan({ reqPad: 'tile' });
   for (const kind of ['moe', 'dense']) {
     assert.strictEqual(po.layer(kind, 2048, segs), pf.layer(kind, 2048, segs), kind);
     assert.ok(pe.layer(kind, 2048, segs) > po.layer(kind, 2048, segs), `${kind}: even split pays the all-to-all`);
   }
-  assert.ok(plan({ segPad: 'tile', placement: 'owner', chunk: 96 }).errors.some((e) => e.includes('owner placement')));
+  assert.ok(plan({ reqPad: 'tile', placement: 'owner', chunk: 96 }).errors.some((e) => e.includes('owner placement')));
   // replay: padding (rank imbalance included) between the even split (none) and chunk padding
   const pad = (cfg) => SIM.simulate(TR, cal, Object.assign({ cache: 'inf' }, base, { concurrency: 64 }, cfg)).padFrac;
-  const [pF, pE, pO] = [pad({ segPad: 'chunk' }), pad({ segPad: 'tile' }), pad({ segPad: 'tile', placement: 'owner' })];
+  const [pF, pE, pO] = [pad({ reqPad: 'chunk' }), pad({ reqPad: 'tile' }), pad({ reqPad: 'tile', placement: 'owner' })];
   assert.ok(pE < pO && pO < pF, `pad even ${pE} owner ${pO} fixed ${pF}`);
-  const rb = SIM.simulate(TR, cal, Object.assign({ cache: 'inf', batch: true, budget: 16384, segPad: 'tile', placement: 'owner' }, base, { concurrency: 64 }));
+  const rb = SIM.simulate(TR, cal, Object.assign({ cache: 'inf', batch: true, budget: 16384, reqPad: 'tile', placement: 'owner' }, base, { concurrency: 64 }));
   assert.ok(rb.done > 0 && rb.avgChunkTok <= 16384 && rb.maxUtil <= 1 + 1e-9);
 }
 

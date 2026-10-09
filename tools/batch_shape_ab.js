@@ -21,11 +21,11 @@ async function main() {
   groups.push({ name: 'today 4gx 16x[2,4] C=2048 + pool + tiers', base: today, noBatch: today });
   for (const [key, R] of Object.entries(study.scenarios)) {
     const g = R.grid[0].extra;
-    const keys = R.bestKeys.filter((k) => !['segPad', 'fused', 'batch'].includes(k));
+    const keys = R.bestKeys.filter((k) => !['reqPad', 'fused', 'batch'].includes(k));
     const b = Object.assign(withFeatures(R.base, keys), { stages: g.stages, mesh: g.mesh, replicas: g.replicas },
       g.arenaTokens ? { laneArena: true, arenaTokens: g.arenaTokens } : { lanes: g.lanes });
-    groups.push({ name: `${key} best stack, chunk C=256`, base: Object.assign({}, b, { segPad: 'chunk', chunk: 256 }), noBatch: Object.assign({}, b, { segPad: 'chunk', chunk: 2048 }) });
-    groups.push({ name: `${key} best stack, tile padding`, base: Object.assign({}, b, { segPad: 'tile', chunk: 5120 }) });
+    groups.push({ name: `${key} best stack, chunk C=256`, base: Object.assign({}, b, { reqPad: 'chunk', chunk: 256 }), noBatch: Object.assign({}, b, { reqPad: 'chunk', chunk: 2048 }) });
+    groups.push({ name: `${key} best stack, tile padding`, base: Object.assign({}, b, { reqPad: 'tile', chunk: 5120 }) });
   }
   const run = (id, cfg) => pool.evalCfg(id, laneCount(cfg), CONCS, SLO).then((r) => summarize(r.points, SLO));
   const res = await Promise.all(groups.map(async (G) => {

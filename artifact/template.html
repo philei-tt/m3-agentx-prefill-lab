@@ -209,10 +209,10 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
   </fieldset>
   <fieldset>
     <legend>Chunking &amp; batching</legend>
-    <div class="row"><label for="segPad">Segment padding</label><select id="segPad"><option value="chunk">chunk (C tokens)</option><option value="tile">tile (32·SP tokens)</option></select></div>
+    <div class="row"><label for="reqPad">Request padding</label><select id="reqPad"><option value="chunk">chunk (C tokens)</option><option value="tile">tile (32·SP tokens)</option></select></div>
     <div class="hint">What each request's tokens in a pass are padded to. Chunk (today): a multiple of the chunk size. Tile: a multiple of 32·SP, one 32-row tile per SP rank (32 with owner placement). Either way the KV cache stays block-cyclic with chunk/SP rows per rank.</div>
     <div class="row"><label for="placement">Token placement</label><select id="placement"><option value="even">even split over SP (a2a KV write)</option><option value="owner">owner rank (no a2a, uneven ranks)</option></select></div>
-    <div class="hint">Tile padding only. Even split: each segment is padded to 32·SP and split evenly, then an all-to-all writes each K/V row to the rank that owns it (none when chunk = 32·SP). Owner rank: each token is computed on the rank that owns its KV row (blocks of chunk/SP), so segments are padded to 32 and there is no all-to-all, but every rank is padded to the busiest one.</div>
+    <div class="hint">Tile padding only. Even split: each request's tokens in a pass are padded to 32·SP and split evenly, then an all-to-all writes each K/V row to the rank that owns it (none when chunk = 32·SP). Owner rank: each token is computed on the rank that owns its KV row (blocks of chunk/SP), so segments are padded to 32 and there is no all-to-all, but every rank is padded to the busiest one.</div>
     <div class="row"><label for="chunk">Chunk size</label><select id="chunk"><option>128</option><option>256</option><option>512</option><option>1024</option><option>2048</option><option>4096</option><option>5120</option><option>8192</option></select></div>
     <div class="hint" id="chunkHint" hidden>Not used: with batching, tile padding and an even split, the token budget below is the pass size (unless max chunks per request is set).</div>
     <div class="row check"><input id="batch" type="checkbox"><label for="batch">Batch several requests per pipeline pass</label></div>
@@ -316,7 +316,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
         <p>Each scenario has two numbers per feature, measured from opposite ends:</p>
         <ul>
           <li><b>G = gain when added (step #).</b> Start from today's configuration, try every feature and keep the best; repeat from the new configuration until all features are in. "×1.65 #2" = this feature was the 2nd one added and multiplied goodput by 1.65 at that point. The order is a suggested build order; a gain depends on the features added before it.</li>
-          <li><b>LOO = loss if removed (leave-one-out).</b> Start with every feature on and turn only this one off. "×1.96" = goodput drops 1.96x without it. ×1.00 = it adds nothing once everything else is on. That is usually because another feature does the same job: batching with a small chunk already gets nearly all of the gain of segment padding to 32·SP, for example.</li>
+          <li><b>LOO = loss if removed (leave-one-out).</b> Start with every feature on and turn only this one off. "×1.96" = goodput drops 1.96x without it. ×1.00 = it adds nothing once everything else is on. That is usually because another feature does the same job: batching with a small chunk already gets nearly all of the gain of request padding to 32·SP, for example.</li>
         </ul>
         <p>Columns: "4gx today" = 4 galaxies with today's kernels, "4gx roofline" = 4 galaxies with kernels at roofline targets, and the same for 8 galaxies (Method tab).</p>
         <p><b>Order and tier</b> come from the "8gx today" column (8 galaxies, today's kernels): the larger of its G and LOO, highest first. P0 ≥ 1.25x, P1 ≥ 1.07x, else P2. The other columns show how the value changes with fewer galaxies or faster kernels. Complexity is a rough low / med / high judgement of the implementation work (Method tab).</p>
@@ -404,7 +404,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li><b>C:</b> chunk 2048, same split as B.</li>
         </ul>
         Each run measures a (new tokens × cached tokens) matrix, loaded and idle. The preset <span class="mono">today-C</span> is run C.</li>
-      <li><b>Features under consideration</b> (defined in "Features" below): batching several requests per pipeline pass; slot lanes plus a paged KV pool; segment padding to 32·SP with an all-to-all KV write; plus a few more the study adds (KV offload tiers, index-cache layout, async stage handoff, and others).</li>
+      <li><b>Features under consideration</b> (defined in "Features" below): batching several requests per pipeline pass; slot lanes plus a paged KV pool; request padding to 32·SP with an all-to-all KV write; plus a few more the study adds (KV offload tiers, index-cache layout, async stage handoff, and others).</li>
     </ul>
 
     <h2 id="m-metric">The metric: goodput</h2>
@@ -561,7 +561,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <ul>
       <li><b>Stages and chunks.</b> Stages process chunks in order. A chunk's time on a stage is the sum of its layers' costs plus overhead; then the blocking send runs; then the hop latency applies before the next stage can start it. At most 2S+4 chunks are in flight.</li>
       <li><b>Chunk padding</b> (today). One request per chunk, padded to the chunk size. The chunk is also the KV block-cyclic slab, and the host rotates a pass's tokens so that each SP rank computes the rows it owns (tt-metal #57636): no KV traffic, and a pass may start at any 32-token boundary.</li>
-      <li><b>Tile padding.</b> Passes of any size. Each request's segment is padded only to whole 32-row tiles per SP rank, and the token placement decides where its tokens are computed:
+      <li><b>Tile padding.</b> Passes of any size. Each request's tokens in a pass are padded only to whole 32-row tiles per SP rank, and the token placement decides where its tokens are computed:
         <ul>
           <li><b>Even split</b>: padded to 32·SP and split evenly; each layer pays an all-to-all that writes the new K/V rows to the SP rank that owns them (none when chunk = 32·SP).</li>
           <li><b>Owner rank</b>: each token on the rank that owns its KV row; padded to 32 and no all-to-all, but every rank is padded to the busiest one. Close to the even split only with small chunks.</li>
@@ -605,7 +605,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Not a feature: bounded dense gather.</b> Earlier versions listed bounding the dense ring-joint gather to [0, kv_len) as a P0 feature. The op already does this (tt-metal #47539), so it is part of today's baseline, and the old whole-lane behaviour is only a sensitivity row.</li>
       <li><b>Not a feature: unaligned resume.</b> Resuming at any 32-token boundary instead of rounding the cached prefix down to a chunk multiple (with chunk 2048 the rounding discards about 1024 cached tokens per request). It is merged (tt-metal #57636; validated on 5 layers, the full 60-layer two-turn accuracy check is still to run), so the simulator always resumes unaligned (<span class="mono">node run.js --set unaligned=false</span> still models the old rounding). Tile padding always resumes unaligned.</li>
       <li><b>index_k stored once:</b> the index-key cache is kept on one TP column instead of all four, and gathered when needed. This cuts KV size from 2112 to 1344 B per token per layer.</li>
-      <li><b>Segment padding to 32·SP:</b> tile padding with an even split; see Pipeline.</li>
+      <li><b>Request padding to 32·SP:</b> tile padding with an even split; see Pipeline.</li>
       <li><b>Multi-request batching:</b> see Pipeline; 16k-token budget in the roadmap, 4k-32k in the grid.</li>
       <li><b>Fused multi-user attention:</b> one attention kernel over all requests in a chunk.</li>
       <li><b>Async stage handoff:</b> the send to the next stage overlaps with computing the next chunk. Removes the blocking send; the transfer then runs at link rate.</li>
@@ -780,7 +780,7 @@ function mkWorker() {
 }
 
 // ---------------------------------------------------------------- form <-> cfg
-const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'segPad', 'placement', 'chunk', 'batch', 'budget', 'batchDynShape', 'batchChunksPerRequest', 'attn', 'kvDedup', 'prefetchKV', 'policy',
+const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'reqPad', 'placement', 'chunk', 'batch', 'budget', 'batchDynShape', 'batchChunksPerRequest', 'attn', 'kvDedup', 'prefetchKV', 'policy',
   'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeStages', 'decodeCurve', 'duration', 'seed'];
 const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchChunksPerRequest', 'lanes', 'arenaTokens', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeStages', 'duration', 'seed']);
 function setForm(cfg) {
@@ -824,7 +824,7 @@ function syncUi() {
   // pool lanes per stage (as makePlan): derived = copy-mode buffers x requests per batch; the override is for batching
   // on the pool only, and tile-padded batching (no chunk units) must override
   const fixedLanes = pool && !$('laneArena').checked, batched = $('batch').checked;
-  const canOverride = fixedLanes && batched, mustOverride = canOverride && $('segPad').value === 'tile';
+  const canOverride = fixedLanes && batched, mustOverride = canOverride && $('reqPad').value === 'tile';
   if (!canOverride) $('lanesOverride').checked = false;
   if (mustOverride) $('lanesOverride').checked = true;
   $('lanesOverride').disabled = !canOverride || mustOverride;
@@ -842,8 +842,8 @@ function syncUi() {
   // tile-padded batching packs to the budget; the chunk size only sets the per-request cap, if there is one, so the
   // chunk field is unused
   // (owner placement still needs it: it sets the KV block per rank)
-  const chunkUnused = $('batch').checked && $('segPad').value === 'tile' && $('placement').value !== 'owner' && !(Number($('batchChunksPerRequest').value) > 0);
-  $('placement').disabled = $('segPad').value !== 'tile';
+  const chunkUnused = $('batch').checked && $('reqPad').value === 'tile' && $('placement').value !== 'owner' && !(Number($('batchChunksPerRequest').value) > 0);
+  $('placement').disabled = $('reqPad').value !== 'tile';
   $('chunk').disabled = chunkUnused; $('chunkHint').hidden = !chunkUnused;
 }
 // keep the pipeline valid when the hardware changes: fill each replica with stages, and drop a custom split
@@ -1081,7 +1081,7 @@ function render() {
   // a picked point other than the goodput point: Goodput and ∞-cache tiles show that concurrency too
   const showPick = pickP && pickP !== a, infP = showPick ? infAll.find((p) => p.conc === pickP.conc && !p.error) : null;
   const v = pickP || a || (R && R.peak);
-  const where = !v ? '' : v === a ? 'at the goodput point' : `at C = ${v.conc}` + (pickP ? '' : ' (peak)');
+  const where = !v || v === a ? '' : `at C = ${v.conc}` + (pickP ? '' : ' (peak)');
   const at = (txt) => (where ? `${txt}, ${where}` : txt);
   const vpts = realAll.filter((p) => !p.error).sort((x, y) => x.conc - y.conc);
   $('viewAt').innerHTML = `<option value="">${a ? `goodput point (C = ${a.conc})` : R && R.peak ? `peak (C = ${R.peak.conc}): no point meets the SLO` : 'goodput point'}</option>`
@@ -1108,6 +1108,7 @@ function render() {
       `Input tokens: ${fmtUsd(e.inUsd)} (${fmtUsd(h.cachedUsd)} cache + ${fmtUsd(h.newUsd)} new)`,
       `Output tokens: ${isFinite(e.outUsd) ? fmtUsd(e.outUsd) : '– (needs a live run)'}`,
       `<span title="${runGalaxies()} prefill + ${e.decodeUsd / Math.max(1e-9, cost().galaxyUsdPerH)} decode galaxies">Cost: ${fmtUsd(e.cost)} (${runGalaxies() + cost().decodeGalaxies} galaxies)</span>`,
+      `Net per galaxy: ${isFinite(e.margin) ? fmtUsd(e.margin / (runGalaxies() + cost().decodeGalaxies)) : '–'}`,
     ].join('<br>') : ''],
     ['Peak useful', R && R.peak ? fmtK(R.peak.usefulTps) : '–', 'any TTFT', R && R.peak ? `C = ${R.peak.conc}, p90 ${fmtS(R.peak.ttftP90)} s` : ''],
     ['Wasted compute', sp && sp.proc ? pct((sp.rep + sp.pad) / sp.proc, 1) : '–', at('of processed tokens'), sp && sp.proc ? `re-prefill ${pct(sp.rep / sp.proc, 1)} · padding ${pct(sp.pad / sp.proc, 1)}` : ''],
@@ -1262,7 +1263,7 @@ function renderRoadmap() {
   $('roadHead').innerHTML = `<h2>What moves goodput on AgentX</h2>
   <p>Goodput = useful tok/s with p90 TTFT ≤ ${STUDY.slo} s. Baseline → best configuration found: <b>4 galaxies</b> ${fmtK(g0.greedy[0].goodput)} → <b>${fmtK(g0.grid[0].goodput)}</b> with today's kernels, ${fmtK(g1.grid[0].goodput)} with roofline kernels; <b>8 galaxies</b> ${fmtK(h0.greedy[0].goodput)} → <b>${fmtK(h0.grid[0].goodput)}</b> today, ${fmtK(h1.grid[0].goodput)} with roofline kernels.</p>
   <p>P0 features: ${top.map((k) => `<span class="pill p0">${esc(k)}</span>`).join(' ')}. The ordering, gains and complexity are below; hover the orange ticks for the infinite-cache ceiling of each step.</p>
-  <p>On AgentX traffic, KV-cache capacity is the first wall, so the features that add effective KV capacity come first: the KV offload tiers (host DRAM + SSD) and the paged pool. With them the best configurations reach 99% of their own infinite-cache goodput with today's kernels and 65-90% with roofline kernels, where reading KV back from the tiers is the next limit. After that, compute features (async handoff, batching, segment padding) matter most. The study assumes decode keeps up: with today's decode (85 slots, 64-stage ring) every best configuration falls to 41-46k useful tok/s, and with 150 slots and a 128-stage ring (batched decode, m = 2) to 65-92k, so decode capacity, not these prefill features, sets the deployable goodput (sensitivity rows, Method tab). "Today's kernels" / "roofline kernels", greedy vs leave-one-out, tiers and scope are defined in the <a href="#method">Method</a> tab.</p>`;
+  <p>On AgentX traffic, KV-cache capacity is the first wall, so the features that add effective KV capacity come first: the KV offload tiers (host DRAM + SSD) and the paged pool. With them the best configurations reach 99% of their own infinite-cache goodput with today's kernels and 65-90% with roofline kernels, where reading KV back from the tiers is the next limit. After that, compute features (async handoff, batching, request padding) matter most. The study assumes decode keeps up: with today's decode (85 slots, 64-stage ring) every best configuration falls to 41-46k useful tok/s, and with 150 slots and a 128-stage ring (batched decode, m = 2) to 65-92k, so decode capacity, not these prefill features, sets the deployable goodput (sensitivity rows, Method tab). "Today's kernels" / "roofline kernels", greedy vs leave-one-out, tiers and scope are defined in the <a href="#method">Method</a> tab.</p>`;
 }
 
 // ---------------------------------------------------------------- model tab

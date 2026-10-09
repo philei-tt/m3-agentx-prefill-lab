@@ -62,7 +62,7 @@ for (const cache of ['slots', 'inf']) {
 //    and the rotation is fair
 {
   const C = 1024, budget = 8192;
-  const { chunks } = trace({ cache: 'pool', policy: 'rr', batch: true, chunk: C, budget, segPad: 'chunk', unaligned: true });
+  const { chunks } = trace({ cache: 'pool', policy: 'rr', batch: true, chunk: C, budget, reqPad: 'chunk', unaligned: true });
   assert.ok(once(chunks), 'a request appears twice in one batch');
   assert.ok(chunks.every((ch) => ch.reduce((a, s) => a + Math.ceil(s[1] / C) * C, 0) <= budget), 'batch over budget');
   assert.ok(chunks.some((ch) => ch.length > 1) && fair(chunks), 'batched rr is not round robin');
@@ -70,7 +70,7 @@ for (const cache of ['slots', 'inf']) {
 
 // 3. round robin on pool lanes
 const pool = { cache: 'pool', laneScope: 'stage', copyMode: 'double', policy: 'rr' };
-const batched = Object.assign({ batch: true, chunk: 1024, budget: 8192, segPad: 'chunk' }, pool);
+const batched = Object.assign({ batch: true, chunk: 1024, budget: 8192, reqPad: 'chunk' }, pool);
 // 3a. lane count per stage (every policy): buffers of the copy mode x the most requests per batch (1 unbatched, the
 //     chunk units per batch with chunk-padded batching); lanesOverride sets it, only with batching on the pool
 const lanesOf = (cfg) => SIM.makePlan(cfg, cal).lanes;
@@ -92,7 +92,7 @@ for (const cache of ['inf', 'paging']) {
   assert.ok(!p.errors.length && p.lanes === Infinity, `override on ${cache}: ${p.errors}`);
 }
 // a tile-padded batch has no chunk units: the lane count (the most requests per batch) must be given
-const tileBatched = Object.assign({}, batched, { segPad: 'tile' });
+const tileBatched = Object.assign({}, batched, { reqPad: 'tile' });
 assert.ok(SIM.makePlan(tileBatched, cal).errors.some((e) => e.includes('lanesOverride')), 'tile-padded batching without a lane count');
 const tile5 = Object.assign({}, tileBatched, { lanesOverride: true, lanes: 5 });
 assert.ok(!SIM.makePlan(tile5, cal).errors.length);

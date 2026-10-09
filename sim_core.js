@@ -396,10 +396,10 @@
     // index_k cache dtype / de-replicated over TP. Today: bf8 x TP replicas (the deployed runner rejects bf16); the
     // #57827 calibration runs used bf16, so the calibration and validation replays pin idxBf16: true
     idxBf16: false, idxDerep: false,
-    // segPad: what each request's tokens in a pass (its segment) are padded to. 'chunk' (today) = a multiple of the
+    // reqPad: what each request's tokens in a pass (its segment) are padded to. 'chunk' (today) = a multiple of the
     //   chunk C, which is also the block-cyclic KV slab (C/SP rows per SP rank); 'tile' = whole 32-row tiles on every
     //   SP rank (see placement).
-    chunk: 5120, segPad: 'chunk', batch: false, budget: 16384, attn: 'seq', policy: 'rr',
+    chunk: 5120, reqPad: 'chunk', batch: false, budget: 16384, attn: 'seq', policy: 'rr',
     // placement (tile padding only): where a segment's new tokens are computed. 'even' = split evenly over the SP
     //   ranks (segments padded to 32*SP), then an all-to-all writes each K/V row to the rank that owns it (none is
     //   needed when C = 32*SP). 'owner' = each token goes to the rank that owns its KV row (as chunk padding does), so
@@ -560,7 +560,7 @@
 
   function makePlan(cfgIn, cal) {
     const cfg = Object.assign({}, DEFAULTS, cfgIn);
-    const tile = cfg.segPad === 'tile';
+    const tile = cfg.reqPad === 'tile';
     const [sp, tp] = cfg.mesh; const P = sp * tp; const S = cfg.stages;
     const chipsRep = 32 * cfg.galaxies / cfg.replicas;
     const errors = [];
@@ -591,7 +591,7 @@
     const lat = { ccl: (1 - a) * LAT_MEAS.ccl + a * LAT_TGT.ccl, op: (1 - a) * LAT_MEAS.op + a * LAT_TGT.op, denseFix: (1 - a) * fix0 + a * Math.min(fix0, 1) };
     const idxB = cfg.idxBf16 ? BF16 : BF8;
     const owner = tile && cfg.placement === 'owner';
-    const gran = owner ? 32 : 32 * sp; // tile padding: segment padding unit
+    const gran = owner ? 32 : 32 * sp; // tile padding: request padding unit
     // evenSplit: segments split evenly over SP, so their new K/V rows need an all-to-all to reach the ranks that own
     // them (not when C = 32*SP: the split then matches the KV blocks)
     const evenSplit = tile && !owner && cfg.chunk > 32 * sp;
@@ -700,7 +700,7 @@
     const tokOf = (bytesPerGalaxy) => bytesPerGalaxy * gpr / (M3.L * kvbHost);
     const hostTok = offload ? tokOf(hostBudget.kv * GB) : 0;
     const ssdTok = offload ? tokOf(cfg.ssdTBPerGalaxy * 1e12) : 0;
-    if (!['chunk', 'tile'].includes(cfg.segPad)) errors.push(`segPad must be 'chunk' or 'tile', got ${cfg.segPad}`);
+    if (!['chunk', 'tile'].includes(cfg.reqPad)) errors.push(`reqPad must be 'chunk' or 'tile', got ${cfg.reqPad}`);
     if (!['even', 'owner'].includes(cfg.placement)) errors.push(`placement must be 'even' or 'owner', got ${cfg.placement}`);
     if (owner && cfg.chunk % (32 * sp)) errors.push(`owner placement needs whole 32-row KV blocks: chunk ${cfg.chunk} is not a multiple of 32 x SP = ${32 * sp}`);
     return {
@@ -1231,7 +1231,7 @@
       let h = rawBlocks * B;
       const tot = TR.req_blocks[q.r] * B;
       if (h >= tot) h = tot - B; // always recompute the last block (logits)
-      if (cfg.segPad === 'chunk' && !cfg.unaligned) { const a = Math.floor(h / cfg.chunk) * cfg.chunk; st.alignLoss += q.primer || !warmDone ? 0 : h - a; h = a; }
+      if (cfg.reqPad === 'chunk' && !cfg.unaligned) { const a = Math.floor(h / cfg.chunk) * cfg.chunk; st.alignLoss += q.primer || !warmDone ? 0 : h - a; h = a; }
       return Math.max(0, h);
     }
     function tryStart(q, rep) { // acquire lane/slot, compute hit; false if blocked
@@ -1294,7 +1294,7 @@
     // pull segments into one chunk
     function formChunk(rep) {
       const segs = []; let T = 0; const C = cfg.chunk;
-      const fixed = cfg.segPad === 'chunk';
+      const fixed = cfg.reqPad === 'chunk';
       // chunk token budget: batching with tile padding packs up to the budget; chunk padding packs whole chunks
       const budget = cfg.batch ? (fixed ? Math.max(cfg.budget, C) : cfg.budget) : C;
       // owner placement: rows per SP rank in this chunk; a rank holds at most plan.rankCap
@@ -1443,7 +1443,7 @@
       // batchDynShape off: batched chunks have one static shape (the budget), so a partly filled batch still pays
       // the full budget in every token-proportional op and in the stage-to-stage send; routed MoE ops keep
       // trimming to the real tokens (padding_config actual_isl), as they do for a padded chunk tail today
-      const T = cfg.batch && !cfg.batchDynShape ? Math.max(ch.T, cfg.segPad === 'chunk' ? Math.max(cfg.budget, cfg.chunk) : cfg.budget) : ch.T;
+      const T = cfg.batch && !cfg.batchDynShape ? Math.max(ch.T, cfg.reqPad === 'chunk' ? Math.max(cfg.budget, cfg.chunk) : cfg.budget) : ch.T;
       let cs = segs.map((s) => ({ n: s.npad, na: s.n, k: s.k, cap: s.q.laneCap || plan.laneCap }));
       let trl;
       if (plan.owner) {
@@ -1455,7 +1455,7 @@
         cs.forEach((c, i) => { c.nl = Math.max(...segs[i].rows); c.nlf = segs[i].rows[rb]; pad += c.n; real += c.na; });
         trl = Math.max(...ch.load) * real / pad;
       }
-      if (!cfg.kvDedup && cfg.segPad === 'chunk' && cs.some((s) => s.n > cfg.chunk)) { // one attention call per C-unit
+      if (!cfg.kvDedup && cfg.reqPad === 'chunk' && cs.some((s) => s.n > cfg.chunk)) { // one attention call per C-unit
         const C = cfg.chunk;
         cs = cs.flatMap((s) => Array.from({ length: s.n / C }, (_, u) => ({ n: C, na: Math.max(0, Math.min(C, s.na - u * C)), k: s.k + u * C, cap: s.cap })));
       }
@@ -1726,7 +1726,7 @@
   // ------------------------------------------------------------------------------------------------------
   function matrixCell(cal, cfgIn, cached, nnew, users, reqsPerUser) {
     // the #57827 matrix runs used bf16 index_k (M3_INDEX_CACHE_BF16=1)
-    const plan = makePlan(Object.assign({ cache: 'inf', batch: false, segPad: 'chunk', idxBf16: true }, cfgIn), cal);
+    const plan = makePlan(Object.assign({ cache: 'inf', batch: false, reqPad: 'chunk', idxBf16: true }, cfgIn), cal);
     const S = plan.S, C = plan.cfg.chunk, out = new Float64Array(S);
     const cap = cached + 51200;
     const cachedA = Math.floor(cached / C) * C;

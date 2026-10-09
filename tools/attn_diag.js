@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Where do fused attention and KV prefetch save time, and does it reach the pipeline bottleneck?
 //   A) per-layer op breakdown for a batch of N requests x 1.6k new tokens at 140k context (sparse MSA layer and dense
-//      layer), per-request vs fused attention, prefetch off/on, chunk 128 vs 1024 (segment padding)
+//      layer), per-request vs fused attention, prefetch off/on, chunk 128 vs 1024 (request padding)
 //   B) full replay at the peak concurrency (infinite cache): which stages are busiest, dense vs MoE, per variant
 // Usage: JOB=<slurm job> ./on_node.sh node tools/attn_diag.js
 'use strict';
@@ -47,7 +47,7 @@ function breakdown(label, cfgBase) {
       + ` || MSA KV/index gather ${f(gat)} vs indexer+sparse ${f(att)} ms; dense ring compute ${f(rc)} vs gather ${f(rs)} ms`);
   }
 }
-const best = (key) => { const R = study.scenarios[key]; return Object.assign(withFeatures(R.base, R.bestKeys.filter((k) => !['segPad', 'fused'].includes(k))), R.grid[0].extra, { segPad: 'chunk', cache: 'inf', hostTier: false, laneArena: false }); };
+const best = (key) => { const R = study.scenarios[key]; return Object.assign(withFeatures(R.base, R.bestKeys.filter((k) => !['reqPad', 'fused'].includes(k))), R.grid[0].extra, { reqPad: 'chunk', cache: 'inf', hostTier: false, laneArena: false }); };
 const topo = (key) => { const g = study.scenarios[key].grid[0].extra; return `${g.stages}x[${g.mesh}]`; };
 breakdown(`8 gx today (${topo('g8_k0')}, today's kernels)`, best('g8_k0'));
 breakdown(`8 gx roofline (${topo('g8_k1')}, roofline kernels)`, best('g8_k1'));
@@ -56,7 +56,7 @@ breakdown(`8 gx roofline (${topo('g8_k1')}, roofline kernels)`, best('g8_k1'));
 // peak concurrency of chunk C=128, 64k, per-request attention (results/layout_ab_inf_peak.json)
 const PEAK = {};
 for (const [key, rows] of Object.entries(JSON.parse(fs.readFileSync(path.join(require('../lib/paths.js').RESULTS, 'layout_ab_inf_peak.json'))).scenarios)) {
-  const r = rows.find((x) => x.mode === 'base' && x.segPad === 'chunk' && x.attn === 'seq' && x.chunk === 128 && x.budget === 65536);
+  const r = rows.find((x) => x.mode === 'base' && x.reqPad === 'chunk' && x.attn === 'seq' && x.chunk === 128 && x.budget === 65536);
   if (r && r.at) PEAK[key] = r.at.conc;
 }
 const jobs = [];

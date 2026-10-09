@@ -35,7 +35,7 @@ async function main() {
   const t0 = Date.now();
   const out = {};
   await Promise.all(Object.entries(study.scenarios).map(async ([key, R]) => {
-    const keys = R.bestKeys.filter((k) => k !== 'segPad' && k !== 'fused' && k !== 'batch');
+    const keys = R.bestKeys.filter((k) => k !== 'reqPad' && k !== 'fused' && k !== 'batch');
     const g = R.grid[0].extra;
     const topo = { stages: g.stages, mesh: g.mesh, replicas: g.replicas };
     const lanes = args.includes('--inf') ? { cache: 'inf', hostTier: false, laneArena: false }
@@ -43,19 +43,19 @@ async function main() {
     const jobs = [];
     for (const [mode, md] of Object.entries(MODES)) {
       for (const C of CHUNKS) {
-        if (mode !== 'nodedup' && C >= 1024) jobs.push({ mode, md, segPad: 'chunk', attn: 'seq', chunk: C, batch: false });
-        for (const B of BUDGETS) if (B > C) jobs.push({ mode, md, segPad: 'chunk', attn: 'seq', chunk: C, batch: true, budget: B });
+        if (mode !== 'nodedup' && C >= 1024) jobs.push({ mode, md, reqPad: 'chunk', attn: 'seq', chunk: C, batch: false });
+        for (const B of BUDGETS) if (B > C) jobs.push({ mode, md, reqPad: 'chunk', attn: 'seq', chunk: C, batch: true, budget: B });
         // fused attention with chunk padding, for the small chunks
-        if (mode !== 'nodedup' && C <= 256) for (const B of BUDGETS) jobs.push({ mode, md, segPad: 'chunk', attn: 'fused', chunk: C, batch: true, budget: B });
+        if (mode !== 'nodedup' && C <= 256) for (const B of BUDGETS) jobs.push({ mode, md, reqPad: 'chunk', attn: 'fused', chunk: C, batch: true, budget: B });
       }
-      if (mode !== 'nodedup') for (const attn of ['seq', 'fused']) for (const B of BUDGETS) jobs.push({ mode, md, segPad: 'tile', attn, chunk: 5120, batch: true, budget: B });
+      if (mode !== 'nodedup') for (const attn of ['seq', 'fused']) for (const B of BUDGETS) jobs.push({ mode, md, reqPad: 'tile', attn, chunk: 5120, batch: true, budget: B });
     }
     out[key] = await Promise.all(jobs.map((j) => {
       const { mode, md, ...d } = j;
       const cfg = laneCount(Object.assign(withFeatures(R.base, keys), topo, lanes, d, md));
-      const label = `${mode} ${d.segPad} ${d.attn} C=${d.chunk} B=${d.budget || 0}`;
+      const label = `${mode} ${d.reqPad} ${d.attn} C=${d.chunk} B=${d.budget || 0}`;
       return pool.evalCfg(key + label, cfg, concs, slo, noSlo ? 1e9 : 4, noSlo ? { extend: 0, refinePeak: 3 } : {})
-        .then((r) => Object.assign({ mode, segPad: d.segPad, attn: d.attn, chunk: d.chunk, budget: d.budget || 0 }, summarize(r.points, slo)));
+        .then((r) => Object.assign({ mode, reqPad: d.reqPad, attn: d.attn, chunk: d.chunk, budget: d.budget || 0 }, summarize(r.points, slo)));
     }));
   }));
   pool.close();
@@ -63,14 +63,14 @@ async function main() {
   const kk = (x) => (x ? (x.goodput / 1e3).toFixed(1) : '-');
   for (const [key, rows] of Object.entries(out)) {
     rows.sort((a, b) => b.goodput - a.goodput);
-    res.scenarios[key] = rows.map((r) => ({ mode: r.mode, segPad: r.segPad, attn: r.attn, chunk: r.chunk, budget: r.budget, goodput: r.goodput,
+    res.scenarios[key] = rows.map((r) => ({ mode: r.mode, reqPad: r.reqPad, attn: r.attn, chunk: r.chunk, budget: r.budget, goodput: r.goodput,
       at: r.at && { conc: r.at.conc, ttftP50: r.at.ttftP50, ttftP90: r.at.ttftP90, padFrac: r.at.padFrac, avgSegsPerChunk: r.at.avgSegsPerChunk } }));
     const S = study.scenarios[key];
     console.log(`\n== ${key} (${S.label}), ${S.grid[0].extra.stages}x[${S.grid[0].extra.mesh}]`);
     for (const mode of Object.keys(MODES)) {
       const f = (p) => rows.filter((r) => r.mode === mode && p(r))[0];
-      const bf = f((r) => r.segPad === 'chunk' && r.budget && r.attn === 'seq'), ff = f((r) => r.segPad === 'chunk' && r.attn === 'fused');
-      const vs = f((r) => r.segPad === 'tile' && r.attn === 'seq'), vf = f((r) => r.segPad === 'tile' && r.attn === 'fused');
+      const bf = f((r) => r.reqPad === 'chunk' && r.budget && r.attn === 'seq'), ff = f((r) => r.reqPad === 'chunk' && r.attn === 'fused');
+      const vs = f((r) => r.reqPad === 'tile' && r.attn === 'seq'), vf = f((r) => r.reqPad === 'tile' && r.attn === 'fused');
       const rq = (x) => (x && x.at ? `, ${x.at.avgSegsPerChunk.toFixed(1)} req/chunk` : '');
       console.log(`  ${mode.padEnd(8)} best chunk+batch ${kk(bf)} (C=${bf && bf.chunk} B=${bf && bf.budget / 1024}k${rq(bf)})`
         + (ff ? ` | chunk+fused ${kk(ff)} (C=${ff.chunk} B=${ff.budget / 1024}k)` : '')
@@ -78,7 +78,7 @@ async function main() {
       console.log('    chunk:  ' + ['noB', ...BUDGETS.map((b) => 'B' + b / 1024 + 'k')].map((h) => h.padStart(6)).join(''));
       for (const C of CHUNKS) {
         console.log(`    C=${String(C).padStart(4)}` + [0, ...BUDGETS].map((B) => {
-          const r = rows.find((x) => x.mode === mode && x.segPad === 'chunk' && x.attn === 'seq' && x.chunk === C && x.budget === B);
+          const r = rows.find((x) => x.mode === mode && x.reqPad === 'chunk' && x.attn === 'seq' && x.chunk === C && x.budget === B);
           return kk(r).padStart(6);
         }).join(''));
       }
