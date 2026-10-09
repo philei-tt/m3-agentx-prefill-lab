@@ -1144,7 +1144,7 @@
       gated: 0, gateWait: 0, legacyStarts: 0, skippedTraces: 0, rrSegs: 0, rrReuse: 0, rrCopyIn: 0,
       outTok: 0, decArea: 0, decingArea: 0, decMax: 0, decWaits: 0, decWait: 0, decWaited: 0, decTokArea: 0, ringFull: 0, pfSlot: 0, pfNone: 0, sendBlock: 0,
       decCtxTok: 0, decHitTok: 0, decHostTok: 0, decSsdTok: 0, dH2dBusy: 0, dD2hBusy: 0, dSsdBusy: 0, decPoolArea: 0,
-      decStarts: 0, decStartDelay: 0, decSlotWaited: 0, parked: 0, parkArea: 0, tsu: [] };
+      decStarts: 0, decStartDelay: 0, decSlotWaited: 0, parked: 0, parkArea: 0, tsu: [], ringFillArea: 0, decStarved: 0 };
     const decWin = () => warmDone && now >= t0 && now <= tEnd;
     // ---------- decode KV (DEFAULTS.decodeCache): reserved when a request is admitted to prefill (TTFT clock already
     // running), released when its decode ends, then cached: released slots keep their stream's KV, released pages
@@ -1188,6 +1188,9 @@
         if (b > a) {
           st.decArea += decHeld * (b - a); st.decingArea += decoding * (b - a); st.decTokArea += decSpeedSum * decShare() * (b - a);
           if (cfg.decodeStages > 0 && decoding >= decCap) st.ringFull += b - a;
+          // balance: how full the ring is on average, and how long it had free positions with no session waiting
+          // for decode (past prefill without slots / pages)
+          if (cfg.decodeStages > 0) { st.ringFillArea += Math.min(1, decoding / decCap) * (b - a); if (decoding < decCap && !slotQ.length) st.decStarved += b - a; }
           if (decPool) st.decPoolArea += (decPool.pinnedB + decResvB) * B * (b - a);
           st.parkArea += parkedN * (b - a);
         }
@@ -1975,6 +1978,10 @@
       // speed follows the context) and the
       // share of the window it carried decodeStages or more sessions
       decodeTpsMean: st.decingArea > 0 ? st.decTokArea / st.decingArea : cfg.decodeTps, ringFullFrac: cfg.decodeStages > 0 ? st.ringFull / D : 0,
+      // prefill / decode balance: the ring's mean fill (sessions decoding / its capacity, at most 1) and the share of the
+      // window it had free positions with nothing waiting for decode (NaN without a ring); with pfStarvedSlotFrac
+      // (prefill idle because requests wait for decode KV) and maxUtil (prefill's busiest stage)
+      ringFillMean: cfg.decodeStages > 0 ? st.ringFillArea / D : NaN, decStarvedFrac: cfg.decodeStages > 0 ? st.decStarved / D : NaN,
       // output tokens decoded per second in the window (what output revenue bills; outTps counts them at prefill end)
       outDecTps: st.decTokArea / D,
       // decode KV (decodeCache): share of the context already cached on the decode side at admission (on device or read

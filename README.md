@@ -178,6 +178,13 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
     requests hold KV).
   * Runs report `decParkPerS`, `decParkedMean` and `decSlotWaitFrac` (share of requests that waited for a slot or
     pages after prefill).
+* **Prefill / decode balance** (page: "Prefill / decode balance" tile). `ringFillMean` is the ring's mean fill
+  (sessions decoding / its capacity, at most 1) and `decStarvedFrac` the share of the window it had room with nothing
+  waiting for decode; with `pfStarvedSlotFrac` (prefill idle because requests wait for decode KV) and `maxUtil`
+  (prefill's busiest stage). Prefill and decode requests per hour are always equal in a closed loop, so they cannot show
+  imbalance. The tile calls a point decode-bound when the ring is ≥ 90% full, prefill-bound when it is < 70% full and
+  prefill waits on decode < 5% of the time, and balanced otherwise. Measured: decode-bound configs run the ring 97% full
+  with prefill idle 22–35% of the time waiting on decode; prefill-bound ones 34–59% full with no waiting.
 * **Decode speed per session.** Runs report `tsuP10` and `tsuP50`: the 10th percentile and median of each session's
   output tokens / its decode time (sessions that end in the window, plus those still decoding at its end). A shared
   ring is the only thing that slows a session, so the decode-queue limit sets how low they go.
