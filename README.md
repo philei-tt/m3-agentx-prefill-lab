@@ -448,6 +448,29 @@ default decode-queue limit, 100, scaled to 100 × m with batch m (the same queue
 * **The queue limit trades decode speed for throughput, unbatched too.** Earlier runs with higher limits: 124 gave
   paging $78 / $71 at p10 93 / 83 tokens/s/u; no limit gave $104 / $91 at p10 37 / 19 (every session past prefill
   sharing the ring). Fixed slots gain little from a higher limit, because 87 slots cap the sessions decoding.
+**Decode backpressure on the study's best prefill configs** (`tools/backpressure_sweep.js`,
+`results/backpressure_sweep.{json,txt}`, Oct 9). The study's best stacks with today's kernels (4 gx 16×[4,2], 8 gx
+32×[4,2]: tiers, pool arena, async handoff, MSA-local, tile padding), prefill batching on (fused, budget 8k / 16k) or
+off (per-request attention, a 2k / 5k pass), against the decode strategies above (62-stage ring, modelled memory, decode
+tiers, queue limit 100 × decode batch). Net $/h at the goodput point, the better budget per cell, prefill batched /
+unbatched:
+
+| decode | 4 gx | 8 gx |
+|---|---|---|
+| slot backpressure, fixed slots (today) | $96 / $99 | $53 / $55 |
+| queue backpressure, fixed slots | $102 / $102 | $55 / $56 |
+| queue backpressure, paged, decode batch 1 | $102 / $103 | $55 / $59 |
+| queue backpressure, paged, decode batch 2 | $154 / $146 | $107 / $110 |
+| queue backpressure, paged, decode batch 4 | $191 / $178 | $143 / $143 |
+| queue backpressure, paged, decode batch 8 | **$218** / $181 | $174 / $174 |
+
+* Unbatched decode is decode-bound everywhere (ring 98–100% full, prefill idle 26–62% of the time waiting on decode),
+  so prefill batching changes nothing (±$4/h), and 4 prefill galaxies net about $45/h more than 8.
+* Prefill batching only pays once decode batching relieves decode, and only at 4 galaxies: with decode batch 4 / 8,
+  unbatched prefill is 97% busy (prefill-bound), batched prefill adds $13 / $37 per hour. At 8 galaxies prefill stays
+  under 65% busy, so batching it is worth nothing.
+* The best net, $218/h (4 gx, batched prefill, decode batch 8), runs decode at p10 23 tokens/s/u.
+
 * **Earlier run (75 slots): the hybrid layouts.** With 62 global lanes and a 13.6M-token pool
   the hybrid beat slot backpressure by $14–25/h, the same effect as queue backpressure (a slot only for a session
   ready to decode). With one lane per stage every token copies the session's whole context into the lane on every

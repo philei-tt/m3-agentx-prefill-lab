@@ -853,7 +853,9 @@ function syncUi() {
   const pagedDec = $('decodeCache').value === 'paging';
   $('decodeBackpressure').querySelector('option[value="slot"]').disabled = pagedDec;
   if (pagedDec) $('decodeBackpressure').value = 'queue';
-  $('decodeQueueMax').disabled = $('decodeBackpressure').value !== 'queue';
+  // slot backpressure is set by the slots alone: the decode-queue limit only exists with queue backpressure
+  const queued = $('decodeBackpressure').value === 'queue';
+  $('decodeQueueMax').disabled = !queued; $('decodeQueueMax').closest('.row').style.display = queued ? '' : 'none';
   // the offload tiers work behind every finite cache: pool / paging pages, or whole static slots
   for (const id of ['hostTier', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy']) $(id).disabled = $('cache').value === 'inf';
   // a global lane is reserved for the whole pipeline trip: buffering its copies gains nothing, so sequential only
