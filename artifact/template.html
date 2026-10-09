@@ -189,7 +189,7 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
     <div class="row"><label for="replicas">Pipeline replicas</label><select id="replicas"><option>1</option><option>2</option><option>4</option></select></div>
     <div class="row"><label for="mesh">Stage mesh [SP,TP]</label><select id="mesh"><option value="2x4">[2,4] 8 chips</option><option value="4x4">[4,4] 16 chips</option><option value="8x4">[8,4] 32 chips</option><option value="4x2">[4,2] 8 chips (TP=2)</option></select></div>
     <div class="row"><label for="torus">Ring collectives</label><select id="torus"><option value="full">[4,4] stages (whole torus)</option><option value="axes">every 4-long axis</option><option value="off">off (line everywhere)</option></select></div>
-    <div class="hint">A galaxy is two 4×4 tori. On a ring axis: all-gather / reduce-scatter ×(N−1)/N, all-to-all and ring-joint KV pass ×0.5, collective latency ×0.5.</div>
+    <div class="hint">Ring axes: all-gather / reduce-scatter ×(N−1)/N, all-to-all and KV pass ×0.5, latency ×0.5.</div>
     <div class="row"><label for="stages">Stages per replica</label><input id="stages" type="number" min="1" max="64" step="1"></div>
     <div class="row"><label for="split">Layer split</label><select id="split"><option value="auto">auto-balanced</option><option value="even">even</option><option value="custom">custom</option></select></div>
     <div class="row" id="splitRow" hidden><label for="splitCustom">Layers per stage</label><input id="splitCustom" type="text" placeholder="1,1,1,5,5,..."></div>
@@ -197,7 +197,7 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
   <fieldset>
     <legend>Kernels</legend>
     <div class="row"><label for="opEff">Op efficiency <span class="mono" id="opEffV"></span></label><input id="opEff" type="range" min="0" max="1" step="0.1"></div>
-    <div class="hint">0 = today's measured kernels, 1 = roofline targets (70% matmul, 80% DRAM/link, overlapped expert weight reads).</div>
+    <div class="hint">0 = today's kernels, 1 = roofline targets.</div>
     <div class="row check"><input id="asyncHandoff" type="checkbox"><label for="asyncHandoff">Async stage handoff</label></div>
     <div class="row check"><input id="msaLocal" type="checkbox"><label for="msaLocal">MSA SP-local indexer</label></div>
   </fieldset>
@@ -217,7 +217,7 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
         <div class="row"><label for="pcieGBsPerGalaxy">PCIe GB/s / galaxy (each way)</label><input id="pcieGBsPerGalaxy" type="number" min="1" step="1"></div>
         <div class="row"><label for="ssdReadGBsPerGalaxy">SSD read GB/s / galaxy</label><input id="ssdReadGBsPerGalaxy" type="number" min="1" step="0.5"></div>
         <div class="row"><label for="ssdWriteGBsPerGalaxy">SSD write GB/s / galaxy</label><input id="ssdWriteGBsPerGalaxy" type="number" min="1" step="0.5"></div>
-        <div class="hint">Device evicts to host DRAM, host DRAM to SSD. Host DRAM left for KV (Plan panel) = DRAM minus 10% headroom, OS, runtime, KV staging, pinned PCIe buffers and this galaxy's share of the weights. Defaults from the Galaxy Blackhole user guide (576 GB host DRAM; PCIe x1 Gen4 to 28 of 32 chips = 63 GB/s each way) and the drives (4x Samsung PM9D3a E1.S at Gen4: 31.5 GB/s read, 27.2 GB/s write).</div>
+        <div class="hint">Evictions go device → host DRAM → SSD. Defaults: Galaxy Blackhole guide (576 GB DRAM, 63 GB/s PCIe, SSD 31.5 / 27.2 GB/s).</div>
       </div>
     </details>
     <div class="row check"><input id="idxDerep" type="checkbox"><label for="idxDerep">index_k stored once (not ×TP)</label></div>
@@ -227,36 +227,36 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
   <fieldset>
     <legend>Chunking &amp; batching</legend>
     <div class="row"><label for="reqPad">Request padding</label><select id="reqPad"><option value="chunk">chunk (C tokens)</option><option value="tile">tile (32·SP tokens)</option></select></div>
-    <div class="hint">What each request's tokens in a batch are padded to. Chunk (today): a multiple of the chunk size. Tile: a multiple of 32·SP, one 32-row tile per SP rank (32 with owner placement); the token budget sizes the batch, with or without batching. Either way the KV cache is block-cyclic with chunk/SP rows per rank.</div>
+    <div class="hint">Pad each request in a batch to the chunk (today) or to a 32·SP tile.</div>
     <div class="row"><label for="placement">Token placement</label><select id="placement"><option value="even">even split over SP (a2a KV write)</option><option value="owner">owner rank (no a2a, uneven ranks)</option></select></div>
-    <div class="hint">Even split: each request's tokens in a batch are padded to 32·SP and split evenly, then an all-to-all writes each K/V row to the rank that owns it. Owner rank: each token is computed on the rank that owns its KV row (blocks of chunk/SP), so segments are padded to 32 and there is no all-to-all, but every rank is padded to the busiest one.</div>
+    <div class="hint">Even: split evenly, then an all-to-all KV write. Owner: each token on its KV owner rank, no all-to-all.</div>
     <div class="row"><label for="chunk">Chunk size (KV slab)</label><select id="chunk"><option>128</option><option>256</option><option>512</option><option>1024</option><option>2048</option><option>4096</option><option>5120</option><option>8192</option></select></div>
-    <div class="hint" id="chunkHint" hidden>Fixed at 128·SP with tile padding: MSA needs whole 128-row KV blocks on each SP rank.</div>
+    <div class="hint" id="chunkHint" hidden>Fixed at 128·SP with tile padding (MSA KV blocks).</div>
     <div class="row check"><input id="batch" type="checkbox"><label for="batch">Batch several requests</label></div>
-    <div class="hint" id="batchHint" hidden>With static 1M slots a request holds its slot for the whole pipeline trip, so requests per batch × stages must fit in the slots; otherwise the plan reports out of memory.</div>
+    <div class="hint" id="batchHint" hidden>Static slots: requests per batch × stages must fit in the slots.</div>
     <div class="row"><label for="budget">Token budget</label><select id="budget"><option>4096</option><option>5120</option><option>8192</option><option>16384</option><option>32768</option></select></div>
     <div class="row"><label for="batchMaxReqs">Max requests per batch (0 = no limit)</label><input id="batchMaxReqs" type="number" min="0" step="1"></div>
-    <div class="hint">With static slots each request holds its slot for the whole pipeline trip, so max requests × stages must fit in the slots. On fixed pool lanes it sets the derived lane count.</div>
+    <div class="hint">Static slots: max requests × stages must fit. Pool lanes: sets the lane count.</div>
     <div class="row check"><input id="lanesOverride" type="checkbox"><label for="lanesOverride">Override lanes per stage (batching + hybrid pool only)</label></div>
     <div class="row"><label for="lanes">Lanes per stage</label><input id="lanes" type="number" min="1" max="32" step="1"></div>
-    <div class="hint" id="lanesHint" hidden>Not used with variable-size lanes: each request gets a lane of its own length from the arena, so the arena size bounds the requests in progress. Untick the arena to set a lane count.</div>
-    <div class="hint">Default: requests per batch × copy buffers (sequential 1, double 2, triple 3); with a global lane table, stages × requests per batch (sequential copies only). Tile-padded batching must override unless max requests per batch is set.</div>
+    <div class="hint" id="lanesHint" hidden>Arena lanes are request-sized; untick the arena to set a count.</div>
+    <div class="hint">Default: requests per batch × copy buffers (global table: × stages).</div>
     <div class="row check"><input id="batchDynShape" type="checkbox"><label for="batchDynShape">Dynamic batch size (no padding to the budget)</label></div>
-    <div class="hint">On: a partly filled batch runs at its actual size (untraced). Off: it is padded to the full budget, as tracing requires.</div>
+    <div class="hint">On: partial batches run at their size. Off: padded to the budget (traced).</div>
     <div class="row"><label for="batchChunksPerRequest">Chunks per request per round (0 = no limit)</label><input id="batchChunksPerRequest" type="number" min="0" step="1"></div>
     <div class="row"><label for="batchTokensPerRequest">Tokens per request per round (0 = no limit)</label><input id="batchTokensPerRequest" type="number" min="0" step="32"></div>
-    <div class="hint">Round robin: a batch is filled in rounds over the queue, each request getting up to this many more chunks (chunk padding) or tokens (tile padding, rounded down to whole tiles) per round, until the budget is used. 0: the front request takes all it can (greedy); 1 chunk or 1 tile: an even split. A request alone fills the batch either way. Every request in a batch reads its own cached prefix, so many requests per batch cost throughput.</div>
+    <div class="hint">Per request per round, in chunks or tokens. 0 = greedy, 1 = even split.</div>
     <div class="row"><label for="attn">Attention</label><select id="attn"><option value="chunk">sequential per chunk</option><option value="request">sequential per request</option><option value="fused">fused multi-request</option></select></div>
-    <div class="hint">Attention calls in a batch. Per chunk: a request that takes several chunks of the batch makes one call per chunk, each re-gathering its cached prefix (chunk padding only; with tile padding a request's tokens in a batch are contiguous, so this is per request). Per request: one call per request, prefix gathered once. Fused: one call for the whole batch.</div>
+    <div class="hint">Attention calls: one per chunk, one per request, or one fused call per batch.</div>
     <div class="row check"><input id="prefetchKV" type="checkbox"><label for="prefetchKV">Prefetch KV-prefix gathers (overlap with compute)</label></div>
     <div class="row"><label for="policy">Scheduling</label><select id="policy"><option value="rr">round robin</option><option value="rtc">run to completion, oldest first</option><option value="srpt">run to completion, shortest first (30 s aging)</option></select></div>
-    <div class="hint">Round robin (tt-d-gen): a request enqueues at most one token budget (one chunk without batching) per turn, then goes to the back of the queue, so a request with a long sequence cannot starve shorter ones.<br>Run to completion: a request keeps enqueuing token budgets until its whole sequence is processed, which can starve shorter requests waiting in the queue.</div>
+    <div class="hint">Round robin: one budget per turn, then the back of the queue. Run to completion can starve short requests.</div>
   </fieldset>
   <fieldset>
     <legend>Traffic &amp; SLO</legend>
     <div class="row"><label for="slo">p90 TTFT SLO (s)</label><input id="slo" type="number" min="0.5" step="0.5"></div>
     <div class="row"><label for="sloR">SLO slider <span class="mono" id="sloV"></span></label><input id="sloR" type="range" min="0" max="100" step="1" aria-label="p90 TTFT SLO, log scale, right end = no SLO"></div>
-    <div class="hint">Log scale from 1 s to 10 min; the right end means no SLO (goodput = peak). Results update live; a run sweeps up to about 4× the SLO it was started with, so for a much looser SLO, run again.</div>
+    <div class="hint">Log scale, 1 s to 10 min; right end = no SLO. For a much looser SLO, run again.</div>
     <div class="row"><label for="duration">Profiling window (s)</label><select id="duration"><option>900</option><option>1800</option></select></div>
     <div class="row"><label for="seed">Seed</label><input id="seed" type="number" min="1" step="1"></div>
     <div class="row"><label for="concs">Concurrency grid</label><input id="concs" type="text"></div>
@@ -266,17 +266,17 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
     <legend>Decode</legend>
     <div class="row"><label for="decodeTps">Decode tokens/s/u (per user)</label><input id="decodeTps" type="number" min="5" step="5"></div>
     <div class="row"><label for="decodeCurve">Decode TSU Model</label><select id="decodeCurve"><option value="flat">constant</option><option value="m3">adapt to KV length</option></select></div>
-    <div class="hint">Constant: every session decodes at the tokens/s/u above. Adapt to KV length: the measured M3 curve, where time per token grows linearly with the session's context (116 tokens/s/u at 8k, 98 at 100k, 55 at 550k at 64 users), scaled so the tokens/s/u above is the speed at 100k: 180 gives about 214 at 8k, 168 at 140k, 101 at 550k.</div>
+    <div class="hint">Constant: every session at the speed above. Adapt: measured M3 curve, the speed above at 100k (180 → 214 at 8k, 101 at 550k).</div>
     <div class="row"><label for="decodeStages">Decode pipeline stages (0 = unlimited)</label><input id="decodeStages" type="number" min="0" step="1"></div>
     <div class="row"><label for="decodeBatch">Decode batch (users per stage)</label><input id="decodeBatch" type="number" min="1" step="1"></div>
-    <div class="hint">The ring carries stages × batch sessions at full speed; more share it. A fuller batch slows each user (attention × batch, more experts read). Slots must fit stages × batch.</div>
+    <div class="hint">The ring holds stages × batch sessions at full speed. A bigger batch slows each user.</div>
     <div class="row"><label for="decodeCache">Decode KV layout</label><select id="decodeCache"><option value="slots">fixed 1M slots</option><option value="paging">paged</option></select></div>
     <div class="hint" id="decMemHint"></div>
     <div class="row check"><input id="decodeHostTier" type="checkbox"><label for="decodeHostTier">Decode offload tiers (host DRAM + SSD of the decode galaxies)</label></div>
     <div class="row"><label for="decodeBackpressure">Decode backpressure</label><select id="decodeBackpressure"><option value="slot">slot (wait for a free slot)</option><option value="queue">queue (park KV on SSD)</option></select></div>
     <div class="row"><label for="decodeQueueMax">Decode queue limit (0 = no limit; default 100)</label><input id="decodeQueueMax" type="number" min="0" step="1"></div>
-    <div class="hint">Slot: prefill waits for a free decode slot. Queue: prefill runs while the decode queue is under the limit; KV goes to free slots/pages, else to SSD until room frees.</div>
-    <div class="hint">Decode KV is reserved at admission and freed when decode ends. Slots: 1M each. Paged: request-sized pages. Freed KV stays cached (host DRAM/SSD with the tiers).</div>
+    <div class="hint">Slot: prefill waits for a decode slot. Queue: prefill runs while the queue has room; overflow KV parks on SSD.</div>
+    <div class="hint">KV is reserved at admission and freed after decode. Slots: 1M each. Paged: request-sized.</div>
   </fieldset>
   <fieldset>
     <details class="reveal">
@@ -285,10 +285,10 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
         <div class="row"><label for="priceIn">Input $ / M tokens</label><input id="priceIn" type="number" min="0" step="0.01"></div>
         <div class="row"><label for="priceCached">Cached input $ / M tokens</label><input id="priceCached" type="number" min="0" step="0.01"></div>
         <div class="row"><label for="priceOut">Output $ / M tokens</label><input id="priceOut" type="number" min="0" step="0.01"></div>
-        <div class="hint">Defaults: MiniMax's own M3 price on OpenRouter (Oct 2026). New tokens (cache misses, re-prefill included) bill at the input price, prefix hits at the cached price. The Net Revenue tile nets input and output revenue against the galaxy cost of prefill and decode.</div>
+        <div class="hint">Defaults: MiniMax M3 on OpenRouter (Oct 2026). Misses bill as input, prefix hits as cached.</div>
         <div class="row"><label for="galaxyUsd">$ / galaxy-hour</label><input id="galaxyUsd" type="number" min="0" step="0.5"></div>
         <div class="row"><label for="decodeGalaxies">Decode galaxies</label><input id="decodeGalaxies" type="number" min="0" step="1"></div>
-        <div class="hint">One M3 decode instance on 16 galaxies; its KV memory is modelled. The decode galaxies also size the decode offload tiers. Margin = input + output revenue − (prefill + decode galaxies) × $/galaxy-hour. Prices and the galaxy cost apply without re-running.</div>
+        <div class="hint">Decode galaxies add to cost and size the decode tiers. Prices and $/galaxy-hour apply without re-running.</div>
       </div>
     </details>
   </fieldset>
