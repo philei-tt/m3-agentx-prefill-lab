@@ -68,7 +68,7 @@ details.reveal[open] > summary::after { content: ' ▴'; }
 details.reveal > summary:hover { color: var(--ink-2); }
 details.reveal > .reveal-body { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 /* a collapsible group inside a fieldset: its title reads like a setting, not a section heading */
-details.reveal.sub > summary { font-family: inherit; font-size: 13px; letter-spacing: 0; text-transform: none; color: var(--ink); }
+details.reveal.sub { margin-top: 4px; }
 details.reveal.sub > summary .state { color: var(--ink-3); }
 .row { display: grid; grid-template-columns: minmax(0, 1fr) 130px; align-items: center; gap: 8px; }
 .row label { color: var(--ink-2); font-size: 13px; }
@@ -153,6 +153,8 @@ table.prio tr.fdetail > td { background: var(--surface-2); padding: 12px 14px; }
 .callout { border-left: 3px solid var(--accent); padding: 8px 12px; background: var(--accent-soft); border-radius: 0 6px 6px 0; }
 .callout.bad { border-left-color: var(--bad); background: var(--bad-soft); color: var(--ink); margin-bottom: 10px; }
 details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
+/* a collapsible panel's title reads like the other panel titles (h3) */
+details.panel > summary { font-family: var(--f-display); font-weight: 600; font-size: 16px; letter-spacing: 0.01em; color: var(--ink); }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
 
