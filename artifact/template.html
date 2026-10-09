@@ -275,7 +275,7 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
     <div class="row check"><input id="decodeHostTier" type="checkbox"><label for="decodeHostTier">Decode offload tiers (host DRAM + SSD of the decode galaxies)</label></div>
     <div class="row"><label for="decodeBackpressure">Decode backpressure</label><select id="decodeBackpressure"><option value="slot">slot (wait for a free slot)</option><option value="queue">queue (park KV on SSD)</option></select></div>
     <div class="row"><label for="decodeQueueMax">Decode queue limit (0 = no limit; default 100)</label><input id="decodeQueueMax" type="number" min="0" step="1"></div>
-    <div class="hint">Slot: prefill waits for a decode slot. Queue: prefill runs while the queue has room; overflow KV parks on SSD.</div>
+    <div class="hint">Slot: prefill waits for a decode slot. Queue: prefill runs while the decode queue has room; overflow KV parks on decode host's SSD.</div>
     <div class="hint">KV is reserved at admission and freed after decode. Slots: 1M each. Paged: request-sized.</div>
   </fieldset>
   <fieldset>
