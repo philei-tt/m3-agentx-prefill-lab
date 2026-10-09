@@ -212,7 +212,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row"><label for="reqPad">Request padding</label><select id="reqPad"><option value="chunk">chunk (C tokens)</option><option value="tile">tile (32·SP tokens)</option></select></div>
     <div class="hint">What each request's tokens in a pass are padded to. Chunk (today): a multiple of the chunk size. Tile: a multiple of 32·SP, one 32-row tile per SP rank (32 with owner placement). Either way the KV cache stays block-cyclic with chunk/SP rows per rank.</div>
     <div class="row"><label for="placement">Token placement</label><select id="placement"><option value="even">even split over SP (a2a KV write)</option><option value="owner">owner rank (no a2a, uneven ranks)</option></select></div>
-    <div class="hint">Tile padding only. Even split: each request's tokens in a pass are padded to 32·SP and split evenly, then an all-to-all writes each K/V row to the rank that owns it (none when chunk = 32·SP). Owner rank: each token is computed on the rank that owns its KV row (blocks of chunk/SP), so segments are padded to 32 and there is no all-to-all, but every rank is padded to the busiest one.</div>
+    <div class="hint">Tile padding only. Even split: each request's tokens in a pass are padded to 32·SP and split evenly, then an all-to-all writes each K/V row to the rank that owns it. Owner rank: each token is computed on the rank that owns its KV row (blocks of chunk/SP), so segments are padded to 32 and there is no all-to-all, but every rank is padded to the busiest one.</div>
     <div class="row"><label for="chunk">Chunk size</label><select id="chunk"><option>128</option><option>256</option><option>512</option><option>1024</option><option>2048</option><option>4096</option><option>5120</option><option>8192</option></select></div>
     <div class="hint" id="chunkHint" hidden>Not used: with batching, tile padding and an even split, the token budget below is the pass size (unless max chunks per request is set).</div>
     <div class="row check"><input id="batch" type="checkbox"><label for="batch">Batch several requests per pipeline pass</label></div>
@@ -562,8 +562,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Chunk padding</b> (today). One request per chunk, padded to the chunk size. The chunk is also the KV block-cyclic slab, and the host rotates a pass's tokens so that each SP rank computes the rows it owns (tt-metal #57636): no KV traffic, and a pass may start at any 32-token boundary.</li>
       <li><b>Tile padding.</b> Passes of any size. Each request's tokens in a pass are padded only to whole 32-row tiles per SP rank, and the token placement decides where its tokens are computed:
         <ul>
-          <li><b>Even split</b>: padded to 32·SP and split evenly; each layer pays an all-to-all that writes the new K/V rows to the SP rank that owns them (none when chunk = 32·SP).</li>
-          <li><b>Owner rank</b>: each token on the rank that owns its KV row; padded to 32 and no all-to-all, but every rank is padded to the busiest one. Close to the even split only with small chunks.</li>
+          <li><b>Even split</b>: padded to 32·SP and split evenly; each layer pays an all-to-all that writes the new K/V rows to the SP rank that owns them.</li>
+          <li><b>Owner rank</b>: each token on the rank that owns its KV row; padded to 32 and no all-to-all, but every rank is padded to the busiest one. Balanced when chunk = 32·SP (each rank then owns one 32-row block per 32·SP tokens); close to the even split only with small chunks.</li>
         </ul>
       </li>
       <li><b>Batching.</b> Several requests share a chunk, up to the token budget. Projections and MoE run on the whole batch; that is where the gain comes from, since expert weights are read once for more tokens.

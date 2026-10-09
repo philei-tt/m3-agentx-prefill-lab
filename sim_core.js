@@ -404,11 +404,12 @@
     //   one chunk at a time); 'request' = one call per request per pass (its prefix gathered once); 'fused' = one call
     //   for the whole pass. 'chunk' and 'request' differ only with batching and chunk padding.
     chunk: 5120, reqPad: 'chunk', batch: false, budget: 16384, attn: 'request', policy: 'rr',
-    // placement (tile padding only): where a segment's new tokens are computed. 'even' = split evenly over the SP
-    //   ranks (segments padded to 32*SP), then an all-to-all writes each K/V row to the rank that owns it (none is
-    //   needed when C = 32*SP). 'owner' = each token goes to the rank that owns its KV row (as chunk padding does), so
-    //   no all-to-all and segments padded only to 32, but ranks are uneven: every rank is padded to the busiest one,
-    //   and each rank holds at most budget/SP rows (C/SP without batching). Chunk padding always places by owner.
+    // placement (tile padding only): where a request's new tokens in a pass are computed. 'even' = contiguous equal
+    //   slices over the SP ranks (padded to 32*SP), then an all-to-all writes each K/V row to the rank that owns it.
+    //   'owner' = each token on the rank that owns its KV row (the host rotation chunk padding uses), so no
+    //   all-to-all and padding only to 32, but ranks are uneven (balanced when C = 32*SP): every rank is padded to the
+    //   busiest one, and each rank holds at most budget/SP rows (C/SP without batching). Chunk padding always places
+    //   by owner.
     placement: 'even',
     // prefetchKV: overlap the KV-prefix gathers with the layer's non-collective compute
     prefetchKV: false,
@@ -594,9 +595,8 @@
     const idxB = cfg.idxBf16 ? BF16 : BF8;
     const owner = tile && cfg.placement === 'owner';
     const gran = owner ? 32 : 32 * sp; // tile padding: request padding unit
-    // evenSplit: segments split evenly over SP, so their new K/V rows need an all-to-all to reach the ranks that own
-    // them (not when C = 32*SP: the split then matches the KV blocks)
-    const evenSplit = tile && !owner && cfg.chunk > 32 * sp;
+    // evenSplit: contiguous equal slices over SP, so the new K/V rows need an all-to-all to reach the ranks that own them
+    const evenSplit = tile && !owner;
     const ctxT = (T) => ({ sp, tp, P, T, idxB, imb: cfg.expertImb, evenSplit, bounded: cfg.boundedDense, msaLocal: cfg.msaLocal, ringSp, ringTp, prefetch: !!cfg.prefetchKV });
     const pm = cal.pipe;
     // the 1/T term was fitted on chunks of 2048 and 5120 tokens; clamp so small chunks do not extrapolate it
