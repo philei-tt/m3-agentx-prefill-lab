@@ -212,7 +212,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row"><label for="reqPad">Request padding</label><select id="reqPad"><option value="chunk">chunk (C tokens)</option><option value="tile">tile (32·SP tokens)</option></select></div>
     <div class="hint">What each request's tokens in a batch are padded to. Chunk (today): a multiple of the chunk size. Tile: a multiple of 32·SP, one 32-row tile per SP rank (32 with owner placement); the token budget sizes the batch, with or without batching. Either way the KV cache is block-cyclic with chunk/SP rows per rank.</div>
     <div class="row"><label for="placement">Token placement</label><select id="placement"><option value="even">even split over SP (a2a KV write)</option><option value="owner">owner rank (no a2a, uneven ranks)</option></select></div>
-    <div class="hint">Tile padding only. Even split: each request's tokens in a batch are padded to 32·SP and split evenly, then an all-to-all writes each K/V row to the rank that owns it. Owner rank: each token is computed on the rank that owns its KV row (blocks of chunk/SP), so segments are padded to 32 and there is no all-to-all, but every rank is padded to the busiest one.</div>
+    <div class="hint">Even split: each request's tokens in a batch are padded to 32·SP and split evenly, then an all-to-all writes each K/V row to the rank that owns it. Owner rank: each token is computed on the rank that owns its KV row (blocks of chunk/SP), so segments are padded to 32 and there is no all-to-all, but every rank is padded to the busiest one.</div>
     <div class="row"><label for="chunk">Chunk size (KV slab)</label><select id="chunk"><option>128</option><option>256</option><option>512</option><option>1024</option><option>2048</option><option>4096</option><option>5120</option><option>8192</option></select></div>
     <div class="hint" id="chunkHint" hidden>Fixed at 128·SP with tile padding: MSA needs whole 128-row KV blocks on each SP rank.</div>
     <div class="row check"><input id="batch" type="checkbox"><label for="batch">Batch several requests</label></div>
@@ -850,7 +850,9 @@ function syncUi() {
   // tile padding: the chunk is only the KV slab, fixed at 128*SP (MSA needs 128-row KV blocks per rank), as makePlan
   const slabFixed = $('reqPad').value === 'tile';
   if (slabFixed) $('chunk').value = String(128 * Number($('mesh').value.split('x')[0]));
-  $('placement').disabled = $('reqPad').value !== 'tile';
+  // token placement only applies to tile padding: hidden (with its hint) otherwise
+  const placeRow = $('placement').closest('.row'), tileOnly = $('reqPad').value === 'tile' ? '' : 'none';
+  placeRow.style.display = tileOnly; placeRow.nextElementSibling.style.display = tileOnly;
   // tile padding has no chunks: a request's tokens in a batch are contiguous, so per chunk = per request
   const chunkOpt = $('attn').querySelector('option[value="chunk"]');
   chunkOpt.disabled = $('reqPad').value === 'tile';
