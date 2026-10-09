@@ -252,13 +252,6 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
   </fieldset>
   <fieldset>
     <legend>Traffic &amp; SLO</legend>
-    <div class="row"><label for="decodeTps">Decode tokens/s/u (per user)</label><input id="decodeTps" type="number" min="5" step="5"></div>
-    <div class="row"><label for="decodeCurve">Decode TSU</label><select id="decodeCurve"><option value="flat">constant</option><option value="m3">adapt to KV length</option></select></div>
-    <div class="hint">Constant: every session decodes at the tokens/s/u above. Adapt to KV length: the measured M3 curve, where time per token grows linearly with the session's context (116 tokens/s/u at 8k, 98 at 100k, 55 at 550k at 64 users), scaled so the tokens/s/u above is the speed at 100k: 180 gives about 214 at 8k, 168 at 140k, 101 at 550k.</div>
-    <div class="row"><label for="decodeSlots">Decode KV slots (0 = unlimited)</label><input id="decodeSlots" type="number" min="0" step="1"></div>
-    <div class="row"><label for="decodeStages">Decode pipeline stages (0 = unlimited)</label><input id="decodeStages" type="number" min="0" step="1"></div>
-    <div class="hint">The decode ring carries one token per stage, so up to this many sessions decode at the full tokens/s/u above (one token per trip through the ring); with more, they share it and each slows to tokens/s/u × stages / sessions, holding its KV slot longer. A 64-stage ring: 64 (× m with m-row batched decode). Its memory holds about 85 slots of 1M tokens.</div>
-    <div class="hint">A request needs a free decode slot before its prefill may start (tt-d-gen reserves it up front to start KV migration eagerly), and holds it until decode ends; waiting for one counts in TTFT. M3 decode today holds about 64 sessions (one per pipeline stage).</div>
     <div class="row"><label for="slo">p90 TTFT SLO (s)</label><input id="slo" type="number" min="0.5" step="0.5"></div>
     <div class="row"><label for="sloR">SLO slider <span class="mono" id="sloV"></span></label><input id="sloR" type="range" min="0" max="100" step="1" aria-label="p90 TTFT SLO, log scale, right end = no SLO"></div>
     <div class="hint">Log scale from 1 s to 10 min; the right end means no SLO (goodput = peak). Results update live; a run sweeps up to about 4× the SLO it was started with, so for a much looser SLO, run again.</div>
@@ -266,6 +259,16 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row"><label for="seed">Seed</label><input id="seed" type="number" min="1" step="1"></div>
     <div class="row"><label for="concs">Concurrency grid</label><input id="concs" type="text"></div>
     <div class="row check"><input id="compareInf" type="checkbox" checked><label for="compareInf">Also run with an infinite cache</label></div>
+  </fieldset>
+  <fieldset>
+    <legend>Decode</legend>
+    <div class="row"><label for="decodeTps">Decode tokens/s/u (per user)</label><input id="decodeTps" type="number" min="5" step="5"></div>
+    <div class="row"><label for="decodeCurve">Decode TSU</label><select id="decodeCurve"><option value="flat">constant</option><option value="m3">adapt to KV length</option></select></div>
+    <div class="hint">Constant: every session decodes at the tokens/s/u above. Adapt to KV length: the measured M3 curve, where time per token grows linearly with the session's context (116 tokens/s/u at 8k, 98 at 100k, 55 at 550k at 64 users), scaled so the tokens/s/u above is the speed at 100k: 180 gives about 214 at 8k, 168 at 140k, 101 at 550k.</div>
+    <div class="row"><label for="decodeSlots">Decode KV slots (0 = unlimited)</label><input id="decodeSlots" type="number" min="0" step="1"></div>
+    <div class="row"><label for="decodeStages">Decode pipeline stages (0 = unlimited)</label><input id="decodeStages" type="number" min="0" step="1"></div>
+    <div class="hint">The decode ring carries one token per stage, so up to this many sessions decode at the full tokens/s/u above (one token per trip through the ring); with more, they share it and each slows to tokens/s/u × stages / sessions, holding its KV slot longer. A 64-stage ring: 64 (× m with m-row batched decode). Its memory holds about 85 slots of 1M tokens.</div>
+    <div class="hint">A request needs a free decode slot before its prefill may start (tt-d-gen reserves it up front to start KV migration eagerly), and holds it until decode ends; waiting for one counts in TTFT. M3 decode today holds about 64 sessions (one per pipeline stage).</div>
   </fieldset>
   <fieldset>
     <details class="reveal">
