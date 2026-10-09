@@ -209,8 +209,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
   </fieldset>
   <fieldset>
     <legend>Chunking &amp; batching</legend>
-    <div class="row"><label for="segPad">Segment padding</label><select id="segPad"><option value="chunk">chunk (C)</option><option value="tile">tiles (whole 32-row tiles per SP rank)</option></select></div>
-    <div class="hint">What each request's tokens in a pass are padded to. Chunk (today): a multiple of the chunk size, which is also the KV block-cyclic slab (chunk/SP rows per SP rank).</div>
+    <div class="row"><label for="segPad">Segment padding</label><select id="segPad"><option value="chunk">chunk (C tokens)</option><option value="tile">tile (32·SP tokens)</option></select></div>
+    <div class="hint">What each request's tokens in a pass are padded to. Chunk (today): a multiple of the chunk size. Tile: a multiple of 32·SP, one 32-row tile per SP rank (32 with owner placement). Either way the KV cache stays block-cyclic with chunk/SP rows per rank.</div>
     <div class="row"><label for="placement">Token placement</label><select id="placement"><option value="even">even split over SP (a2a KV write)</option><option value="owner">owner rank (no a2a, uneven ranks)</option></select></div>
     <div class="hint">Tile padding only. Even split: each segment is padded to 32·SP and split evenly, then an all-to-all writes each K/V row to the rank that owns it (none when chunk = 32·SP). Owner rank: each token is computed on the rank that owns its KV row (blocks of chunk/SP), so segments are padded to 32 and there is no all-to-all, but every rank is padded to the busiest one.</div>
     <div class="row"><label for="chunk">Chunk size</label><select id="chunk"><option>128</option><option>256</option><option>512</option><option>1024</option><option>2048</option><option>4096</option><option>5120</option><option>8192</option></select></div>
