@@ -58,11 +58,11 @@ for (const cache of ['slots', 'inf']) {
   assert.ok(fair(r.chunks), `rr/${cache} is not round robin`);
 }
 
-// 2. batched round robin: a popped request fills as many C-units as it can, as one run (never split within a batch),
+// 2. batched round robin: a popped request fills as many chunks as it can, as one run (never split within a batch),
 //    and the rotation is fair
 {
   const C = 1024, budget = 8192;
-  const { chunks } = trace({ cache: 'pool', policy: 'rr', batch: true, chunk: C, budget, layout: 'fixed', unaligned: true });
+  const { chunks } = trace({ cache: 'pool', policy: 'rr', batch: true, chunk: C, budget, reqPad: 'chunk', unaligned: true });
   assert.ok(once(chunks), 'a request appears twice in one batch');
   assert.ok(chunks.every((ch) => ch.reduce((a, s) => a + Math.ceil(s[1] / C) * C, 0) <= budget), 'batch over budget');
   assert.ok(chunks.some((ch) => ch.length > 1) && fair(chunks), 'batched rr is not round robin');
@@ -70,9 +70,9 @@ for (const cache of ['slots', 'inf']) {
 
 // 3. round robin on pool lanes
 const pool = { cache: 'pool', laneScope: 'stage', copyMode: 'double', policy: 'rr' };
-const batched = Object.assign({ batch: true, chunk: 1024, budget: 8192, layout: 'fixed' }, pool);
+const batched = Object.assign({ batch: true, chunk: 1024, budget: 8192, reqPad: 'chunk' }, pool);
 // 3a. lane count per stage (every policy): buffers of the copy mode x the most requests per batch (1 unbatched, the
-//     chunk units per batch with fixed-layout batching); lanesOverride sets it, only with batching on the pool
+//     chunks per batch with chunk-padded batching); lanesOverride sets it, only with batching on the pool
 const lanesOf = (cfg) => SIM.makePlan(cfg, cal).lanes;
 for (const [copyMode, buf] of [['sequential', 1], ['double', 2], ['overlap3', 3]]) {
   for (const policy of ['rr', 'rtc']) assert.strictEqual(lanesOf(Object.assign({ chunk: 2048 }, pool, { copyMode, policy })), buf, `${copyMode} ${policy}`);
@@ -91,12 +91,17 @@ for (const cache of ['inf', 'paging']) {
   const p = SIM.makePlan(Object.assign({}, batched, { lanesOverride: true, lanes: 4, cache, hostTier: false }), cal);
   assert.ok(!p.errors.length && p.lanes === Infinity, `override on ${cache}: ${p.errors}`);
 }
-// a variable-layout batch has no chunk units: the lane count (the most requests per batch) must be given
-const varBatched = Object.assign({}, batched, { layout: 'var' });
-assert.ok(SIM.makePlan(varBatched, cal).errors.some((e) => e.includes('lanesOverride')), 'var-layout batching without a lane count');
-const var5 = Object.assign({}, varBatched, { lanesOverride: true, lanes: 5 });
-assert.ok(!SIM.makePlan(var5, cal).errors.length);
-assert.ok(trace(var5).chunks.every((ch) => ch.length <= 5), 'var layout: more requests per batch than lanes');
+// a tile-padded batch has no chunks: the lane count (the most requests per batch) must be given
+const tileBatched = Object.assign({}, batched, { reqPad: 'tile' });
+assert.ok(SIM.makePlan(tileBatched, cal).errors.some((e) => e.includes('lanesOverride')), 'tile-padded batching without a lane count');
+const tile5 = Object.assign({}, tileBatched, { lanesOverride: true, lanes: 5 });
+assert.ok(!SIM.makePlan(tile5, cal).errors.length);
+assert.ok(trace(tile5).chunks.every((ch) => ch.length <= 5), 'tile padding: more requests per batch than lanes');
+// a request cap (batchMaxReqs) bounds every batch and sets the derived lane count (buffers x cap), so no override is needed
+const tileCap3 = Object.assign({}, tileBatched, { batchMaxReqs: 3 });
+assert.ok(!SIM.makePlan(tileCap3, cal).errors.length && SIM.makePlan(tileCap3, cal).lanes === 2 * 3, 'tile padding + request cap: derived lanes (double buffering x 3)');
+assert.ok(trace(tileCap3).chunks.every((ch) => ch.length <= 3), 'request cap: more requests per batch than the cap');
+assert.ok(trace(Object.assign({}, tileCap3, { cache: 'inf' })).chunks.every((ch) => ch.length <= 3), 'request cap on the infinite cache');
 // 3b. the lane count bounds the requests per batch, not the requests in progress (the partial KV is in the pool);
 //     each request of a batch has its own lane
 {

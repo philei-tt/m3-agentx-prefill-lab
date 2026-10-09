@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Dynamic batch size (batchDynShape: a batch runs at the tokens it holds) vs padding every batch to the budget (traced).
 //   A) today's 4-gx config (study base: 16x[2,4], chunk 2048, round robin) + the study's pool (4 lanes) + offload tiers
-//   B) each scenario's best stack and topology from results/study.json, fixed chunk 256 and variable layout
+//   B) each scenario's best stack and topology from results/study.json, chunk padding at C=256 and tile padding
 // Usage: JOB=<slurm job> ./on_node.sh node tools/batch_shape_ab.js [--workers 38]
 'use strict';
 const fs = require('fs');
@@ -21,11 +21,11 @@ async function main() {
   groups.push({ name: 'today 4gx 16x[2,4] C=2048 + pool + tiers', base: today, noBatch: today });
   for (const [key, R] of Object.entries(study.scenarios)) {
     const g = R.grid[0].extra;
-    const keys = R.bestKeys.filter((k) => !['var', 'fused', 'batch'].includes(k));
+    const keys = R.bestKeys.filter((k) => !['reqPad', 'fused', 'batch'].includes(k));
     const b = Object.assign(withFeatures(R.base, keys), { stages: g.stages, mesh: g.mesh, replicas: g.replicas },
       g.arenaTokens ? { laneArena: true, arenaTokens: g.arenaTokens } : { lanes: g.lanes });
-    groups.push({ name: `${key} best stack, fixed C=256`, base: Object.assign({}, b, { layout: 'fixed', chunk: 256 }), noBatch: Object.assign({}, b, { layout: 'fixed', chunk: 2048 }) });
-    groups.push({ name: `${key} best stack, var layout`, base: Object.assign({}, b, { layout: 'var', chunk: 5120 }) });
+    groups.push({ name: `${key} best stack, chunk C=256`, base: Object.assign({}, b, { reqPad: 'chunk', chunk: 256 }), noBatch: Object.assign({}, b, { reqPad: 'chunk', chunk: 2048 }) });
+    groups.push({ name: `${key} best stack, tile padding`, base: Object.assign({}, b, { reqPad: 'tile', chunk: 5120 }) });
   }
   const run = (id, cfg) => pool.evalCfg(id, laneCount(cfg), CONCS, SLO).then((r) => summarize(r.points, SLO));
   const res = await Promise.all(groups.map(async (G) => {

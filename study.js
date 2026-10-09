@@ -20,7 +20,7 @@ const FEATURES = [
   // behind static slots too: an evicted slot goes to host DRAM (then SSD) and is read back when its stream returns
   { key: 'host', name: 'KV offload tiers (host DRAM + 16 TB SSD per galaxy)', cfg: { hostTier: true } },
   { key: 'idxdedup', name: 'index_k cache not replicated over TP (store once)', cfg: { idxDerep: true } },
-  { key: 'var', name: 'Variable chunk / flexible SP layout (a2a KV write)', cfg: { layout: 'var' } },
+  { key: 'reqPad', name: 'Request padding to 32·SP', cfg: { reqPad: 'tile' } },
   // on the static-slot base, batching runs out of memory (8 requests per batch x 16 stages > 28 slots), so it needs pool
   { key: 'batch', name: 'Multi-request batching (16k token budget)', cfg: { batch: true, budget: 16384 }, requires: ['pool'] },
   { key: 'fused', name: 'Fused multi-user attention', cfg: { attn: 'fused' }, requires: ['batch', 'pool'] },
@@ -45,6 +45,9 @@ function scenarios() {
 function withFeatures(base, keys) {
   const cfg = Object.assign({}, base);
   for (const k of keys) Object.assign(cfg, FEATURES.find((f) => f.key === k).cfg);
+  // tile padding sizes a batch by the token budget; without batching, keep the scenario's chunk as that size, so the
+  // feature only changes the padding (a larger budget would add part of batching's gain)
+  if (cfg.reqPad === 'tile' && !cfg.batch && cfg.budget === undefined) cfg.budget = cfg.chunk;
   return laneCount(cfg);
 }
 // the lane count (`lanes`) can only be set with batching on the pool; otherwise it is derived (one request per chunk)
