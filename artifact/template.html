@@ -208,6 +208,7 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
     <div class="row"><label for="copyMode">Pool copies</label><select id="copyMode"><option value="sequential">sequential</option><option value="double">double-buffered</option><option value="overlap3">triple-buffered</option></select></div>
     <div class="row check"><input id="laneArena" type="checkbox"><label for="laneArena">Variable-size lanes (arena)</label></div>
     <div class="row"><label for="arenaTokens">Arena (M tokens)</label><select id="arenaTokens"><option value="2000000">2</option><option value="4000000">4</option><option value="8000000">8</option></select></div>
+    <div class="hint">Instead of fixed 1M lanes, each request gets a lane sized to its context from one shared arena; the arena size caps the requests in progress.</div>
     <details class="reveal sub" id="hostTierBox">
       <summary>Host DRAM + SSD KV tiers <span class="state" id="hostTierState"></span></summary>
       <div class="reveal-body">
