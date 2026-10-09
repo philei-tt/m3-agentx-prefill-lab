@@ -264,20 +264,24 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
     <div class="row check"><input id="compareInf" type="checkbox" checked><label for="compareInf">Also run with an infinite cache</label></div>
   </fieldset>
   <fieldset>
-    <legend>Decode</legend>
-    <div class="row"><label for="decodeTps">Decode tokens/s/u (per user)</label><input id="decodeTps" type="number" min="5" step="5"></div>
-    <div class="row"><label for="decodeCurve">Decode TSU Model</label><select id="decodeCurve"><option value="flat">constant</option><option value="m3">adapt to KV length</option></select></div>
-    <div class="hint">Constant: every session at the speed above. Adapt: measured M3 curve, the speed above at 100k (180 → 214 at 8k, 101 at 550k).</div>
-    <div class="row"><label for="decodeStages">Decode pipeline stages (0 = unlimited)</label><input id="decodeStages" type="number" min="0" step="1"></div>
-    <div class="row"><label for="decodeBatch">Decode batch (users per stage)</label><input id="decodeBatch" type="number" min="1" step="1"></div>
-    <div class="hint">The ring holds stages × batch sessions at full speed. A bigger batch slows each user.</div>
-    <div class="row"><label for="decodeCache">Decode KV layout</label><select id="decodeCache"><option value="slots">fixed 1M slots</option><option value="paging">paged</option></select></div>
-    <div class="hint" id="decMemHint"></div>
-    <div class="row check"><input id="decodeHostTier" type="checkbox"><label for="decodeHostTier">Decode offload tiers (host DRAM + SSD of the decode galaxies)</label></div>
-    <div class="row"><label for="decodeBackpressure">Decode backpressure</label><select id="decodeBackpressure"><option value="slot">slot (wait for a free slot)</option><option value="queue">queue (park KV on SSD)</option></select></div>
-    <div class="row"><label for="decodeQueueMax">Decode queue limit (0 = no limit; default 100)</label><input id="decodeQueueMax" type="number" min="0" step="1"></div>
-    <div class="hint">Slot: prefill waits for a decode slot. Queue: prefill runs while the decode queue has room; overflow KV parks on decode host's SSD.</div>
-    <div class="hint">KV is reserved at admission and freed after decode. Slots: 1M each. Paged: request-sized.</div>
+    <details class="reveal" id="decodeBox">
+      <summary>Decode</summary>
+      <div class="reveal-body">
+        <div class="row"><label for="decodeTps">Decode tokens/s/u (per user)</label><input id="decodeTps" type="number" min="5" step="5"></div>
+        <div class="row"><label for="decodeCurve">Decode TSU Model</label><select id="decodeCurve"><option value="flat">constant</option><option value="m3">adapt to KV length</option></select></div>
+        <div class="hint">Constant: every session at the speed above. Adapt: measured M3 curve, the speed above at 100k (180 → 214 at 8k, 101 at 550k).</div>
+        <div class="row"><label for="decodeStages">Decode pipeline stages (0 = unlimited)</label><input id="decodeStages" type="number" min="0" step="1"></div>
+        <div class="row"><label for="decodeBatch">Decode batch (users per stage)</label><input id="decodeBatch" type="number" min="1" step="1"></div>
+        <div class="hint">The ring holds stages × batch sessions at full speed. A bigger batch slows each user.</div>
+        <div class="row"><label for="decodeCache">Decode KV layout</label><select id="decodeCache"><option value="slots">fixed 1M slots</option><option value="paging">paged</option></select></div>
+        <div class="hint" id="decMemHint"></div>
+        <div class="row check"><input id="decodeHostTier" type="checkbox"><label for="decodeHostTier">Decode offload tiers (host DRAM + SSD of the decode galaxies)</label></div>
+        <div class="row"><label for="decodeBackpressure">Decode backpressure</label><select id="decodeBackpressure"><option value="slot">slot (wait for a free slot)</option><option value="queue">queue (park KV on SSD)</option></select></div>
+        <div class="row"><label for="decodeQueueMax">Decode queue limit (0 = no limit; default 100)</label><input id="decodeQueueMax" type="number" min="0" step="1"></div>
+        <div class="hint">Slot: prefill waits for a decode slot. Queue: prefill runs while the decode queue has room; overflow KV parks on decode host's SSD.</div>
+        <div class="hint">KV is reserved at admission and freed after decode. Slots: 1M each. Paged: request-sized.</div>
+      </div>
+    </details>
   </fieldset>
   <fieldset>
     <details class="reveal">
@@ -964,6 +968,7 @@ function applyUrl() {
     cfg[f] = el.type === 'checkbox' ? s === '1' : f === 'mesh' ? s.split('x').map(Number) : custom ? s.split(',').map(Number) : NUMS.has(f) ? Number(s) : s;
   }
   setForm(cfg);
+  if (Object.keys(cfg).some((f) => f.startsWith('decode'))) $('decodeBox').open = true; // show the decode settings a link sets
   const key = formKey(getCfg()), pi = PRESETS.findIndex((p) => formKey(p.cfg) === key);
   $('preset').value = String(pi);
   $('presetDesc').textContent = (pi >= 0 ? PRESETS[pi].desc : 'Custom configuration') + ' (from a shared link)' + (bad.length ? `; ignored ${bad.join(', ')}.` : '.');
