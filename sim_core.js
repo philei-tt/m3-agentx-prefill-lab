@@ -512,12 +512,12 @@
     // decodeBackpressure: when a request may start prefill, as far as decode is concerned.
     //   'slot'  (today; fixed slots only) = once it holds a free decode slot; it waits (in TTFT) until one frees.
     //   'queue' (fixed slots or paging, with the decode offload tiers) = once the decode queue has room: the requests
-    //           decode has taken on (holding slots / pages, or parked) number fewer than decodeQueueMax (0 = no
-    //           limit). Its KV migrates into a free slot / pages if there are any; otherwise to the decode SSDs
+    //           decode has taken on (holding slots / pages, or parked) number fewer than decodeQueueMax (default
+    //           100; 0 = no limit). Its KV migrates into a free slot / pages if there are any; otherwise to the decode SSDs
     //           (parked: PCIe + SSD write). A parked request, once its prefill is done, waits for a slot / pages (FIFO,
     //           ahead of new admissions) and reads its KV back before its first token (in TTFT). Requests holding
     //           slots / pages decode round robin on the ring (decodeStages), so the limit caps how many share it.
-    decodeBackpressure: 'slot', decodeQueueMax: 0,
+    decodeBackpressure: 'slot', decodeQueueMax: 100,
     concurrency: 64, decodeTps: 180, duration: 1800, seed: 1, idleCap: 10, startMin: 0, startMax: 1, maxWarmup: 1e6,
     gapCap: Infinity,      // AgentX forbids capping recorded idle gaps (only the 10 s system-idle cap applies)
     // policy: 'rr' (default) = round robin, see below; 'rtc' = run to completion (no preemption), oldest first
@@ -1806,7 +1806,7 @@
       const tree = q.tree, r = q.r;
       inflightReqs--; tree.live--;
       if (q.decSlot) {
-        // decode speed this session got, output tokens / decode time (the decode-speed SLO, tsuP10)
+        // decode speed this session got, output tokens / decode time (reported as tsuP10, tsuP50)
         if (warmDone && now >= t0 && now <= tEnd && TR.req_out[r] > 0) st.tsu.push(TR.req_out[r] / Math.max(1e-9, now - q.decBeginT));
         decTick(); decHeld--; decoding--; decSpeedSum -= q.decSpeed || 0; q.decSlot = false;
         decRelease(q); decDrain();

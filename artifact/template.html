@@ -255,8 +255,6 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row"><label for="slo">p90 TTFT SLO (s)</label><input id="slo" type="number" min="0.5" step="0.5"></div>
     <div class="row"><label for="sloR">SLO slider <span class="mono" id="sloV"></span></label><input id="sloR" type="range" min="0" max="100" step="1" aria-label="p90 TTFT SLO, log scale, right end = no SLO"></div>
     <div class="hint">Log scale from 1 s to 10 min; the right end means no SLO (goodput = peak). Results update live; a run sweeps up to about 4× the SLO it was started with, so for a much looser SLO, run again.</div>
-    <div class="row"><label for="tsuSlo">Decode speed SLO, tokens/s/u (0 = none)</label><input id="tsuSlo" type="number" min="0" step="5"></div>
-    <div class="hint">A point also needs 90% of its decode sessions at or above this speed (output tokens / decode time; p10 ≥ the SLO). A shared decode ring slows every session, so this caps how many decode at once. Run again after changing it.</div>
     <div class="row"><label for="duration">Profiling window (s)</label><select id="duration"><option>900</option><option>1800</option></select></div>
     <div class="row"><label for="seed">Seed</label><input id="seed" type="number" min="1" step="1"></div>
     <div class="row"><label for="concs">Concurrency grid</label><input id="concs" type="text"></div>
@@ -273,7 +271,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row"><label for="decodeSlots">Decode KV memory, 1M slots (0 = unlimited)</label><input id="decodeSlots" type="number" min="0" step="1"></div>
     <div class="row check"><input id="decodeHostTier" type="checkbox"><label for="decodeHostTier">Decode offload tiers (host DRAM + SSD of the decode galaxies)</label></div>
     <div class="row"><label for="decodeBackpressure">Decode backpressure</label><select id="decodeBackpressure"><option value="slot">slot (wait for a free slot)</option><option value="queue">queue (park KV on SSD)</option></select></div>
-    <div class="row"><label for="decodeQueueMax">Decode queue limit (0 = no limit)</label><input id="decodeQueueMax" type="number" min="0" step="1"></div>
+    <div class="row"><label for="decodeQueueMax">Decode queue limit (0 = no limit; default 100)</label><input id="decodeQueueMax" type="number" min="0" step="1"></div>
     <div class="hint">Slot (fixed slots only, today): a request waits for a free decode slot before its prefill starts. Queue (fixed slots or paged, needs the decode offload tiers): prefill starts a request as long as the decode queue (requests holding slots or pages, or parked) is under the limit. Its KV goes into free slots or pages, else to the decode SSDs; after prefill a parked request waits for slots or pages (oldest first) and reads its KV back before its first token. Requests holding slots or pages decode round robin on the ring, so the limit also caps how many share it.</div>
     <div class="hint">A request reserves its decode KV before its prefill may start (tt-d-gen reserves it up front to start KV migration eagerly) and releases it when decode ends; waiting for room counts in TTFT. Fixed slots: one 1M slot per request (M3 decode today: about 64 sessions, one per pipeline stage). Paged: the whole memory is a paged pool; the request's pages are pinned (shared prefixes once), so memory is request-sized and every session past prefill decodes at once, sharing the ring. Released slots and pages stay cached and, with the offload tiers, go on to host DRAM and SSD of the decode galaxies (Revenue &amp; cost); a later request with the same prefix finds them there, which saves only KV migration (not modelled).</div>
   </fieldset>
@@ -800,7 +798,7 @@ onmessage = (e) => {
   M3SWEEP.sweep(j.concs, j.slo, (c, tag) => {
     let r; try { r = M3SIM.simulate(TR, CAL, Object.assign({}, j.cfg, { concurrency: c })); } catch (err) { r = { error: String(err) }; }
     const p = slim(r, c); postMessage({ id: j.id, point: p, tag }); return p;
-  }, Object.assign(j.slo >= 1e6 ? { extend: 0, refinePeak: 3 } : {}, { tsuMin: j.tsuMin || 0 })); // no SLO: goodput = peak, so bisect the peak instead
+  }, j.slo >= 1e6 ? { extend: 0, refinePeak: 3 } : {}); // no SLO: goodput = peak, so bisect the peak instead
 
   postMessage({ id: j.id, done: true });
 };`;
@@ -937,7 +935,6 @@ function shareUrl(hash) {
   const cfg = getCfg(), kv = [];
   for (const f of FIELDS) { const v = fieldStr(f, cfg[f]); if (v !== fieldStr(f, SIM.DEFAULTS[f])) kv.push([f, v]); }
   if (Number($('slo').value) !== STUDY.slo) kv.push(['slo', $('slo').value]);
-  if (tsuSlo() > 0) kv.push(['tsu', String(tsuSlo())]);
   const concs = $('concs').value.replace(/\s/g, ''); if (concs !== DEFAULT_CONCS) kv.push(['concs', concs]);
   if (!$('compareInf').checked) kv.push(['inf', '0']);
   if (viewC != null) kv.push(['at', String(viewC)]);
@@ -949,7 +946,7 @@ function syncUrl() { try { history.replaceState(null, '', shareUrl(location.hash
 // apply a shared link; returns null without parameters, else the list of parameters it had to ignore
 function applyUrl() {
   const q = new URLSearchParams(location.search);
-  if (![...FIELDS, 'slo', 'tsu', 'concs', 'inf', 'at', ...Object.keys(ECON)].some((k) => q.has(k))) return null;
+  if (![...FIELDS, 'slo', 'concs', 'inf', 'at', ...Object.keys(ECON)].some((k) => q.has(k))) return null;
   const cfg = {}, bad = [];
   for (const f of FIELDS) {
     if (!q.has(f)) continue;
@@ -964,7 +961,6 @@ function applyUrl() {
   $('preset').value = String(pi);
   $('presetDesc').textContent = (pi >= 0 ? PRESETS[pi].desc : 'Custom configuration') + ' (from a shared link)' + (bad.length ? `; ignored ${bad.join(', ')}.` : '.');
   if (q.has('slo')) { const v = Number(q.get('slo')); if (v > 0) $('slo').value = v; else bad.push('slo=' + q.get('slo')); }
-  if (q.has('tsu')) { const v = Number(q.get('tsu')); if (v >= 0) $('tsuSlo').value = v; else bad.push('tsu=' + q.get('tsu')); }
   if (q.has('concs')) { const v = q.get('concs'); if (/^\d+(,\d+)*$/.test(v)) $('concs').value = v; else bad.push('concs=' + v); }
   $('compareInf').checked = q.get('inf') !== '0';
   if (q.has('at')) { const v = Number(q.get('at')); if (v > 0) viewC = v; else bad.push('at=' + q.get('at')); }
@@ -1075,8 +1071,6 @@ function drawTriple(ids, series, slo, pick) {
 
 // ---------------------------------------------------------------- goodput: lib/sweep.js (same code as the study)
 const summarize = SWEEP.summarize;
-// decode-speed SLO (tokens/s/u, 0 = none): the 10th percentile of the sessions' decode speed must reach it
-const tsuSlo = () => Math.max(0, Number($('tsuSlo').value) || 0);
 
 // ---------------------------------------------------------------- run
 let run = null, pinned = null, workers = [];
@@ -1130,8 +1124,7 @@ function render() {
   if (run) { series.push({ name: 'this config', color: C.cfg, pts: realAll }); if (infAll.length) series.push({ name: 'same, infinite cache', color: C.inf, pts: infAll }); }
   if (pinned) series.push({ name: 'pinned: ' + pinned.name, color: C.pin, pts: pinned.real });
   $('legend').innerHTML = series.map((s) => `<span><i style="background:${s.color}"></i>${esc(s.name)}</span>`).join('');
-  const tsu = tsuSlo();
-  const R = run ? summarize(run.real, slo, tsu) : null, I = run && run.inf.length ? summarize(run.inf, slo, tsu) : null, P = pinned ? summarize(pinned.real, slo, tsu) : null;
+  const R = run ? summarize(run.real, slo) : null, I = run && run.inf.length ? summarize(run.inf, slo) : null, P = pinned ? summarize(pinned.real, slo) : null;
   const a = R && R.at;
   // per-point metrics: the picked concurrency, else the goodput point, else the peak (no point meets the SLO)
   const pickP = viewC != null ? realAll.find((p) => p.conc === viewC && !p.error) : null;
@@ -1142,7 +1135,7 @@ function render() {
   const at = (txt) => (where ? `${txt}, ${where}` : txt);
   const vpts = realAll.filter((p) => !p.error).sort((x, y) => x.conc - y.conc);
   $('viewAt').innerHTML = `<option value="">${a ? `goodput point (C = ${a.conc})` : R && R.peak ? `peak (C = ${R.peak.conc}): no point meets the SLO` : 'goodput point'}</option>`
-    + vpts.map((p) => `<option value="${p.conc}">C = ${p.conc} · p90 ${fmtS(p.ttftP90)} s${SWEEP.passes(p, slo, tsu) ? '' : ' (over SLO)'} · useful ${fmtK(p.usefulTps)}${run.extra && run.extra.includes(p) ? ' · added' : ''}</option>`).join('');
+    + vpts.map((p) => `<option value="${p.conc}">C = ${p.conc} · p90 ${fmtS(p.ttftP90)} s${SWEEP.passes(p, slo) ? '' : ' (over SLO)'} · useful ${fmtK(p.usefulTps)}${run.extra && run.extra.includes(p) ? ' · added' : ''}</option>`).join('');
   $('viewAt').value = pickP ? String(pickP.conc) : '';
   drawTriple(['chU', 'chT', 'chH', 'chR'], series, slo < NO_SLO ? slo : null, run ? { c: v ? v.conc : null, fn: pickConc } : null);
   // a run stops sweeping about 4x past the SLO it was started with: a much looser SLO needs a new run
@@ -1153,7 +1146,7 @@ function render() {
   const tiles = [
     showPick
       ? ['Useful throughput', fmtK(pickP.usefulTps), `useful tok/s at C = ${pickP.conc}`, '']
-      : ['Goodput', R ? (R.atEdge ? '≥ ' : '') + fmtK(R.goodput) : '–', (slo >= NO_SLO ? 'useful tok/s, no TTFT limit (= peak)' : 'useful tok/s @ p90 ≤ ' + slo + ' s') + (tsu > 0 ? `, decode p10 ≥ ${tsu} tok/s/u` : ''), stale ? `run swept for a ${sloTxt(run.slo)} SLO: run again for this one` : R && R.atEdge ? 'still under the SLO at the highest concurrency simulated' : P ?`pinned ${fmtK(P.goodput)} (${R && P.goodput ? (R.goodput / P.goodput).toFixed(2) + 'x' : '–'})` : ''],
+      : ['Goodput', R ? (R.atEdge ? '≥ ' : '') + fmtK(R.goodput) : '–', slo >= NO_SLO ? 'useful tok/s, no TTFT limit (= peak)' : 'useful tok/s @ p90 ≤ ' + slo + ' s', stale ? `run swept for a ${sloTxt(run.slo)} SLO: run again for this one` : R && R.atEdge ? 'still under the SLO at the highest concurrency simulated' : P ?`pinned ${fmtK(P.goodput)} (${R && P.goodput ? (R.goodput / P.goodput).toFixed(2) + 'x' : '–'})` : ''],
     showPick && infP
       ? ['With infinite cache', fmtK(infP.usefulTps), `useful tok/s at C = ${pickP.conc}, nothing evicted`, `real = ${pct(pickP.usefulTps / infP.usefulTps)} of ∞`]
       : ['With infinite cache', I ? (I.atEdge ? '≥ ' : '') + fmtK(I.goodput) : '–', 'same config, nothing evicted', R && I && I.goodput ? `real = ${I.atEdge ? '≤ ' : ''}${pct(R.goodput / I.goodput)} of ∞` : ''],
@@ -1219,7 +1212,7 @@ function startRun() {
       if (m.point) { run[m.id].push(m.point); run[m.id].sort((a, b) => a.conc - b.conc); got++; $('progBar').style.width = Math.min(100, 100 * got / total) + '%'; if (m.tag === 'refine') $('statusTxt').textContent = 'Refining the cliff…'; else if (m.tag === 'extend') $('statusTxt').textContent = 'Still under the SLO, extending the grid…'; render(); }
       if (m.done) { if (--pending === 0) { $('runBtn').dataset.busy = '0'; $('runBtn').disabled = false; $('pinBtn').disabled = false; $('progBar').style.width = '100%'; $('statusTxt').textContent = `Done in ${((performance.now() - t0) / 1000).toFixed(1)} s`; ensurePick(viewC); render(); } }
     };
-    w.postMessage({ job: { id: j.id, cfg: j.cfg, concs, slo, tsuMin: tsuSlo() } });
+    w.postMessage({ job: { id: j.id, cfg: j.cfg, concs, slo } });
   });
 }
 $('runBtn').addEventListener('click', startRun);
@@ -1241,7 +1234,6 @@ function syncSlo(from) {
   $('sloV').textContent = sloTxt(Number($('slo').value));
 }
 $('slo').addEventListener('change', () => { syncSlo('n'); render(); syncUrl(); });
-$('tsuSlo').addEventListener('change', () => { render(); syncUrl(); });
 $('sloR').addEventListener('input', () => { syncSlo('r'); render(); syncUrl(); });
 for (const id of Object.keys(ECON)) $(id).addEventListener('input', () => { render(); renderRoadmap(); });
 
@@ -1367,7 +1359,7 @@ function renderModel() {
 presetOptions();
 const startIdx = Math.max(0, PRESETS.findIndex((p) => p.name === 'today-C'));
 $('preset').value = String(startIdx); setForm(PRESETS[startIdx].cfg); $('presetDesc').textContent = PRESETS[startIdx].desc;
-$('slo').value = STUDY.slo; $('tsuSlo').value = 0; $('concs').value = DEFAULT_CONCS;
+$('slo').value = STUDY.slo; $('concs').value = DEFAULT_CONCS;
 for (const [id, [o, k]] of Object.entries(ECON)) $(id).value = o[k];
 const shared = applyUrl();
 syncSlo('n'); updatePlan(); renderRoadmap(); renderModel();

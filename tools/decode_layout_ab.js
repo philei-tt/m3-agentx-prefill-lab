@@ -4,16 +4,16 @@
 // speed on the measured M3 curve at 180 tokens/s/u @100k. Scenarios:
 //   fixed slots, slot backpressure   today: a request waits for a free slot before prefill, holds it to decode end
 //   fixed slots / paged, queue backpressure: prefill starts a request while the decode queue (requests holding slots
-//                                    / pages, or parked) is under the limit (none, or 124 = 2 x the ring); its KV goes
+//                                    / pages, or parked) is under the limit (default 100); its KV goes
 //                                    to free slots / pages, else to the decode SSDs, and a parked request takes slots /
 //                                    pages after prefill (FIFO), reading its KV back first
 //   unlimited decode                 reference: no KV or ring limit
 // Prefill: the decode-backpressure setup of README.md, 6 and 8 galaxies ([2,4] stages), paged pool + host DRAM + SSD
 // tiers, today's kernels, round robin; best (by net revenue at the goodput point) of no batching (chunk 1024 / 2048)
 // and batching (chunk 512 / 1024, budget 4k / 8k / 16k, 4 lanes). Goodput point: p90 TTFT <= 10 s (to the first
-// decode token) and, with --tsu T (default 50), 90% of decode sessions at >= T tokens/s/u. Net revenue: MiniMax's
+// decode token). Net revenue: MiniMax's
 // prices, output tokens as decoded in the window, $12 per galaxy-hour, prefill + 16 decode galaxies.
-// Usage: node tools/decode_layout_ab.js [--workers 14] [--tsu 50] [--out results/decode_layout_ab.json] > results/decode_layout_ab.txt
+// Usage: node tools/decode_layout_ab.js [--workers 14] [--out results/decode_layout_ab.json] > results/decode_layout_ab.txt
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -26,10 +26,8 @@ const { usd } = require('../lib/price.js');
 const RING = { decodeStages: 62, decodeSlots: 86, decodeHostTier: true, decodeGalaxies: SIM.COST.decodeGalaxies };
 const DECODE = [
   ['fixed slots, slot backpressure (today)', Object.assign({ decodeCache: 'slots', decodeBackpressure: 'slot' }, RING)],
-  ['fixed slots, queue backpressure, no limit', Object.assign({ decodeCache: 'slots', decodeBackpressure: 'queue' }, RING)],
-  ['fixed slots, queue backpressure, queue 124', Object.assign({ decodeCache: 'slots', decodeBackpressure: 'queue', decodeQueueMax: 124 }, RING)],
-  ['paged, queue backpressure, no limit', Object.assign({ decodeCache: 'paging', decodeBackpressure: 'queue' }, RING)],
-  ['paged, queue backpressure, queue 124', Object.assign({ decodeCache: 'paging', decodeBackpressure: 'queue', decodeQueueMax: 124 }, RING)],
+  ['fixed slots, queue backpressure (limit 100)', Object.assign({ decodeCache: 'slots', decodeBackpressure: 'queue' }, RING)],
+  ['paged, queue backpressure (limit 100)', Object.assign({ decodeCache: 'paging', decodeBackpressure: 'queue' }, RING)],
   ['(ref) unlimited decode', { decodeSlots: 0, decodeStages: 0 }],
 ];
 const PREFILL = [];
@@ -41,13 +39,12 @@ async function main() {
   const args = process.argv.slice(2);
   const get = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
   const pool = new Pool(Number(get('--workers', 14)));
-  const tsuMin = Number(get('--tsu', 50));
   const t0 = Date.now();
   const jobs = [];
   for (const gx of [6, 8]) for (const [label, dec] of DECODE) for (const pf of PREFILL) {
     const cfg = Object.assign({ galaxies: gx, stages: 4 * gx, mesh: [2, 4], split: 'auto', opEff: 0, cache: 'pool', hostTier: true }, pf, dec);
-    jobs.push(pool.evalCfg(`${gx} ${label} ${prefillTxt(pf)}`, cfg, CONCS, SLO, 4, { tsuMin }).then((r) => {
-      const s = summarize(r.points, SLO, tsuMin), e = s.at ? SIM.economics(s.at, gx) : null;
+    jobs.push(pool.evalCfg(`${gx} ${label} ${prefillTxt(pf)}`, cfg, CONCS, SLO).then((r) => {
+      const s = summarize(r.points, SLO), e = s.at ? SIM.economics(s.at, gx) : null;
       return { gx, label, dec, pf, goodput: s.goodput, at: s.at, econ: e, plan: r.plan };
     }));
   }
@@ -55,9 +52,9 @@ async function main() {
   pool.close();
   const k = (x) => (x / 1e3).toFixed(1) + 'k';
   const pct = (x) => (100 * x).toFixed(0) + '%';
-  const res = { slo: SLO, tsuMin, concs: CONCS, decode: DECODE, prefill: PREFILL, galaxies: {} };
+  const res = { slo: SLO, concs: CONCS, decode: DECODE, prefill: PREFILL, galaxies: {} };
   for (const gx of [6, 8]) {
-    console.log(`\n== ${gx} prefill galaxies (${4 * gx}x[2,4]) + 16 decode galaxies: best prefill config per decode layout, at its goodput point (p90 TTFT <= ${SLO} s${tsuMin > 0 ? `, p10 decode speed >= ${tsuMin} tokens/s/u` : ''})`);
+    console.log(`\n== ${gx} prefill galaxies (${4 * gx}x[2,4]) + 16 decode galaxies: best prefill config per decode layout, at its goodput point (p90 TTFT <= ${SLO} s)`);
     res.galaxies[gx] = [];
     for (const [label] of DECODE) {
       const all = rows.filter((r) => r.gx === gx && r.label === label);
