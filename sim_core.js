@@ -509,14 +509,14 @@
     //   is needed again. KV migration from prefill is not modelled, so a decode-side hit only saves migration
     //   (reported as decHitRate and migTps).
     decodeCache: 'slots', decodeHostTier: false, decodeGalaxies: 16,
-    // decodeBackpressure (fixed decode slots with the decode offload tiers): what a request needs from decode before
-    //   its prefill may start.
-    //   'slot'  (today) = a free decode slot; it waits (in TTFT) until one frees.
-    //   'queue' = a free slot if there is one (KV migrates straight into it); otherwise its KV migrates to the decode
-    //             galaxies' SSD (parked: PCIe + SSD write) and it takes a slot once its prefill is done and one frees
-    //             (FIFO, ahead of new admissions), then reads its KV back from SSD (what the slot does not already
-    //             hold) before its first token. A request waits before prefill only while decodeQueueMax requests
-    //             (0 = no limit) are parked.
+    // decodeBackpressure: when a request may start prefill, as far as decode is concerned.
+    //   'slot'  (today; fixed slots only) = once it holds a free decode slot; it waits (in TTFT) until one frees.
+    //   'queue' (fixed slots or paging, with the decode offload tiers) = once the decode queue has room: the requests
+    //           decode has taken on (holding slots / pages, or parked) number fewer than decodeQueueMax (0 = no
+    //           limit). Its KV migrates into a free slot / pages if there are any; otherwise to the decode SSDs
+    //           (parked: PCIe + SSD write). A parked request, once its prefill is done, waits for a slot / pages (FIFO,
+    //           ahead of new admissions) and reads its KV back before its first token (in TTFT). Requests holding
+    //           slots / pages decode round robin on the ring (decodeStages), so the limit caps how many share it.
     decodeBackpressure: 'slot', decodeQueueMax: 0,
     concurrency: 64, decodeTps: 180, duration: 1800, seed: 1, idleCap: 10, startMin: 0, startMax: 1, maxWarmup: 1e6,
     gapCap: Infinity,      // AgentX forbids capping recorded idle gaps (only the 10 s system-idle cap applies)
@@ -740,7 +740,8 @@
     if (!['slots', 'paging'].includes(dc)) errors.push(`decodeCache must be 'slots' or 'paging', got ${dc}`);
     if (cfg.decodeHostTier && !(cfg.decodeGalaxies >= 1)) errors.push('decode offload tiers need decodeGalaxies >= 1');
     if (!['slot', 'queue'].includes(cfg.decodeBackpressure)) errors.push(`decodeBackpressure must be 'slot' or 'queue', got ${cfg.decodeBackpressure}`);
-    if (cfg.decodeBackpressure === 'queue' && !(dc === 'slots' && cfg.decodeSlots > 0 && cfg.decodeHostTier && cfg.ssdTBPerGalaxy > 0)) errors.push('queue backpressure parks KV on the decode SSDs: it needs fixed decode slots (decodeSlots > 0) and the decode offload tiers with an SSD');
+    if (cfg.decodeBackpressure === 'slot' && dc !== 'slots') errors.push('slot backpressure needs fixed decode slots; paged decode KV uses queue backpressure');
+    if (cfg.decodeBackpressure === 'queue' && decMem !== Infinity && !(cfg.decodeHostTier && cfg.ssdTBPerGalaxy > 0)) errors.push('queue backpressure parks KV on the decode SSDs when slots / pages are full: it needs the decode offload tiers with an SSD');
     if (!(cfg.decodeQueueMax >= 0)) errors.push('decodeQueueMax must be >= 0 (0 = no limit)');
     const decOffload = cfg.decodeHostTier && decMem !== Infinity;
     // decode galaxies' host DRAM left for KV: the prefill reserves, with this galaxy's share of the whole model's weights
@@ -1135,9 +1136,9 @@
     // decResvB: pool blocks reserved for the output of the sessions holding pages; pendTtft: requests counted in the
     // window whose decode has not begun
     let decResvB = 0; const pendTtft = new Set();
-    // queue backpressure: requests admitted without a slot (KV parked on the decode SSDs), and those of them past
-    // prefill waiting for a slot (FIFO)
-    const decQueue = cfg.decodeBackpressure === 'queue' && !!decSlots;
+    // queue backpressure: requests admitted without slots / pages (KV parked on the decode SSDs), and those of them
+    // past prefill waiting for slots / pages (FIFO)
+    const decQueue = cfg.decodeBackpressure === 'queue';
     let parkedN = 0; const slotQ = [];
     // decode slots: held from admission to prefill (TTFT clock already running) until decode ends; time-weighted
     // occupancy over the window, for slots held and for requests actually decoding (prefill done, not yet ended)
@@ -1191,6 +1192,15 @@
       }
       return { hitB, ready };
     }
+    // pages for q's whole context (pinned, shared pieces once) and its output (reserved) -> { hitB, got: [device,
+    // host DRAM, SSD] blocks already cached }, or null if the pool cannot hold it next to the sessions holding pages
+    function poolAcquire(q) {
+      const pool = decPool, n = pool.walk(q.tree.dns, TR.req_leaf[q.r] - TR.tr_pc0[q.tree.trace]), outB = Math.ceil(TR.req_out[q.r] / B);
+      const held = pool.pinnedB + decResvB;
+      if (held > 0 && held + pool.unpinnedB(n) + outB > pool.cap) return null;
+      q.decPins = pool.pinAll(n, now); q.decOutB = outB; decResvB += outB; pool.reserve(outB);
+      const got = pool.got; return { hitB: got[0] + got[1] + got[2], got };
+    }
     function decTryTake(q) {
       decTick();
       let hitB = 0, ready = 0;
@@ -1198,13 +1208,10 @@
         if (slotQ.length) return false; // parked sessions past prefill get the next free slots
         const a = slotAcquire(q); if (!a) return false;
         hitB = a.hitB; ready = a.ready;
-      } else if (decPool) { // the whole context pinned in the pool (shared pieces once), plus the output's pages
-        const pool = decPool, n = pool.walk(q.tree.dns, TR.req_leaf[q.r] - TR.tr_pc0[q.tree.trace]), outB = Math.ceil(TR.req_out[q.r] / B);
-        const held = pool.pinnedB + decResvB;
-        if (held > 0 && held + pool.unpinnedB(n) + outB > pool.cap) return false;
-        q.decPins = pool.pinAll(n, now); q.decOutB = outB; decResvB += outB; pool.reserve(outB);
-        const [dev, host, ssd] = pool.got; hitB = dev + host + ssd;
-        if (host + ssd > 0) ready = decFetch(host, ssd);
+      } else if (decPool) {
+        if (slotQ.length) return false; // parked sessions past prefill get the next free pages
+        const a = poolAcquire(q); if (!a) return false;
+        hitB = a.hitB; if (a.got[1] + a.got[2] > 0) ready = decFetch(a.got[1], a.got[2]);
       }
       q.decReadyAt = ready;
       if (decWin() && (decSlots || decPool)) { st.decCtxTok += TR.req_blocks[q.r] * B; st.decHitTok += hitB * B; }
@@ -1217,21 +1224,25 @@
     // decode's side of admission to prefill: decode KV reserved (decTake), or with queue backpressure the KV parked
     // on the decode SSDs; false = the request waits
     function decAdmit(q) {
+      if (decQueue && cfg.decodeQueueMax > 0 && decHeld + parkedN >= cfg.decodeQueueMax) return false; // decode queue full
       if (decTryTake(q)) { decTake(q); return true; }
-      if (!decQueue || (cfg.decodeQueueMax > 0 && parkedN >= cfg.decodeQueueMax)) return false;
+      if (!decQueue) return false;
       decTick(); parkedN++; q.parked = true; q.decSlot = true; q.decReadyAt = 0;
       decDemote(TR.req_blocks[q.r], 1, 3); // migrated in, written out to SSD
       if (decWin()) { st.parked++; st.decCtxTok += TR.req_blocks[q.r] * B; }
       return true;
     }
-    // a parked session past prefill takes a free slot and reads back from SSD what the slot does not already hold;
-    // false if no slot is free
+    // a parked session past prefill takes a free slot / pages and reads back from SSD what they do not already hold
+    // (pages: what is not cached on device, in host DRAM or on SSD already); false if there is no room
     function decUnpark(q) {
-      const a = slotAcquire(q); if (!a) return false;
+      decTick();
+      let ready;
+      if (decSlots) { const a = slotAcquire(q); if (!a) return false; ready = Math.max(a.ready, decFetch(0, TR.req_blocks[q.r] - a.hitB)); }
+      else { const a = poolAcquire(q); if (!a) return false; ready = decFetch(a.got[1], a.got[2] + TR.req_blocks[q.r] - a.hitB); }
       if (slotQ[0] === q) slotQ.shift();
-      decTick(); parkedN--; q.parked = false; decHeld++;
+      parkedN--; q.parked = false; decHeld++;
       if (decWin() && decHeld > st.decMax) st.decMax = decHeld;
-      q.decReadyAt = Math.max(a.ready, decFetch(0, TR.req_blocks[q.r] - a.hitB));
+      q.decReadyAt = ready;
       decStep(q); decDrain();
       return true;
     }
@@ -1250,12 +1261,12 @@
         if (a) { if (!a.warm && decOff && decOff.has(key)) decOff.take(key); decSlots.release(a.slot, now, TR.req_blocks[q.r]); }
       } else if (decPool) decPool.touch(decPool.walk(q.tree.dns, TR.req_leaf[q.r] - TR.tr_pc0[q.tree.trace]), now);
     }
-    // decode ends: free the slot / pages (the KV stays cached); a freed slot goes to the oldest parked session
+    // decode ends: free the slot / pages (the KV stays cached); the room goes to the oldest parked session first
     function decRelease(q) {
       if (decSlots) decSlots.release(q.decSlotIdx, now, TR.req_blocks[q.r]);
-      while (slotQ.length && decUnpark(slotQ[0])) { /* the freed slot goes to the oldest parked session */ }
       if (q.decPins) { decPool.unpin(q.decPins); q.decPins = null; }
       if (q.decOutB) { decPool.unreserve(q.decOutB); decResvB -= q.decOutB; q.decOutB = 0; }
+      while (slotQ.length && decUnpark(slotQ[0])) { /* freed room goes to the oldest parked session */ }
     }
     let nextTrace = 0; const nsKey = { v: 0 };
     const scratch = new Float64Array(S);
@@ -1768,7 +1779,7 @@
     // parked (queue backpressure), once it holds a slot; EV_DSTART re-enters here when the wait is over
     function decStep(q) {
       if (q.decReadyAt > now + 1e-12) { ev.push(q.decReadyAt, { e: EV_DSTART, q }); return; }
-      if (q.parked) { // past prefill without a slot: wait for one (FIFO)
+      if (q.parked) { // past prefill without a slot / pages: wait for them (FIFO)
         if (slotQ.length || !decUnpark(q)) { q.slotWaited = true; slotQ.push(q); }
         return;
       }

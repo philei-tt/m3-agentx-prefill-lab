@@ -3,9 +3,10 @@
 // memory (today's code fits 86-89; earlier runs used 75), decode-side host DRAM + SSD tiers on its 16 galaxies,
 // speed on the measured M3 curve at 180 tokens/s/u @100k. Scenarios:
 //   fixed slots, slot backpressure   today: a request waits for a free slot before prefill, holds it to decode end
-//   fixed slots, queue backpressure  a free slot if there is one, else its KV is parked on the decode SSDs and it takes
-//                                    a slot after prefill (FIFO), reading its KV back first; no limit / 32 parked
-//   paged                            the whole memory a paged pool; every session past prefill decodes at once
+//   fixed slots / paged, queue backpressure: prefill starts a request while the decode queue (requests holding slots
+//                                    / pages, or parked) is under the limit (none, or 124 = 2 x the ring); its KV goes
+//                                    to free slots / pages, else to the decode SSDs, and a parked request takes slots /
+//                                    pages after prefill (FIFO), reading its KV back first
 //   unlimited decode                 reference: no KV or ring limit
 // Prefill: the decode-backpressure setup of README.md, 6 and 8 galaxies ([2,4] stages), paged pool + host DRAM + SSD
 // tiers, today's kernels, round robin; best (by net revenue at the goodput point) of no batching (chunk 1024 / 2048)
@@ -26,8 +27,9 @@ const RING = { decodeStages: 62, decodeSlots: 86, decodeHostTier: true, decodeGa
 const DECODE = [
   ['fixed slots, slot backpressure (today)', Object.assign({ decodeCache: 'slots', decodeBackpressure: 'slot' }, RING)],
   ['fixed slots, queue backpressure, no limit', Object.assign({ decodeCache: 'slots', decodeBackpressure: 'queue' }, RING)],
-  ['fixed slots, queue backpressure, 32 parked', Object.assign({ decodeCache: 'slots', decodeBackpressure: 'queue', decodeQueueMax: 32 }, RING)],
-  ['paged: 86M-token pool', Object.assign({ decodeCache: 'paging' }, RING)],
+  ['fixed slots, queue backpressure, queue 124', Object.assign({ decodeCache: 'slots', decodeBackpressure: 'queue', decodeQueueMax: 124 }, RING)],
+  ['paged, queue backpressure, no limit', Object.assign({ decodeCache: 'paging', decodeBackpressure: 'queue' }, RING)],
+  ['paged, queue backpressure, queue 124', Object.assign({ decodeCache: 'paging', decodeBackpressure: 'queue', decodeQueueMax: 124 }, RING)],
   ['(ref) unlimited decode', { decodeSlots: 0, decodeStages: 0 }],
 ];
 const PREFILL = [];
@@ -70,7 +72,7 @@ async function main() {
       console.log(`    decode: held ${Math.round(p.decSlotsMean)} / max ${p.decSlotsMax}, decoding ${Math.round(p.decodingMean)} at ${Math.round(p.decodeTpsMean)} tokens/s/u (p10 ${Math.round(p.tsuP10)}, p50 ${Math.round(p.tsuP50)}), ring full ${pct(p.ringFullFrac)}`
         + ` | ${pct(p.decWaitPerS / p.reqPerS)} waited ${p.decWaitMean.toFixed(1)} s before prefill`
         + (p.decParkPerS > 0 ? ` | ${pct(p.decParkPerS / p.reqPerS)} parked on SSD (${Math.round(p.decParkedMean)} on average), decode SSD ${pct(p.decSsdUtil)} busy` : '')
-        + (p.decSlotWaitFrac > 0 ? ` | ${pct(p.decSlotWaitFrac)} waited for a slot after prefill, first token +${(1e3 * p.decStartDelayMean).toFixed(0)} ms` : '')
+        + (p.decSlotWaitFrac > 0 ? ` | ${pct(p.decSlotWaitFrac)} waited for slots / pages after prefill, first token +${(1e3 * p.decStartDelayMean).toFixed(0)} ms` : '')
         + (Number.isFinite(p.decHitRate) ? ` | decode-side hit ${(100 * p.decHitRate).toFixed(1)}%` : '')
         + (Number.isFinite(p.decPoolTokMean) ? ` | pool in use ${(p.decPoolTokMean / 1e6).toFixed(1)}M of ${(best.plan.decPoolTok / 1e6).toFixed(1)}M` : ''));
       console.log(`    every prefill config (net $/h at goodput): ${all.map((r) => `${prefillTxt(r.pf)} ${r.econ ? usd(r.econ.margin) : '–'}`).join('; ')}`);

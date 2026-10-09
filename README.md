@@ -140,8 +140,7 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
     (as prefill's static slots).
   * `'paging'`: an ideal paged decode kernel; the whole memory is a content-addressed paged pool (prefill's pool). A
     request's pages (and its output's) are pinned from admission, with shared prefixes counted once, so memory is
-    request-sized and every session past prefill decodes at once, sharing the ring. Admission waits in FIFO order while
-    the pinned and reserved pages would not fit.
+    request-sized and every session holding pages decodes at once, sharing the ring. Paging needs queue backpressure.
   * `decodeHostTier`: released slots and unpinned pages go on to host DRAM, then SSD, of the decode galaxies
     (`hostTier` specs × `decodeGalaxies`, default 16). They are read back over the decode side's PCIe and SSDs (before
     decode starts) when a later request needs that prefix. KV migration is not modelled, so decode-side hits
@@ -149,12 +148,18 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
     only if it has not landed by the end of prefill.
   * Runs also report `decPoolTokMean` (pool pages pinned or reserved by sessions) and `decPcieH2DUtil`,
     `decPcieD2HUtil`, `decSsdUtil`. TTFT runs to the start of decode: prefill, plus any wait for a slot or a read-back.
-* **Decode backpressure** (`decodeBackpressure`; page: "Decode backpressure"; fixed slots with the decode offload tiers).
-  `'slot'` (default, today): a request waits for a free decode slot before its prefill starts. `'queue'`: it takes a
-  free slot if there is one; otherwise its KV migrates to the decode SSDs (parked: PCIe + SSD write), and once its
-  prefill is done it takes the next free slot (oldest parked session first, ahead of new admissions) and reads its KV
-  back from SSD before its first token. That wait and read-back count in TTFT. A request waits before prefill only
-  while `decodeQueueMax` requests (0 = no limit) are parked. Runs report `decParkPerS` and `decParkedMean`.
+* **Decode backpressure** (`decodeBackpressure`; page: "Decode backpressure").
+  * `'slot'` (default, today; fixed slots only): a request waits for a free decode slot before its prefill starts.
+  * `'queue'` (fixed slots or paging; with a finite memory it needs the decode offload tiers): prefill starts a request
+    as long as the decode queue, the requests holding slots or pages plus those parked, is under `decodeQueueMax` (0 =
+    no limit); otherwise the request waits. Its KV migrates into a free slot or free pages if there are any, else to
+    the decode SSDs (parked: PCIe + SSD write). Once its prefill is done a parked request waits for a slot or pages
+    (FIFO, ahead of new admissions) and reads its KV back from SSD before its first token; that wait counts in TTFT.
+    Requests holding slots or pages decode round robin on the ring, so the limit also caps how many share it. With the
+    limit at the slot count, queue backpressure on fixed slots is slot backpressure, and so is paging (the same
+    requests hold KV).
+  * Runs report `decParkPerS`, `decParkedMean` and `decSlotWaitFrac` (share of requests that waited for a slot or
+    pages after prefill).
 * **Decode-speed SLO.** Each session's decode speed is its output tokens / its decode time (`tsuP10`, `tsuP50` over the
   sessions that end in the window, plus those still decoding at its end). `summarize(points, slo, tsuMin)` and
   `sweep(..., { tsuMin })` in `lib/sweep.js` (page: "Decode speed SLO") also require `tsuP10 >= tsuMin`, i.e. 90% of
@@ -383,36 +388,41 @@ config by net revenue at its goodput point, at $12 per galaxy-hour with 16 decod
 TTFT ≤ 10 s (to the first decode token) and 90% of decode sessions get ≥ 50 tokens/s/u (decode-speed SLO). Output is
 billed as decoded.
 
-| decode scenario | prefill gx | best prefill | goodput | requests/h | output decoded, tok/s | decoding (mean) | tokens/s/u, p10 / p50 | ring full | waits | revenue/h, in + out | net/h |
+| decode scenario | prefill gx | best prefill | goodput | requests/h | holding KV / parked (mean) | decoding (mean) | tokens/s/u, p10 / p50 | ring full | waits | revenue/h, in + out | net/h |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| fixed slots, slot backpressure (today) | 6 | chunk 512, batch 4k | 41.8k @ C=456 | 33.9k | 9.7k | 63 | 128 / 168 | 62% | 95% wait 4.2 s before prefill | $283 + $41.83 | **$60.88** |
-| fixed slots, queue backpressure, no limit | 6 | chunk 512, batch 4k | 44.6k @ C=480 | 35.8k | 10.1k | 80 | 106 / 139 | 94% | 80% wait 2.3 s for a slot after prefill | $297 + $43.79 | **$76.84** |
-| fixed slots, queue backpressure, 32 parked | 6 | chunk 512, batch 4k | 44.3k @ C=472 | 35.5k | 10.1k | 76 | 110 / 144 | 88% | 63% wait 2.3 s before prefill, 68% wait 0.7 s for a slot after prefill | $296 + $43.50 | **$75.59** |
-| paged: 86M-token pool | 6 | chunk 512, batch 4k | 48.1k @ C=608 | 37.4k | 10.1k | 134 | 56 / 83 | 97% | – | $318 + $43.68 | **$97.68** |
-| (ref) unlimited decode | 6 | chunk 512, batch 8k | 54.0k @ C=592 | 42.4k | 12.1k | 75 | 139 / 181 | 0% | – | $378 + $52.22 | **$166** |
-| fixed slots, slot backpressure (today) | 8 | chunk 2048 | 43.9k @ C=464 | 35.1k | 10.1k | 69 | 123 / 162 | 85% | 90% wait 4.0 s before prefill | $295 + $43.47 | **$50.20** |
-| fixed slots, queue backpressure, no limit | 8 | chunk 1024, batch 4k | 44.8k @ C=480 | 36.0k | 10.2k | 83 | 104 / 136 | 97% | 86% wait 3.2 s for a slot after prefill | $299 + $43.97 | **$54.48** |
-| fixed slots, queue backpressure, 32 parked | 8 | chunk 1024, batch 4k | 44.8k @ C=480 | 36.0k | 10.2k | 82 | 105 / 137 | 97% | 73% wait 3.0 s before prefill, 85% wait 1.1 s for a slot after prefill | $299 + $43.97 | **$54.50** |
-| paged: 86M-token pool | 8 | chunk 2048 | 48.1k @ C=608 | 37.8k | 10.1k | 155 | 53 / 69 | 98% | – | $320 + $43.84 | **$75.37** |
-| (ref) unlimited decode | 8 | chunk 512, batch 8k | 72.9k @ C=816 | 59.2k | 16.5k | 101 | 140 / 182 | 0% | – | $510 + $71.41 | **$294** |
+| fixed slots, slot backpressure (today) | 6 | chunk 512, batch 4k | 41.8k @ C=456 | 33.9k | 85 / 0 | 63 | 128 / 168 | 62% | 95% wait 4.2 s before prefill | $283 + $41.83 | **$60.88** |
+| fixed slots, queue backpressure, no limit | 6 | chunk 512, batch 4k | 44.6k @ C=480 | 35.8k | 85 / 51 | 80 | 106 / 139 | 94% | 80% wait 2.3 s after prefill | $297 + $43.79 | **$76.84** |
+| fixed slots, queue backpressure, queue 124 | 6 | chunk 512, batch 4k | 44.4k @ C=472 | 35.5k | 85 / 30 | 77 | 110 / 143 | 88% | 49% wait 2.2 s before prefill, 70% wait 0.9 s after prefill | $296 + $43.50 | **$75.75** |
+| paged, queue backpressure, no limit | 6 | chunk 512, batch 4k | 48.1k @ C=608 | 37.4k | 196 / 0 | 134 | 56 / 83 | 97% | – | $318 + $43.68 | **$97.68** |
+| paged, queue backpressure, queue 124 | 6 | chunk 512, batch 4k | 44.7k @ C=480 | 36.0k | 119 / 0 | 88 | 93 / 124 | 91% | 68% wait 2.5 s before prefill | $298 + $43.72 | **$77.51** |
+| (ref) unlimited decode | 6 | chunk 512, batch 8k | 54.0k @ C=592 | 42.4k | 152 / 0 | 75 | 139 / 181 | 0% | – | $378 + $52.22 | **$166** |
+| fixed slots, slot backpressure (today) | 8 | chunk 2048 | 43.9k @ C=464 | 35.1k | 85 / 0 | 69 | 123 / 162 | 85% | 90% wait 4.0 s before prefill | $295 + $43.47 | **$50.20** |
+| fixed slots, queue backpressure, no limit | 8 | chunk 1024, batch 4k | 44.8k @ C=480 | 36.0k | 85 / 50 | 83 | 104 / 136 | 97% | 86% wait 3.2 s after prefill | $299 + $43.97 | **$54.48** |
+| fixed slots, queue backpressure, queue 124 | 8 | chunk 512, batch 4k | 44.8k @ C=480 | 36.0k | 85 / 32 | 83 | 104 / 136 | 97% | 62% wait 2.8 s before prefill, 86% wait 1.5 s after prefill | $299 + $43.99 | **$54.49** |
+| paged, queue backpressure, no limit | 8 | chunk 2048 | 48.1k @ C=608 | 37.8k | 190 / 0 | 155 | 53 / 69 | 98% | – | $320 + $43.84 | **$75.37** |
+| paged, queue backpressure, queue 124 | 8 | chunk 512, batch 4k | 46.5k @ C=568 | 36.5k | 123 / 0 | 103 | 83 / 108 | 98% | 96% wait 5.1 s before prefill | $315 + $43.39 | **$70.87** |
+| (ref) unlimited decode | 8 | chunk 512, batch 8k | 72.9k @ C=816 | 59.2k | 221 / 0 | 101 | 140 / 182 | 0% | – | $510 + $71.41 | **$294** |
 
 * **The 62-stage ring caps output at about 10.1k tokens/s in every scenario.** The scenarios differ in requests per
   hour (input revenue) and in how decode's waiting is split between TTFT and decode speed.
-* **Queue backpressure beats slot backpressure: +$16/h at 6 prefill galaxies, +$4/h at 8.** With slot backpressure,
-  slots are held by requests still in prefill, so 63–69 of the 86 slots decode; 90–95% of requests wait about 4 s
-  before prefill starts. With queue backpressure, requests without a slot park their KV on the decode SSDs (19–20%
-  busy), and a slot goes only to a session that is ready to decode. 80–83 sessions decode, the ring is full 94–97% of
-  the time, and the wait moves after prefill (2.3–3.2 s for a slot, then the SSD read). The gain is smaller at 8
-  galaxies because 86 slots already keep that ring 85% full. A limit of 32 parked requests changes almost nothing.
-* **Paging still wins under the decode-speed SLO: +$21/h over queue backpressure at both sizes.** Pages are
-  request-sized (about 32M tokens of the 90M pool in use), so 134–155 sessions decode at once and share the ring.
-  The first token comes right after prefill, so prefill runs at higher concurrency (608 vs 480) within the TTFT SLO.
-  The decode-speed SLO is what limits it: p10 56 / 53 tokens/s/u. Without that SLO (`results/decode_layout_ab_notsu.txt`)
-  paging reaches $104 / $93 with p10 at 37 / 20 tokens/s/u; the fixed-slot rows are unchanged (86 slots never drop
-  below 100 tokens/s/u).
-* **Per-session decode speed depends on the layout.** Fixed slots share the 62 stages among at most 86 sessions, so
-  sessions never fall below about 62/86 × base speed. Paging can oversubscribe the ring as far as the decode-speed
-  SLO allows.
+* **What separates the layouts is how many requests hold device KV, and so decode at once.** Requests holding slots or
+  pages decode round robin; parked ones wait. With 86 × 1M of memory, fixed slots hold at most 86 requests; pages are
+  request-sized, so paging holds as many as the decode-queue limit allows (90M tokens fit about 700). With the limit
+  at 86, paging gives exactly the same result as today's fixed slots. With the same limit above 86, paging lets every
+  queued request decode, while fixed slots park the excess.
+* **Queue backpressure beats slot backpressure on fixed slots: +$16/h at 6 prefill galaxies, +$4/h at 8.** With slot
+  backpressure, slots are held by requests still in prefill, so 63–69 of the 86 decode, and 90–95% of requests wait
+  about 4 s before prefill. With queue backpressure a request without a slot parks on SSD (decode SSDs 19–20% busy)
+  and a slot goes only to a request ready to decode: 80–83 decode, and the wait moves after prefill (2.3–3.2 s, then
+  the SSD read). A queue limit of 124 changes little: it moves part of that wait back before prefill.
+* **Paging with the same queue limit (124) matches fixed slots at 6 prefill galaxies ($78 vs $76) and beats them at 8
+  ($71 vs $54).** Under the limit, paging holds all 124 requests' KV (103 decoding at 8 gx, p10 83 tokens/s/u), fixed
+  slots 86 (83 decoding, 32 parked waiting about 1.5 s after prefill). The difference is the extra sessions decoding
+  and the wait that leaves TTFT.
+* **Paging with no queue limit is limited only by the decode-speed SLO: $98 / $75.** 134–155 sessions decode at once
+  (p10 56 / 53 tokens/s/u), and the first token comes right after prefill, so prefill runs at higher concurrency (608
+  vs 480) within the TTFT SLO. Without the decode-speed SLO (`results/decode_layout_ab_notsu.txt`) it reaches $104 /
+  $91 at p10 37 / 19 tokens/s/u; every other row is unchanged.
 * **Earlier run (75 slots, no decode-speed SLO): the hybrid layouts.** With 62 global lanes and a 13.6M-token pool
   the hybrid beat slot backpressure by $14–25/h, the same effect as queue backpressure (a slot only for a session
   ready to decode). With one lane per stage every token copies the session's whole context into the lane on every

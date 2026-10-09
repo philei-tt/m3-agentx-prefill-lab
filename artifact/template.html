@@ -273,8 +273,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row"><label for="decodeSlots">Decode KV memory, 1M slots (0 = unlimited)</label><input id="decodeSlots" type="number" min="0" step="1"></div>
     <div class="row check"><input id="decodeHostTier" type="checkbox"><label for="decodeHostTier">Decode offload tiers (host DRAM + SSD of the decode galaxies)</label></div>
     <div class="row"><label for="decodeBackpressure">Decode backpressure</label><select id="decodeBackpressure"><option value="slot">slot (wait for a free slot)</option><option value="queue">queue (park KV on SSD)</option></select></div>
-    <div class="row"><label for="decodeQueueMax">Max parked requests (0 = no limit)</label><input id="decodeQueueMax" type="number" min="0" step="1"></div>
-    <div class="hint">Fixed slots with the decode offload tiers. Slot: a request waits for a free decode slot before its prefill starts (today). Queue: it takes a free slot if there is one; otherwise its KV migrates to the decode SSDs, and after prefill it takes the next free slot (oldest first) and reads its KV back before its first token. It waits before prefill only while the max parked requests are parked.</div>
+    <div class="row"><label for="decodeQueueMax">Decode queue limit (0 = no limit)</label><input id="decodeQueueMax" type="number" min="0" step="1"></div>
+    <div class="hint">Slot (fixed slots only, today): a request waits for a free decode slot before its prefill starts. Queue (fixed slots or paged, needs the decode offload tiers): prefill starts a request as long as the decode queue (requests holding slots or pages, or parked) is under the limit. Its KV goes into free slots or pages, else to the decode SSDs; after prefill a parked request waits for slots or pages (oldest first) and reads its KV back before its first token. Requests holding slots or pages decode round robin on the ring, so the limit also caps how many share it.</div>
     <div class="hint">A request reserves its decode KV before its prefill may start (tt-d-gen reserves it up front to start KV migration eagerly) and releases it when decode ends; waiting for room counts in TTFT. Fixed slots: one 1M slot per request (M3 decode today: about 64 sessions, one per pipeline stage). Paged: the whole memory is a paged pool; the request's pages are pinned (shared prefixes once), so memory is request-sized and every session past prefill decodes at once, sharing the ring. Released slots and pages stay cached and, with the offload tiers, go on to host DRAM and SSD of the decode galaxies (Revenue &amp; cost); a later request with the same prefix finds them there, which saves only KV migration (not modelled).</div>
   </fieldset>
   <fieldset>
@@ -846,10 +846,12 @@ function syncUi() {
   $('splitRow').hidden = $('split').value !== 'custom';
   const pool = $('cache').value === 'pool', paged = pool || $('cache').value === 'paging';
   for (const id of ['lanes', 'laneArena', 'laneScope', 'copyMode']) $(id).disabled = !pool;
-  // queue backpressure parks KV on the decode SSDs: fixed slots with the decode tiers only
-  const canQueue = $('decodeCache').value === 'slots' && $('decodeHostTier').checked && Number($('decodeSlots').value) > 0;
-  if (!canQueue) $('decodeBackpressure').value = 'slot';
-  $('decodeBackpressure').disabled = !canQueue; $('decodeQueueMax').disabled = !canQueue || $('decodeBackpressure').value !== 'queue';
+  // slot backpressure needs fixed slots, so paged decode KV always queues (parking on the decode SSDs needs the decode
+  // tiers; makePlan reports it)
+  const pagedDec = $('decodeCache').value === 'paging';
+  $('decodeBackpressure').querySelector('option[value="slot"]').disabled = pagedDec;
+  if (pagedDec) $('decodeBackpressure').value = 'queue';
+  $('decodeQueueMax').disabled = $('decodeBackpressure').value !== 'queue';
   // the offload tiers work behind every finite cache: pool / paging pages, or whole static slots
   for (const id of ['hostTier', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy']) $(id).disabled = $('cache').value === 'inf';
   // a global lane is reserved for the whole pipeline trip: buffering its copies gains nothing, so sequential only
@@ -1172,7 +1174,7 @@ function render() {
       ...(v.decPoolTokMean != null && isFinite(v.decPoolTokMean) ? [`Pool in use: ${fmtBig(v.decPoolTokMean)} tokens`] : []),
       ...(v.decWaitPerS > 0 ? [`${pct(v.decWaitPerS / v.reqPerS)} waited ${fmtS(v.decWaitMean)} s for decode KV`] : []),
       ...(v.decParkPerS > 0 ? [`${pct(v.decParkPerS / v.reqPerS)} parked on SSD (${Math.round(v.decParkedMean)} on average)`] : []),
-      ...(v.decSlotWaitFrac > 0 ? [`${pct(v.decSlotWaitFrac)} waited for a slot after prefill (first token +${fmtS(v.decStartDelayMean)} s)`] : []),
+      ...(v.decSlotWaitFrac > 0 ? [`${pct(v.decSlotWaitFrac)} waited for ${$('decodeCache').value === 'paging' ? 'pages' : 'a slot'} after prefill (first token +${fmtS(v.decStartDelayMean)} s)`] : []),
       ...(v.tsuP10 != null && isFinite(v.tsuP10) ? [`Decode speed per user p10 / p50: ${Math.round(v.tsuP10)} / ${Math.round(v.tsuP50)} tokens/s/u`] : []),
       ...(v.ringFullFrac > 0 ? [`Decode ring full ${pct(v.ringFullFrac)} of the time`] : []),
       ...(v.decHitRate != null && isFinite(v.decHitRate) ? [`Decode-side prefix hit: ${pct(v.decHitRate, 1)}`] : [])].join('<br>') : ''],
