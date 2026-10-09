@@ -67,6 +67,9 @@ details.reveal > summary::after { content: ' ▾'; }
 details.reveal[open] > summary::after { content: ' ▴'; }
 details.reveal > summary:hover { color: var(--ink-2); }
 details.reveal > .reveal-body { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+/* a collapsible group inside a fieldset: its title reads like a setting, not a section heading */
+details.reveal.sub > summary { font-family: inherit; font-size: 13px; letter-spacing: 0; text-transform: none; color: var(--ink); }
+details.reveal.sub > summary .state { color: var(--ink-3); }
 .row { display: grid; grid-template-columns: minmax(0, 1fr) 130px; align-items: center; gap: 8px; }
 .row label { color: var(--ink-2); font-size: 13px; }
 .row.check { grid-template-columns: 18px minmax(0, 1fr); }
@@ -203,13 +206,18 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="row"><label for="copyMode">Pool copies</label><select id="copyMode"><option value="sequential">sequential</option><option value="double">double-buffered</option><option value="overlap3">triple-buffered</option></select></div>
     <div class="row check"><input id="laneArena" type="checkbox"><label for="laneArena">Variable-size lanes (arena)</label></div>
     <div class="row"><label for="arenaTokens">Arena (M tokens)</label><select id="arenaTokens"><option value="2000000">2</option><option value="4000000">4</option><option value="8000000">8</option></select></div>
-    <div class="row check"><input id="hostTier" type="checkbox"><label for="hostTier">Host DRAM + SSD KV tiers</label></div>
-    <div class="row"><label for="hostDramGBPerGalaxy">Host DRAM GB / galaxy</label><input id="hostDramGBPerGalaxy" type="number" min="0" step="32"></div>
-    <div class="row"><label for="ssdTBPerGalaxy">SSD TB / galaxy</label><input id="ssdTBPerGalaxy" type="number" min="0" step="1"></div>
-    <div class="row"><label for="pcieGBsPerGalaxy">PCIe GB/s / galaxy (each way)</label><input id="pcieGBsPerGalaxy" type="number" min="1" step="1"></div>
-    <div class="row"><label for="ssdReadGBsPerGalaxy">SSD read GB/s / galaxy</label><input id="ssdReadGBsPerGalaxy" type="number" min="1" step="0.5"></div>
-    <div class="row"><label for="ssdWriteGBsPerGalaxy">SSD write GB/s / galaxy</label><input id="ssdWriteGBsPerGalaxy" type="number" min="1" step="0.5"></div>
-    <div class="hint">Device evicts to host DRAM, host DRAM to SSD. Host DRAM left for KV (Plan panel) = DRAM minus 10% headroom, OS, runtime, KV staging, pinned PCIe buffers and this galaxy's share of the weights. Defaults from the Galaxy Blackhole user guide (576 GB host DRAM; PCIe x1 Gen4 to 28 of 32 chips = 63 GB/s each way) and the drives (4x Samsung PM9D3a E1.S at Gen4: 31.5 GB/s read, 27.2 GB/s write).</div>
+    <details class="reveal sub" id="hostTierBox">
+      <summary>Host DRAM + SSD KV tiers <span class="state" id="hostTierState"></span></summary>
+      <div class="reveal-body">
+        <div class="row check"><input id="hostTier" type="checkbox"><label for="hostTier">Use the host DRAM + SSD tiers</label></div>
+        <div class="row"><label for="hostDramGBPerGalaxy">Host DRAM GB / galaxy</label><input id="hostDramGBPerGalaxy" type="number" min="0" step="32"></div>
+        <div class="row"><label for="ssdTBPerGalaxy">SSD TB / galaxy</label><input id="ssdTBPerGalaxy" type="number" min="0" step="1"></div>
+        <div class="row"><label for="pcieGBsPerGalaxy">PCIe GB/s / galaxy (each way)</label><input id="pcieGBsPerGalaxy" type="number" min="1" step="1"></div>
+        <div class="row"><label for="ssdReadGBsPerGalaxy">SSD read GB/s / galaxy</label><input id="ssdReadGBsPerGalaxy" type="number" min="1" step="0.5"></div>
+        <div class="row"><label for="ssdWriteGBsPerGalaxy">SSD write GB/s / galaxy</label><input id="ssdWriteGBsPerGalaxy" type="number" min="1" step="0.5"></div>
+        <div class="hint">Device evicts to host DRAM, host DRAM to SSD. Host DRAM left for KV (Plan panel) = DRAM minus 10% headroom, OS, runtime, KV staging, pinned PCIe buffers and this galaxy's share of the weights. Defaults from the Galaxy Blackhole user guide (576 GB host DRAM; PCIe x1 Gen4 to 28 of 32 chips = 63 GB/s each way) and the drives (4x Samsung PM9D3a E1.S at Gen4: 31.5 GB/s read, 27.2 GB/s write).</div>
+      </div>
+    </details>
     <div class="row check"><input id="idxDerep" type="checkbox"><label for="idxDerep">index_k stored once (not ×TP)</label></div>
     <div class="row check"><input id="idxBf16" type="checkbox"><label for="idxBf16">index_k bf16 (off = bf8)</label></div>
     <div class="row"><label for="reserveGB">Reserve GB / chip</label><input id="reserveGB" type="number" min="0" step="0.5"></div>
@@ -861,6 +869,7 @@ function syncUi() {
   // tile padding: the chunk is only the KV slab, fixed at 128*SP (MSA needs 128-row KV blocks per rank), as makePlan
   const slabFixed = $('reqPad').value === 'tile';
   if (slabFixed) $('chunk').value = String(128 * Number($('mesh').value.split('x')[0]));
+  $('hostTierState').textContent = $('hostTier').checked ? '· on' : '· off';
   // token placement only applies to tile padding: hidden (with its hint) otherwise
   const placeRow = $('placement').closest('.row'), tileOnly = $('reqPad').value === 'tile' ? '' : 'none';
   placeRow.style.display = tileOnly; placeRow.nextElementSibling.style.display = tileOnly;

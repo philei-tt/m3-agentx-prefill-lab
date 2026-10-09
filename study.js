@@ -45,6 +45,9 @@ function scenarios() {
 function withFeatures(base, keys) {
   const cfg = Object.assign({}, base);
   for (const k of keys) Object.assign(cfg, FEATURES.find((f) => f.key === k).cfg);
+  // tile padding sizes a batch by the token budget; without batching, keep the scenario's chunk as that size, so the
+  // feature only changes the padding (a larger budget would add part of batching's gain)
+  if (cfg.reqPad === 'tile' && !cfg.batch && cfg.budget === undefined) cfg.budget = cfg.chunk;
   return laneCount(cfg);
 }
 // the lane count (`lanes`) can only be set with batching on the pool; otherwise it is derived (one request per chunk)
