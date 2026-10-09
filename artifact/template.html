@@ -213,15 +213,17 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
     <div class="hint">What each request's tokens in a pass are padded to. Chunk (today): a multiple of the chunk size. Tile: a multiple of 32·SP, one 32-row tile per SP rank (32 with owner placement). Either way the KV cache stays block-cyclic with chunk/SP rows per rank.</div>
     <div class="row"><label for="placement">Token placement</label><select id="placement"><option value="even">even split over SP (a2a KV write)</option><option value="owner">owner rank (no a2a, uneven ranks)</option></select></div>
     <div class="hint">Tile padding only. Even split: each request's tokens in a pass are padded to 32·SP and split evenly, then an all-to-all writes each K/V row to the rank that owns it. Owner rank: each token is computed on the rank that owns its KV row (blocks of chunk/SP), so segments are padded to 32 and there is no all-to-all, but every rank is padded to the busiest one.</div>
-    <div class="row"><label for="chunk">Chunk size</label><select id="chunk"><option>128</option><option>256</option><option>512</option><option>1024</option><option>2048</option><option>4096</option><option>5120</option><option>8192</option></select></div>
-    <div class="hint" id="chunkHint" hidden>Not used: with batching, tile padding and an even split, the token budget below is the pass size (unless max chunks per request is set).</div>
+    <div class="row"><label for="chunk">Chunk size (KV slab)</label><select id="chunk"><option>128</option><option>256</option><option>512</option><option>1024</option><option>2048</option><option>4096</option><option>5120</option><option>8192</option></select></div>
+    <div class="hint" id="chunkHint" hidden>Does not change the cost here: with batching, tile padding and an even split, the token budget sets the pass size and the all-to-all does not depend on the slab. The KV cache still has chunk/SP rows per rank.</div>
     <div class="row check"><input id="batch" type="checkbox"><label for="batch">Batch several requests per pipeline pass</label></div>
     <div class="hint" id="batchHint" hidden>With static 1M slots a request holds its slot for the whole pipeline trip, so requests per batch × stages must fit in the slots; otherwise the plan reports out of memory.</div>
     <div class="row"><label for="budget">Token budget</label><select id="budget"><option>4096</option><option>5120</option><option>8192</option><option>16384</option><option>32768</option></select></div>
+    <div class="row"><label for="batchMaxReqs">Max requests per batch (0 = no limit)</label><input id="batchMaxReqs" type="number" min="0" step="1"></div>
+    <div class="hint">With static slots each request holds its slot for the whole pipeline trip, so max requests × stages must fit in the slots. On fixed pool lanes it sets the derived lane count.</div>
     <div class="row check"><input id="lanesOverride" type="checkbox"><label for="lanesOverride">Override lanes per stage (batching + hybrid pool only)</label></div>
     <div class="row"><label for="lanes">Lanes per stage</label><input id="lanes" type="number" min="1" max="32" step="1"></div>
     <div class="hint" id="lanesHint" hidden>Not used with variable-size lanes: each request gets a lane of its own length from the arena, so the arena size bounds the requests in progress. Untick the arena to set a lane count.</div>
-    <div class="hint">Default: requests per batch × copy buffers (sequential 1, double 2, triple 3); with a global lane table, stages × requests per batch (sequential copies only). Tile-padded batching must override.</div>
+    <div class="hint">Default: requests per batch × copy buffers (sequential 1, double 2, triple 3); with a global lane table, stages × requests per batch (sequential copies only). Tile-padded batching must override unless max requests per batch is set.</div>
     <div class="row check"><input id="batchDynShape" type="checkbox"><label for="batchDynShape">Dynamic batch size (no padding to the budget)</label></div>
     <div class="hint">On: a partly filled batch runs at its actual size (untraced). Off: it is padded to the full budget, as tracing requires.</div>
     <div class="row"><label for="batchChunksPerRequest">Chunks per request per round (0 = no limit)</label><input id="batchChunksPerRequest" type="number" min="0" step="1"></div>
@@ -779,9 +781,9 @@ function mkWorker() {
 }
 
 // ---------------------------------------------------------------- form <-> cfg
-const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'reqPad', 'placement', 'chunk', 'batch', 'budget', 'batchDynShape', 'batchChunksPerRequest', 'attn', 'prefetchKV', 'policy',
+const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'reqPad', 'placement', 'chunk', 'batch', 'budget', 'batchMaxReqs', 'batchDynShape', 'batchChunksPerRequest', 'attn', 'prefetchKV', 'policy',
   'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeStages', 'decodeCurve', 'duration', 'seed'];
-const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchChunksPerRequest', 'lanes', 'arenaTokens', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeStages', 'duration', 'seed']);
+const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchMaxReqs', 'batchChunksPerRequest', 'lanes', 'arenaTokens', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeStages', 'duration', 'seed']);
 function setForm(cfg) {
   const c = Object.assign({}, SIM.DEFAULTS, cfg);
   for (const f of FIELDS) {
@@ -819,11 +821,11 @@ function syncUi() {
   $('lanes').disabled = !pool || $('laneArena').checked;
   // every cache can batch; static slots need requests per batch x stages slots (makePlan reports out of memory)
   $('batch').disabled = false; $('batchHint').hidden = $('cache').value !== 'slots';
-  $('budget').disabled = !$('batch').checked; $('attn').disabled = !$('batch').checked; $('batchDynShape').disabled = !$('batch').checked; $('batchChunksPerRequest').disabled = !$('batch').checked || $('policy').value !== 'rr';
+  $('budget').disabled = !$('batch').checked; $('batchMaxReqs').disabled = !$('batch').checked; $('attn').disabled = !$('batch').checked; $('batchDynShape').disabled = !$('batch').checked; $('batchChunksPerRequest').disabled = !$('batch').checked || $('policy').value !== 'rr';
   // pool lanes per stage (as makePlan): derived = copy-mode buffers x requests per batch; the override is for batching
-  // on the pool only, and tile-padded batching (no chunks) must override
-  const fixedLanes = pool && !$('laneArena').checked, batched = $('batch').checked;
-  const canOverride = fixedLanes && batched, mustOverride = canOverride && $('reqPad').value === 'tile';
+  // on the pool only, and tile-padded batching (no chunks) must override unless max requests per batch is set
+  const fixedLanes = pool && !$('laneArena').checked, batched = $('batch').checked, maxR = Number($('batchMaxReqs').value) || 0;
+  const canOverride = fixedLanes && batched, mustOverride = canOverride && $('reqPad').value === 'tile' && !(maxR > 0);
   if (!canOverride) $('lanesOverride').checked = false;
   if (mustOverride) $('lanesOverride').checked = true;
   $('lanesOverride').disabled = !canOverride || mustOverride;
@@ -835,19 +837,19 @@ function syncUi() {
   if (fixedLanes && !$('lanesOverride').checked) {
     const chunk = Number($('chunk').value), budget = Number($('budget').value);
     const buffers = { sequential: 1, double: 2, overlap3: 3 }[$('copyMode').value] || 1;
-    const r = batched ? Math.max(1, Math.floor(Math.max(budget, chunk) / chunk)) : 1;
+    const r = !batched ? 1 : $('reqPad').value === 'tile' ? maxR : Math.min(maxR > 0 ? maxR : Infinity, Math.max(1, Math.floor(Math.max(budget, chunk) / chunk)));
     $('lanes').value = String($('laneScope').value === 'stage' ? buffers * r : Number($('stages').value) * r);
   }
   // tile-padded batching packs to the budget; the chunk size only sets the per-request cap, if there is one, so the
-  // chunk field is unused
-  // (owner placement still needs it: it sets the KV block per rank)
+  // chunk does not change the cost (owner placement still needs it: it sets the KV block per rank). It stays editable:
+  // it is still the KV slab
   const chunkUnused = $('batch').checked && $('reqPad').value === 'tile' && $('placement').value !== 'owner' && !(Number($('batchChunksPerRequest').value) > 0);
   $('placement').disabled = $('reqPad').value !== 'tile';
   // tile padding has no chunks: a request's tokens in a pass are one run, so per chunk = per request
   const chunkOpt = $('attn').querySelector('option[value="chunk"]');
   chunkOpt.disabled = $('reqPad').value === 'tile';
   if (chunkOpt.disabled && $('attn').value === 'chunk') $('attn').value = 'request';
-  $('chunk').disabled = chunkUnused; $('chunkHint').hidden = !chunkUnused;
+  $('chunkHint').hidden = !chunkUnused;
 }
 // keep the pipeline valid when the hardware changes: fill each replica with stages, and drop a custom split
 // whose length no longer matches the stage count

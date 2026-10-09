@@ -426,6 +426,10 @@
     //   throughput. Units are chunks (chunk padding) or tiles (tile padding); L counts chunks of `chunk`
     //   tokens. On the pool, a request joins a batch only if it gets a lane.
     batchChunksPerRequest: 0,
+    // batchMaxReqs: the most requests in one batch (0 = no limit beyond the budget and, on fixed pool lanes, the lane
+    //   count). With static slots a request holds its slot for the whole pipeline trip, so this bounds the slots in
+    //   flight to batchMaxReqs x stages; on fixed pool lanes it sets the derived lane count.
+    batchMaxReqs: 0,
     cache: 'slots',        // slots | pool | paging | inf
     // pool lanes per stage, derived from r = the most requests a batch (one pipeline pass) holds (1 without
     //   batching, the chunks per batch with chunk padding; every request in a batch needs its own lane)
@@ -610,7 +614,9 @@
     const Tmax = Tchunk;
     // pool lanes per stage (see DEFAULTS.lanes): buffers x the most requests per batch, or lanesOverride
     const laneBuffers = cfg.copyMode === 'overlap3' ? 3 : cfg.copyMode === 'double' ? 2 : 1;
-    const reqsPerBatch = !cfg.batch ? 1 : tile ? 0 : Math.max(1, Math.floor(Tchunk / cfg.chunk));
+    const maxR = cfg.batch && cfg.batchMaxReqs > 0 ? cfg.batchMaxReqs : Infinity;
+    // requests per batch for the derived lane count; 0 = tile padding without a cap (no chunks to count)
+    const reqsPerBatch = !cfg.batch ? 1 : tile ? (maxR < Infinity ? maxR : 0) : Math.min(maxR, Math.max(1, Math.floor(Tchunk / cfg.chunk)));
     const fixedLanes = cfg.cache === 'pool' && !cfg.laneArena;
     // handoff: measured = blocking send + hop latency (fitted, per chunk); async = link-rate transfer, overlapped
     const actXfer = (T) => T * M3.E * BF16 / (P * HW.linkUni * 0.5) * 1e3; // ms, each chip ships its shard
@@ -672,19 +678,20 @@
     // pipeline has (requests per batch) x (stages) requests in flight, each in its own 1M slot. A tile-padded
     // batch has no chunks: up to budget / (32*SP) requests (budget / 32 with owner placement)
     if (cfg.cache === 'slots') {
-      const r = !cfg.batch ? 1 : tile ? Math.floor(Tchunk / gran) : reqsPerBatch;
+      const r = !cfg.batch ? 1 : tile ? Math.min(maxR, Math.floor(Tchunk / gran)) : reqsPerBatch;
       if (r * S > nSlots) errors.push(`out of memory: ${r} requests per batch x ${S} stages = ${r * S} slots in flight, but only ${nSlots} 1M slots fit`);
     }
     // the override only applies to fixed pool lanes (other caches have none and ignore it, as they ignore `lanes`,
     // so a pool config can be re-run with cache 'inf' as is); without batching the count is derived
     if (cfg.cache === 'pool' && cfg.laneScope === 'global' && cfg.copyMode !== 'sequential') errors.push('a global lane table holds the lane for the whole pipeline trip, so it allows only sequential copies (one buffer)');
     if (cfg.lanesOverride && cfg.cache === 'pool' && !cfg.batch) errors.push('overriding the lane count needs batching (without it the count is derived)');
-    if (fixedLanes && cfg.batch && reqsPerBatch === 0 && !cfg.lanesOverride) errors.push('tile-padded batching on the pool needs the lane count set (lanesOverride)');
+    if (fixedLanes && cfg.batch && reqsPerBatch === 0 && !cfg.lanesOverride) errors.push('tile-padded batching on the pool needs the lane count set (lanesOverride) or a request cap (batchMaxReqs)');
     if (cfg.lanesOverride && !(cfg.lanes >= 1)) errors.push('the lane count must be at least 1');
     for (const k of ['hostDramGBPerGalaxy', 'ssdTBPerGalaxy']) if (!(cfg[k] >= 0)) errors.push(`${k} must be >= 0`);
     for (const k of ['pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy']) if (!(cfg[k] > 0)) errors.push(`${k} must be > 0`);
     if (!(cfg.decodeStages >= 0)) errors.push('decode pipeline stages must be >= 0 (0 = unlimited)');
     if (!['flat', 'm3'].includes(cfg.decodeCurve)) errors.push(`decodeCurve must be 'flat' or 'm3', got ${cfg.decodeCurve}`);
+    if (!(cfg.batchMaxReqs >= 0) || cfg.batchMaxReqs !== Math.floor(cfg.batchMaxReqs)) errors.push('max requests per batch must be a whole number >= 0 (0 = no limit)');
     if (!(cfg.batchChunksPerRequest >= 0) || cfg.batchChunksPerRequest !== Math.floor(cfg.batchChunksPerRequest)) errors.push('chunks per request per round must be a whole number >= 0 (0 = no limit)');
     // every buffer that must hold a whole request has to fit the largest AgentX request (990,016 tokens)
     if (cfg.cache === 'slots' && cfg.slotLen < MAX_REQ) errors.push(`slots must hold the largest request (${MAX_REQ} tokens)`);
@@ -708,7 +715,7 @@
     if (owner && cfg.chunk % (32 * sp)) errors.push(`owner placement needs whole 32-row KV blocks: chunk ${cfg.chunk} is not a multiple of 32 x SP = ${32 * sp}`);
     return {
       cfg, sp, tp, P, S, counts, stages, eff, lat, layer, stageOv, embedMs, blockMs, hopMs, errors,
-      capTok, nSlots, poolTok, lanes, arena, hostTok, ssdTok, hostBudget, kvbL, kvbHost, gran, laneCap, owner,
+      capTok, nSlots, poolTok, lanes, arena, hostTok, ssdTok, hostBudget, kvbL, kvbHost, gran, laneCap, owner, maxR,
       // owner placement: KV block per rank, and the most rows a rank holds per pass (whole 32-row tiles)
       blk: cfg.chunk / sp, rankCap: cfg.batch ? Math.floor(cfg.budget / sp / 32) * 32 : cfg.chunk / sp,
       // time (ms) to copy `tok` tokens of KV between pool and lane on the stage holding the most layers
@@ -1302,7 +1309,7 @@
       const budget = cfg.batch ? (fixed ? Math.max(cfg.budget, C) : cfg.budget) : C;
       // owner placement: rows per SP rank in this chunk; a rank holds at most plan.rankCap
       const own = plan.owner, load = own ? new Array(plan.sp).fill(0) : null;
-      const room = () => (fixed ? budget - T >= C : own ? load.some((l) => plan.rankCap - l >= 32) : budget - T >= plan.gran); // space for one more segment
+      const room = () => segs.length < plan.maxR && (fixed ? budget - T >= C : own ? load.some((l) => plan.rankCap - l >= 32) : budget - T >= plan.gran); // space for one more segment
       const cands = rep.active;
       // owner placement: every rank is padded to the busiest one, so the chunk costs SP x its rows
       const done = () => ({ segs, T: own ? plan.sp * Math.max(...load) : T, load });
@@ -1347,7 +1354,7 @@
           const fit = (q, off, a, apply) => (own ? ownerWalk(sl, q.pos + off * unit, a * unit, plan.rankCap, plan.blk, plan.sp, apply) / unit : a);
           // first round: requests join in queue order while the budget lasts and they get a lane
           for (const q of rep.active) {
-            if (left <= 0) break;
+            if (left <= 0 || cand.length >= plan.maxR) break;
             const n = Math.ceil(q.rem / unit), a = fit(q, 0, Math.min(n, L, left), false);
             if (a <= 0) break; // its first rank is full
             if (rrPool && !laneGet(q, rep)) break; // no lane free: a lane release re-pumps

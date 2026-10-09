@@ -97,6 +97,11 @@ assert.ok(SIM.makePlan(tileBatched, cal).errors.some((e) => e.includes('lanesOve
 const tile5 = Object.assign({}, tileBatched, { lanesOverride: true, lanes: 5 });
 assert.ok(!SIM.makePlan(tile5, cal).errors.length);
 assert.ok(trace(tile5).chunks.every((ch) => ch.length <= 5), 'tile padding: more requests per batch than lanes');
+// a request cap (batchMaxReqs) bounds every batch and sets the derived lane count (buffers x cap), so no override is needed
+const tileCap3 = Object.assign({}, tileBatched, { batchMaxReqs: 3 });
+assert.ok(!SIM.makePlan(tileCap3, cal).errors.length && SIM.makePlan(tileCap3, cal).lanes === 2 * 3, 'tile padding + request cap: derived lanes (double buffering x 3)');
+assert.ok(trace(tileCap3).chunks.every((ch) => ch.length <= 3), 'request cap: more requests per batch than the cap');
+assert.ok(trace(Object.assign({}, tileCap3, { cache: 'inf' })).chunks.every((ch) => ch.length <= 3), 'request cap on the infinite cache');
 // 3b. the lane count bounds the requests per batch, not the requests in progress (the partial KV is in the pool);
 //     each request of a batch has its own lane
 {
