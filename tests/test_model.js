@@ -121,24 +121,30 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
     `limit 8: max ${l.decSlotsMax} mean ${l.decSlotsMean} waits ${l.decWaitPerS} req ${l.reqPerS} vs ${u.reqPerS}`);
 }
 
-// 10b. decodeConcurrency: never more requests decoding than the cap; requests wait for a position holding their
-//      slot; slots <= concurrency changes nothing
+// 10b. decode ring (decodeStages): every session past prefill decodes, each at decodeTps x min(1, stages / N).
+//      A ring that never fills matches the fixed-speed model; an oversubscribed one slows every session, never
+//      decodes more than stages x decodeTps tokens/s in total, and serves fewer requests
 {
-  const cfg = Object.assign({ cache: 'pool', chunk: 512, batch: true, budget: 8192 }, base, { concurrency: 128 });
-  const a = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 8 }, cfg)), b = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 8, decodeConcurrency: 8 }, cfg));
-  const c = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 16, decodeConcurrency: 4 }, cfg));
-  assert.ok(a.usefulTps === b.usefulTps && b.runWaitPerS === 0, 'slots <= concurrency is unchanged');
-  assert.ok(c.decodingMean <= 4 + 1e-9 && c.runWaitPerS > 0 && c.runWaitMean > 0 && c.decSlotsMax <= 16, `decoding ${c.decodingMean} runWait ${c.runWaitPerS}`);
-  // decode queue length percentiles (time-weighted): ordered, at most the slots that can be waiting, 0 without a limit
-  assert.ok(c.runQP90 >= c.runQP50 && c.runQP50 >= 0 && c.runQP90 <= 16 && c.runQP90 > 0 && a.runQP90 === 0, `queue p50 ${c.runQP50} p90 ${c.runQP90}`);
-  // starvation causes: shares of the window, summing to at most 1; none attributed to decode without decode limits
-  const u = SIM.simulate(TR, cal, cfg);
-  for (const r of [a, c, u]) {
-    const f = [r.pfStarvedSlotFrac, r.pfStarvedDecodeFrac, r.pfStarvedIdleFrac, r.sendBlockFrac];
-    assert.ok(f.every((x) => x >= 0 && x <= 1) && f[0] + f[1] + f[2] <= 1 + 1e-9, `starved ${f}`);
+  const cfg = Object.assign({ cache: 'pool', chunk: 512, batch: true, budget: 8192, decodeSlots: 16, decodeCurve: 'flat' }, base, { concurrency: 128 });
+  const u = SIM.simulate(TR, cal, cfg), w = SIM.simulate(TR, cal, Object.assign({ decodeStages: 1e6 }, cfg));
+  const c = SIM.simulate(TR, cal, Object.assign({ decodeStages: 4 }, cfg));
+  assert.ok(Math.abs(w.usefulTps - u.usefulTps) < 1e-3 * u.usefulTps && Math.abs(w.decodeTpsMean - 180) < 1e-6 && w.ringFullFrac === 0, `wide ring ${w.usefulTps} vs ${u.usefulTps}`);
+  assert.ok(c.decodeTpsMean < 180 && c.ringFullFrac > 0 && c.decodingMean > 4 && c.decodingMean * c.decodeTpsMean <= 4 * 180 * (1 + 1e-9) && c.reqPerS < u.reqPerS,
+    `ring 4: speed ${c.decodeTpsMean} full ${c.ringFullFrac} decoding ${c.decodingMean}`);
+  // decodeCurve 'm3': decodeTps is the speed at 100k context, within 0.6% of the measured curve's shape; longer
+  // contexts decode slower, so AgentX sessions average below decodeTps; a ring that never fills changes nothing
+  const m3 = Object.assign({}, SIM.DEFAULTS, { decodeCurve: 'm3' });
+  assert.ok(Math.abs(SIM.decodeSpeed(m3, 100000) - 180) < 1e-9 && SIM.decodeSpeed(m3, 550000) < SIM.decodeSpeed(m3, 8000) && SIM.decodeSpeed(Object.assign({}, SIM.DEFAULTS, { decodeCurve: 'flat' }), 550000) === 180 && SIM.DEFAULTS.decodeCurve === 'm3');
+  for (const [x, t] of SIM.M3_DECODE_TSU) assert.ok(Math.abs(SIM.decodeSpeed(m3, x) * 98 / 180 / t - 1) < 0.006, `curve at ${x}`);
+  const cu = SIM.simulate(TR, cal, Object.assign({ decodeCurve: 'm3' }, cfg)), cw = SIM.simulate(TR, cal, Object.assign({ decodeCurve: 'm3', decodeStages: 1e6 }, cfg));
+  assert.ok(cu.decodeTpsMean < 180 && cu.decodeTpsMean > 100 && Math.abs(cw.usefulTps - cu.usefulTps) < 1e-3 * cu.usefulTps, `m3 mean speed ${cu.decodeTpsMean}`);
+  // starvation causes: shares of the window, summing to at most 1; none from slots without a slot limit
+  const n = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeSlots: 0 }));
+  for (const r of [u, c, n]) {
+    const f = [r.pfStarvedSlotFrac, r.pfStarvedIdleFrac, r.sendBlockFrac];
+    assert.ok(f.every((x) => x >= 0 && x <= 1) && f[0] + f[1] <= 1 + 1e-9, `starved ${f}`);
   }
-  assert.ok(a.pfStarvedSlotFrac > 0 && c.pfStarvedDecodeFrac + c.pfStarvedSlotFrac > 0, 'decode limits starve prefill');
-  assert.ok(u.pfStarvedSlotFrac === 0 && u.pfStarvedDecodeFrac === 0 && u.sendBlockFrac > 0);
+  assert.ok(c.pfStarvedSlotFrac > 0 && n.pfStarvedSlotFrac === 0 && n.sendBlockFrac > 0, 'slot limits starve prefill');
 }
 
 // 10c. batchChunksPerRequest L: rounds over the queue, up to L chunks per request per round.

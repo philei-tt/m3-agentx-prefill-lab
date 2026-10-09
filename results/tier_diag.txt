@@ -1,32 +1,32 @@
 == goodput point (p90 TTFT <= 10 s)
-  slots                  goodput    6.2k @C=  72 | useful    6.2k processed   33.6k | hit 83.6% (inf 96.8%) | re-prefill 81% | read host    0M / SSD    0M tok | slot evictions   551 | busy  69% | p50/p90 2.5/8.7 s
-  slots + tiers, SSD 1 TB/gx goodput   24.5k @C= 232 | useful   23.8k processed   36.8k | hit 95.6% (inf 96.6%) | re-prefill 23% | read host  832M / SSD   82M tok | slot evictions  7290 | busy  73% | p50/p90 2.9/9.3 s
-  slots + tiers, SSD 8 TB/gx goodput   24.7k @C= 232 | useful   23.9k processed   36.5k | hit 95.7% (inf 96.6%) | re-prefill 21% | read host  821M / SSD   83M tok | slot evictions  7212 | busy  72% | p50/p90 2.6/9.3 s
-  slots + tiers, SSD 64 TB/gx goodput   24.7k @C= 232 | useful   23.9k processed   36.5k | hit 95.7% (inf 96.6%) | re-prefill 21% | read host  821M / SSD   83M tok | slot evictions  7212 | busy  72% | p50/p90 2.6/9.3 s
-  pool                   goodput   22.0k @C= 224 | useful   21.9k processed   38.5k | hit 94.8% (inf 96.6%) | re-prefill 34% | read host    0M / SSD    0M tok | slot evictions     0 | busy  78% | p50/p90 3.0/8.0 s
-  pool + tiers, SSD 1 TB/gx goodput   30.2k @C= 312 | useful   30.1k processed   39.7k | hit 96.5% (inf 96.7%) | re-prefill  5% | read host   36M / SSD   23M tok | slot evictions     0 | busy  79% | p50/p90 3.4/9.6 s
-  pool + tiers, SSD 8 TB/gx goodput   30.2k @C= 312 | useful   30.1k processed   39.7k | hit 96.5% (inf 96.7%) | re-prefill  5% | read host   36M / SSD   23M tok | slot evictions     0 | busy  79% | p50/p90 3.4/9.6 s
-  paging + tiers, SSD 8 TB/gx goodput   30.4k @C= 312 | useful   30.4k processed   40.0k | hit 96.5% (inf 96.7%) | re-prefill  5% | read host   33M / SSD   22M tok | slot evictions     0 | busy  78% | p50/p90 3.2/9.2 s
-  infinite cache         goodput   30.4k @C= 312 | useful   30.4k processed   40.0k | hit 96.5% (inf 96.7%) | re-prefill  5% | read host    0M / SSD    0M tok | slot evictions     0 | busy  78% | p50/p90 3.1/9.2 s
+  slots                  goodput    6.1k @C=  72 | useful    6.1k processed   34.4k | hit 82.3% (inf 96.7%) | re-prefill 81% | read host    0M / SSD    0M tok | slot evictions   549 | busy  71% | p50/p90 2.3/9.9 s
+  slots + tiers, SSD 1 TB/gx goodput   24.3k @C= 232 | useful   23.4k processed   36.4k | hit 95.5% (inf 96.5%) | re-prefill 23% | read host  761M / SSD   84M tok | slot evictions  6839 | busy  72% | p50/p90 2.4/9.3 s
+  slots + tiers, SSD 8 TB/gx goodput   24.7k @C= 232 | useful   23.5k processed   35.8k | hit 95.6% (inf 96.5%) | re-prefill 21% | read host  756M / SSD   86M tok | slot evictions  6794 | busy  71% | p50/p90 2.3/9.2 s
+  slots + tiers, SSD 64 TB/gx goodput   24.7k @C= 232 | useful   23.5k processed   35.8k | hit 95.6% (inf 96.5%) | re-prefill 21% | read host  756M / SSD   86M tok | slot evictions  6794 | busy  71% | p50/p90 2.3/9.2 s
+  pool                   goodput   21.9k @C= 224 | useful   21.6k processed   38.1k | hit 94.7% (inf 96.5%) | re-prefill 34% | read host    0M / SSD    0M tok | slot evictions     0 | busy  77% | p50/p90 2.9/7.8 s
+  pool + tiers, SSD 1 TB/gx goodput   29.9k @C= 312 | useful   29.7k processed   39.1k | hit 96.5% (inf 96.6%) | re-prefill  5% | read host   36M / SSD   23M tok | slot evictions     0 | busy  78% | p50/p90 3.1/9.3 s
+  pool + tiers, SSD 8 TB/gx goodput   29.9k @C= 312 | useful   29.7k processed   39.1k | hit 96.5% (inf 96.6%) | re-prefill  5% | read host   36M / SSD   23M tok | slot evictions     0 | busy  78% | p50/p90 3.1/9.3 s
+  paging + tiers, SSD 8 TB/gx goodput   31.5k @C= 344 | useful   31.5k processed   41.6k | hit 96.5% (inf 96.7%) | re-prefill  5% | read host   51M / SSD   28M tok | slot evictions     0 | busy  81% | p50/p90 3.6/9.9 s
+  infinite cache         goodput   31.5k @C= 344 | useful   31.5k processed   41.6k | hit 96.5% (inf 96.7%) | re-prefill  5% | read host    0M / SSD    0M tok | slot evictions     0 | busy  81% | p50/p90 3.6/9.9 s
 
 == at concurrency 128
-  slots                  useful    1.9k processed   41.6k | hit 1.8% (inf 95.1%) | re-prefill 95% | read host    0M / SSD    0M tok | slot evictions   970 | busy  84% | p50/p90 193.6/294.3 s
-  slots + tiers, SSD 1 TB/gx useful   15.3k processed   23.6k | hit 95.2% (inf 96.3%) | re-prefill 23% | read host  234M / SSD   14M tok | slot evictions  2516 | busy  46% | p50/p90 1.1/2.7 s
-  slots + tiers, SSD 8 TB/gx useful   15.3k processed   23.6k | hit 95.2% (inf 96.3%) | re-prefill 23% | read host  234M / SSD   14M tok | slot evictions  2516 | busy  46% | p50/p90 1.1/2.7 s
-  slots + tiers, SSD 64 TB/gx useful   15.3k processed   23.6k | hit 95.2% (inf 96.3%) | re-prefill 23% | read host  234M / SSD   14M tok | slot evictions  2516 | busy  46% | p50/p90 1.1/2.7 s
-  pool                   useful   15.3k processed   20.2k | hit 96.0% (inf 96.3%) | re-prefill  6% | read host    0M / SSD    0M tok | slot evictions     0 | busy  40% | p50/p90 1.0/1.9 s
-  pool + tiers, SSD 1 TB/gx useful   15.3k processed   19.4k | hit 96.2% (inf 96.3%) | re-prefill  1% | read host    1M / SSD    0M tok | slot evictions     0 | busy  38% | p50/p90 1.0/1.8 s
-  pool + tiers, SSD 8 TB/gx useful   15.3k processed   19.4k | hit 96.2% (inf 96.3%) | re-prefill  1% | read host    1M / SSD    0M tok | slot evictions     0 | busy  38% | p50/p90 1.0/1.8 s
-  paging + tiers, SSD 8 TB/gx useful   15.3k processed   19.4k | hit 96.2% (inf 96.3%) | re-prefill  1% | read host    1M / SSD    0M tok | slot evictions     0 | busy  38% | p50/p90 1.0/1.8 s
-  infinite cache         useful   15.3k processed   19.4k | hit 96.2% (inf 96.3%) | re-prefill  1% | read host    0M / SSD    0M tok | slot evictions     0 | busy  38% | p50/p90 1.0/1.8 s
+  slots                  useful    1.9k processed   41.6k | hit 1.8% (inf 95.1%) | re-prefill 95% | read host    0M / SSD    0M tok | slot evictions   975 | busy  84% | p50/p90 193.2/294.0 s
+  slots + tiers, SSD 1 TB/gx useful   15.1k processed   23.4k | hit 95.1% (inf 96.2%) | re-prefill 23% | read host  240M / SSD   15M tok | slot evictions  2530 | busy  46% | p50/p90 1.1/2.5 s
+  slots + tiers, SSD 8 TB/gx useful   15.1k processed   23.4k | hit 95.1% (inf 96.2%) | re-prefill 23% | read host  240M / SSD   15M tok | slot evictions  2530 | busy  46% | p50/p90 1.1/2.5 s
+  slots + tiers, SSD 64 TB/gx useful   15.1k processed   23.4k | hit 95.1% (inf 96.2%) | re-prefill 23% | read host  240M / SSD   15M tok | slot evictions  2530 | busy  46% | p50/p90 1.1/2.5 s
+  pool                   useful   15.2k processed   20.0k | hit 96.0% (inf 96.2%) | re-prefill  6% | read host    0M / SSD    0M tok | slot evictions     0 | busy  39% | p50/p90 1.0/1.9 s
+  pool + tiers, SSD 1 TB/gx useful   15.2k processed   19.2k | hit 96.2% (inf 96.2%) | re-prefill  1% | read host    1M / SSD    0M tok | slot evictions     0 | busy  38% | p50/p90 1.0/1.8 s
+  pool + tiers, SSD 8 TB/gx useful   15.2k processed   19.2k | hit 96.2% (inf 96.2%) | re-prefill  1% | read host    1M / SSD    0M tok | slot evictions     0 | busy  38% | p50/p90 1.0/1.8 s
+  paging + tiers, SSD 8 TB/gx useful   15.2k processed   19.2k | hit 96.2% (inf 96.2%) | re-prefill  1% | read host    1M / SSD    0M tok | slot evictions     0 | busy  37% | p50/p90 1.0/1.8 s
+  infinite cache         useful   15.2k processed   19.2k | hit 96.2% (inf 96.2%) | re-prefill  1% | read host    0M / SSD    0M tok | slot evictions     0 | busy  37% | p50/p90 1.0/1.8 s
 
 == at concurrency 256
-  slots                  useful    2.1k processed   41.5k | hit 0.0% (inf 94.7%) | re-prefill 95% | read host    0M / SSD    0M tok | slot evictions   957 | busy  84% | p50/p90 459.2/583.0 s
-  slots + tiers, SSD 1 TB/gx useful   24.9k processed   40.6k | hit 95.3% (inf 96.6%) | re-prefill 28% | read host 1041M / SSD  100M tok | slot evictions  8980 | busy  81% | p50/p90 4.7/12.6 s
-  slots + tiers, SSD 8 TB/gx useful   25.3k processed   39.2k | hit 95.6% (inf 96.6%) | re-prefill 23% | read host  984M / SSD  105M tok | slot evictions  8500 | busy  78% | p50/p90 3.4/12.2 s
-  slots + tiers, SSD 64 TB/gx useful   25.3k processed   39.2k | hit 95.6% (inf 96.6%) | re-prefill 23% | read host  984M / SSD  105M tok | slot evictions  8500 | busy  78% | p50/p90 3.4/12.2 s
-  pool                   useful   21.0k processed   41.6k | hit 94.2% (inf 96.5%) | re-prefill 40% | read host    0M / SSD    0M tok | slot evictions     0 | busy  84% | p50/p90 5.5/18.4 s
-  pool + tiers, SSD 1 TB/gx useful   26.9k processed   34.7k | hit 96.6% (inf 96.7%) | re-prefill  3% | read host   20M / SSD   10M tok | slot evictions     0 | busy  69% | p50/p90 2.0/3.6 s
-  pool + tiers, SSD 8 TB/gx useful   26.9k processed   34.7k | hit 96.6% (inf 96.7%) | re-prefill  3% | read host   20M / SSD   10M tok | slot evictions     0 | busy  69% | p50/p90 2.0/3.6 s
-  paging + tiers, SSD 8 TB/gx useful   26.9k processed   34.7k | hit 96.6% (inf 96.7%) | re-prefill  3% | read host   20M / SSD   10M tok | slot evictions     0 | busy  68% | p50/p90 1.9/3.4 s
-  infinite cache         useful   27.0k processed   34.8k | hit 96.6% (inf 96.7%) | re-prefill  3% | read host    0M / SSD    0M tok | slot evictions     0 | busy  68% | p50/p90 1.9/3.3 s
+  slots                  useful    2.1k processed   41.5k | hit 0.0% (inf 94.7%) | re-prefill 95% | read host    0M / SSD    0M tok | slot evictions   957 | busy  84% | p50/p90 456.4/584.6 s
+  slots + tiers, SSD 1 TB/gx useful   24.7k processed   40.2k | hit 95.2% (inf 96.5%) | re-prefill 27% | read host  949M / SSD  107M tok | slot evictions  8351 | busy  80% | p50/p90 3.9/12.2 s
+  slots + tiers, SSD 8 TB/gx useful   25.1k processed   38.8k | hit 95.6% (inf 96.6%) | re-prefill 23% | read host  901M / SSD  112M tok | slot evictions  7954 | busy  77% | p50/p90 2.8/11.9 s
+  slots + tiers, SSD 64 TB/gx useful   25.1k processed   38.8k | hit 95.6% (inf 96.6%) | re-prefill 23% | read host  901M / SSD  112M tok | slot evictions  7954 | busy  77% | p50/p90 2.8/11.9 s
+  pool                   useful   21.2k processed   41.6k | hit 93.9% (inf 96.4%) | re-prefill 40% | read host    0M / SSD    0M tok | slot evictions     0 | busy  84% | p50/p90 5.3/17.7 s
+  pool + tiers, SSD 1 TB/gx useful   26.4k processed   34.0k | hit 96.5% (inf 96.6%) | re-prefill  3% | read host   20M / SSD   10M tok | slot evictions     0 | busy  68% | p50/p90 1.8/3.4 s
+  pool + tiers, SSD 8 TB/gx useful   26.4k processed   34.0k | hit 96.5% (inf 96.6%) | re-prefill  3% | read host   20M / SSD   10M tok | slot evictions     0 | busy  68% | p50/p90 1.8/3.4 s
+  paging + tiers, SSD 8 TB/gx useful   26.5k processed   34.1k | hit 96.5% (inf 96.6%) | re-prefill  3% | read host   20M / SSD    9M tok | slot evictions     0 | busy  67% | p50/p90 1.7/3.3 s
+  infinite cache         useful   26.5k processed   34.1k | hit 96.5% (inf 96.6%) | re-prefill  3% | read host    0M / SSD    0M tok | slot evictions     0 | busy  67% | p50/p90 1.8/3.3 s

@@ -19,6 +19,24 @@
   // 512 GB/s GDDR6, 32 GiB; ethernet 2 links x 200 Gb/s x 2 dirs per axis neighbour (100 GB/s bidir CCL, 50 GB/s uni).
   const HW = { F_lofi: 608e12, F_hifi: 304e12, dram: 512e9, dramCap: 32 * 2 ** 30, linkBi: 100e9, linkUni: 50e9, pcie: 64e9 };
   const BF8 = 1.0625, BF4 = 0.5625, BF16 = 2;
+  // Measured M3 decode speed per user (tokens/s/u) vs context, 64 users ("Minimax M3 Updates" deck, decode
+  // performance slide). Time per token is linear in context: a fixed ring trip plus attention over the KV, fitted by
+  // least squares (8.48 ms + 0.0175 ms per 1k tokens, within 0.6% of every point). decodeCurve 'm3' scales it so
+  // that decodeTps is the speed at 100k context (the deck's targets are quoted @100k).
+  const M3_DECODE_TSU = [[8000, 116], [60000, 105], [100000, 98], [140000, 92], [310000, 72], [550000, 55]];
+  const M3_DECODE_TRIP = (() => { // [seconds per token at 0 context, seconds per token per context token]
+    const xs = M3_DECODE_TSU.map(([c]) => c), ys = M3_DECODE_TSU.map(([, t]) => 1 / t), n = xs.length;
+    const mx = xs.reduce((a, b) => a + b) / n, my = ys.reduce((a, b) => a + b) / n;
+    let sxy = 0, sxx = 0; for (let i = 0; i < n; i++) { sxy += (xs[i] - mx) * (ys[i] - my); sxx += (xs[i] - mx) ** 2; }
+    const b = sxy / sxx; return [my - b * mx, b];
+  })();
+  const DECODE_REF_CTX = 100000;
+  // decode speed per user (tokens/s/u) for a session with `ctx` tokens of context while the ring has room
+  function decodeSpeed(cfg, ctx) {
+    if (cfg.decodeCurve !== 'm3') return cfg.decodeTps;
+    const [a, b] = M3_DECODE_TRIP;
+    return cfg.decodeTps * (a + b * DECODE_REF_CTX) / (a + b * ctx);
+  }
   const MB = 1e6, GB = 1e9;
 
   const OPS_MOE = ['norm_ag', 'qkv', 'idx_branch', 'misc', 'o_proj', 'attn_rs', 'shared', 'router', 'dispatch', 'experts', 'combine', 'moe_reduce'];
@@ -428,11 +446,20 @@
     //   requests decode has room for. As in tt-d-gen, which needs the decode slot up front to start KV migration
     //   eagerly. M3 decode today holds ~62-64 sessions (one per pipeline stage, tt-blaze #4220) on 16 galaxies.
     decodeSlots: 0,
-    // decodeConcurrency: sessions decode generates for at once (0 = unlimited); a pipelined decode ring carries one
-    //   session per stage per step, so 64 stages = 64 (m x 64 with m-row batched decode). A request whose prefill
-    //   is done while all are busy waits in FIFO order, still holding its decode KV slot, so decodeSlots above the
-    //   concurrency lets requests in prefill hold slots without taking decode positions.
-    decodeConcurrency: 0,
+    // decode ring: decodeTps = tokens per second per user (TSU) while the ring has room, i.e. one token per trip
+    //   through the pipeline (trip time 1 / TSU); decodeStages = the most sessions the ring carries at once, one
+    //   token per stage (64 for a 64-stage ring, m x 64 with m-row batched decode; 0 = unlimited). Every request
+    //   past prefill decodes at once: with N decoding, each runs at TSU x min(1, decodeStages / N) (processor
+    //   sharing), so an oversubscribed ring slows everyone and its sessions hold their KV slots longer. Aggregate
+    //   decode throughput is at most decodeStages x TSU.
+    decodeStages: 0,
+    // decodeCurve: 'flat' = every session decodes at decodeTps; 'm3' = speed falls with the session's context along
+    //   the measured M3 curve (M3_DECODE_TSU), with decodeTps the speed at 100k context (180 -> about 213 at 8k, 169
+    //   at 140k, 132 at 310k, 101 at 550k). KV migration to decode is not modelled: it streams layer by layer during
+    //   prefill, so only the last layer of the last chunk is left at the end, and that overlaps the first token's trip.
+    //   Default 'm3' at decodeTps 180: the decode target (180 tokens/s/u @100k) with the measured shape; decodeTps 98
+    //   reproduces the measured table.
+    decodeCurve: 'm3',
     concurrency: 64, decodeTps: 180, duration: 1800, seed: 1, idleCap: 10, startMin: 0, startMax: 1, maxWarmup: 1e6,
     gapCap: Infinity,      // AgentX forbids capping recorded idle gaps (only the 10 s system-idle cap applies)
     // policy: 'rr' (default) = round robin, see below; 'rtc' = run to completion (no preemption), oldest first
@@ -618,7 +645,8 @@
     if (cfg.lanesOverride && !(cfg.lanes >= 1)) errors.push('the lane count must be at least 1');
     for (const k of ['hostDramGBPerGalaxy', 'ssdTBPerGalaxy']) if (!(cfg[k] >= 0)) errors.push(`${k} must be >= 0`);
     for (const k of ['pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy']) if (!(cfg[k] > 0)) errors.push(`${k} must be > 0`);
-    if (!(cfg.decodeConcurrency >= 0)) errors.push('decode concurrency must be >= 0 (0 = unlimited)');
+    if (!(cfg.decodeStages >= 0)) errors.push('decode pipeline stages must be >= 0 (0 = unlimited)');
+    if (!['flat', 'm3'].includes(cfg.decodeCurve)) errors.push(`decodeCurve must be 'flat' or 'm3', got ${cfg.decodeCurve}`);
     if (!(cfg.batchChunksPerRequest >= 0) || cfg.batchChunksPerRequest !== Math.floor(cfg.batchChunksPerRequest)) errors.push('chunks per request per round must be a whole number >= 0 (0 = no limit)');
     // every buffer that must hold a whole request has to fit the largest AgentX request (990,016 tokens)
     if (cfg.cache === 'slots' && cfg.slotLen < MAX_REQ) errors.push(`slots must hold the largest request (${MAX_REQ} tokens)`);
@@ -868,7 +896,7 @@
   // ------------------------------------------------------------------------------------------------------
   // The replay simulation
   // ------------------------------------------------------------------------------------------------------
-  const EV_READY = 1, EV_DONE = 2, EV_END = 3, EV_PUMP = 4, EV_LANE = 5, EV_FETCHED = 6, EV_SEG = 7;
+  const EV_READY = 1, EV_DONE = 2, EV_END = 3, EV_PUMP = 4, EV_LANE = 5, EV_FETCHED = 6, EV_SEG = 7, EV_DEC = 8;
 
   function simulate(TR, cal, cfgIn, opts) {
     opts = opts || {};
@@ -959,25 +987,41 @@
       h2dFreeBusy: 0, d2hFreeBusy: 0, ssdFreeBusy: 0,
       ttft: [], chunks: 0, segs: 0, laneWait: 0, reqs: 0, primers: 0, warmupS: 0, idleWarps: 0, primerTok: 0,
       gated: 0, gateWait: 0, legacyStarts: 0, skippedTraces: 0, rrSegs: 0, rrReuse: 0, rrCopyIn: 0,
-      outTok: 0, decArea: 0, decingArea: 0, decMax: 0, decWaits: 0, decWait: 0, decWaited: 0, runWait: 0, runWaited: 0, pfSlot: 0, pfRun: 0, pfNone: 0, sendBlock: 0 };
+      outTok: 0, decArea: 0, decingArea: 0, decMax: 0, decWaits: 0, decWait: 0, decWaited: 0, decTokArea: 0, ringFull: 0, pfSlot: 0, pfNone: 0, sendBlock: 0 };
     // decode slots: held from admission to prefill (TTFT clock already running) until decode ends; time-weighted
     // occupancy over the window, for slots held and for requests actually decoding (prefill done, not yet ended)
-    let decHeld = 0, decoding = 0, decT = 0; const decQ = [], runQ = [];
-    // runQTime[n]: seconds of the window the decode queue (requests done with prefill, waiting for a decode
-    // position) held n requests, for its time-weighted percentiles
-    const runQTime = [];
+    let decHeld = 0, decoding = 0, decT = 0, decSpeedSum = 0; const decQ = [];
+    // share of its full speed each decoding session gets: min(1, decodeStages / sessions decoding)
+    const decShare = () => (cfg.decodeStages > 0 && decoding > cfg.decodeStages ? cfg.decodeStages / decoding : 1);
     function decTick() {
       if (warmDone) {
         const a = Math.max(decT, t0), b = Math.min(now, tEnd);
-        if (b > a) { st.decArea += decHeld * (b - a); st.decingArea += decoding * (b - a); runQTime[runQ.length] = (runQTime[runQ.length] || 0) + (b - a); }
+        if (b > a) {
+          st.decArea += decHeld * (b - a); st.decingArea += decoding * (b - a); st.decTokArea += decSpeedSum * decShare() * (b - a);
+          if (cfg.decodeStages > 0 && decoding >= cfg.decodeStages) st.ringFull += b - a;
+        }
       }
       decT = now;
     }
-    const runQPct = (f) => { // smallest queue length n with time(queue <= n) >= f of the time measured
-      const tot = runQTime.reduce((x, y) => x + (y || 0), 0); let acc = 0;
-      for (let n = 0; n < runQTime.length; n++) { acc += runQTime[n] || 0; if (tot > 0 && acc >= f * tot - 1e-9) return n; }
-      return 0;
+    // processor-sharing ring (decodeStages > 0): every session advances by the same seconds of full-speed decode,
+    // decV, at decShare() per second; a session started at decV = v needing w seconds at its full speed (output
+    // tokens / its tokens/s/u) finishes when decV reaches v + w. ring is a min-heap on that threshold; one EV_DEC
+    // event (tagged with decGen) is pending for the earliest finish.
+    let decV = 0, decVT = 0, decGen = 0; const ring = [];
+    const ringPush = (x) => { ring.push(x); for (let i = ring.length - 1; i > 0;) { const p = (i - 1) >> 1; if (ring[p].thr <= ring[i].thr) break; [ring[p], ring[i]] = [ring[i], ring[p]]; i = p; } };
+    const ringPop = () => {
+      const top = ring[0], last = ring.pop();
+      if (ring.length) { ring[0] = last; for (let i = 0; ;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < ring.length && ring[l].thr < ring[m].thr) m = l; if (r < ring.length && ring[r].thr < ring[m].thr) m = r; if (m === i) break; [ring[m], ring[i]] = [ring[i], ring[m]]; i = m; } }
+      return top;
     };
+    function decAdvance() { if (decoding > 0) decV += decShare() * (now - decVT); decVT = now; }
+    function decSchedule() { decGen++; if (ring.length) ev.push(now + Math.max(0, ring[0].thr - decV) / decShare(), { e: EV_DEC, gen: decGen }); }
+    function onDecodeEvent(gen) {
+      if (gen !== decGen) return; // superseded by a later change in the number decoding
+      decAdvance();
+      while (ring.length && ring[0].thr <= decV + 1e-9) { const { q } = ringPop(); onEnd(q); decAdvance(); }
+      decSchedule();
+    }
     function decTake(q) {
       decTick(); decHeld++; q.decSlot = true;
       if (warmDone && now >= t0 && now <= tEnd && decHeld > st.decMax) st.decMax = decHeld;
@@ -1460,23 +1504,21 @@
         if (cfg.logRequests) (st.reqLog || (st.reqLog = [])).push(r); // opt-in: request ids completed in the window
         st.ttft.push(now - q.tReady);
       }
-      if (q.decSlot && cfg.decodeConcurrency > 0 && decoding >= cfg.decodeConcurrency) { decTick(); q.runWaitAt = now; runQ.push(q); return; }
       decodeStart(q);
     }
     function decodeStart(q) {
-      if (q.decSlot) { decTick(); decoding++; }
-      ev.push(now + TR.req_out[q.r] / cfg.decodeTps, { e: EV_END, q });
+      const speed = decodeSpeed(cfg, TR.req_blocks[q.r] * B); // its context: the prompt (output adds ~1k)
+      if (!q.decSlot) { ev.push(now + TR.req_out[q.r] / speed, { e: EV_END, q }); return; }
+      q.decSpeed = speed;
+      if (cfg.decodeStages > 0) { decAdvance(); decTick(); decoding++; decSpeedSum += speed; ringPush({ thr: decV + TR.req_out[q.r] / speed, q }); decSchedule(); return; }
+      decTick(); decoding++; decSpeedSum += speed;
+      ev.push(now + TR.req_out[q.r] / speed, { e: EV_END, q });
     }
     function onEnd(q) {
       const tree = q.tree, r = q.r;
       inflightReqs--; tree.live--;
       if (q.decSlot) {
-        decTick(); decHeld--; decoding--; q.decSlot = false;
-        if (runQ.length) { // a decode position is free: the oldest request waiting for one starts decoding
-          const w = runQ.shift();
-          if (warmDone && now >= t0 && now <= tEnd) { st.runWaited++; st.runWait += now - w.runWaitAt; }
-          decodeStart(w);
-        }
+        decTick(); decHeld--; decoding--; decSpeedSum -= q.decSpeed || 0; q.decSlot = false;
         while (decQ.length && (cfg.decodeSlots <= 0 || decHeld < cfg.decodeSlots)) {
           const w = decQ.shift();
           if (warmDone && now >= t0 && now <= tEnd) { st.decWaited++; st.decWait += now - w.decWaitAt; }
@@ -1540,7 +1582,7 @@
         const a = Math.max(now, t0), b = Math.min(t, tEnd);
         if (b > a) for (const rp of reps) {
           if (rp.free[0] > now + 1e-12 || rp.queue.length || rp.active.some((q) => q.rem > 0)) continue; // busy or has work
-          if (decQ.length) st.pfSlot += b - a; else if (runQ.length) st.pfRun += b - a; else st.pfNone += b - a;
+          if (decQ.length) st.pfSlot += b - a; else st.pfNone += b - a;
         }
       }
       now = Math.max(now, t);
@@ -1551,6 +1593,7 @@
         case EV_FETCHED: enqueue(p.q); break;
         case EV_DONE: onDone(p.q); break;
         case EV_END: onEnd(p.q); break;
+        case EV_DEC: onDecodeEvent(p.gen); break;
         case EV_PUMP: if (p.rep.pumpAt === t) p.rep.pumpAt = -1; pump(p.rep); break;
         case EV_LANE: onLaneFree(p.q, p.rep); break;
         case EV_SEG: onSegFree(p); break;
@@ -1581,14 +1624,14 @@
       // that waited for a slot (count per second, mean wait)
       decSlotsMean: st.decArea / D, decSlotsMax: st.decMax, decodingMean: st.decingArea / D,
       decWaitPerS: st.decWaited / D, decWaitMean: st.decWaited ? st.decWait / st.decWaited : 0, decQueuedAtEnd: decQ.length,
-      // requests that finished prefill and waited for a decode position (decodeConcurrency), and their mean wait
-      runWaitPerS: st.runWaited / D, runWaitMean: st.runWaited ? st.runWait / st.runWaited : 0,
-      runQP50: runQPct(0.5), runQP90: runQPct(0.9), // decode queue length, time-weighted percentiles
+      // decode: mean speed per decoding session (tokens/s/u: decodeTps, unless the ring is oversubscribed or the
+      // speed follows the context) and the
+      // share of the window it carried decodeStages or more sessions
+      decodeTpsMean: st.decingArea > 0 ? st.decTokArea / st.decingArea : cfg.decodeTps, ringFullFrac: cfg.decodeStages > 0 ? st.ringFull / D : 0,
       // share of the window prefill's first stage had nothing to issue (no queued request, no started request with
-      // tokens left, stage free), by cause: requests waiting for a decode KV slot; else requests that finished prefill
-      // waiting for a decode position (their sessions cannot send the next request); else no demand. sendBlockFrac:
+      // tokens left, stage free), by cause: requests waiting for a decode KV slot, else no demand. sendBlockFrac:
       // share of time a stage is held after its compute by the synchronous handoff to the next stage
-      pfStarvedSlotFrac: st.pfSlot / (D * reps.length), pfStarvedDecodeFrac: st.pfRun / (D * reps.length), pfStarvedIdleFrac: st.pfNone / (D * reps.length),
+      pfStarvedSlotFrac: st.pfSlot / (D * reps.length), pfStarvedIdleFrac: st.pfNone / (D * reps.length),
       sendBlockFrac: st.sendBlock / (D * reps.length),
       gated: st.gated, gateWaitMean: st.gated ? st.gateWait / st.gated : 0, legacyStarts: st.legacyStarts, skippedTraces: st.skippedTraces,
       gatedAtEnd: trees.reduce((a, tr) => { const u = new Set(); if (tr) for (const w of tr.waiters.values()) for (const g of w) u.add(g); return a + u.size; }, 0),
@@ -1716,6 +1759,6 @@
     return { revenue, inUsd: h.usd, outUsd: h.outUsd, cost: costUsd, prefillUsd, decodeUsd, margin: revenue - costUsd, marginFrac: (revenue - costUsd) / revenue };
   }
 
-  const API = { M3, HW, DEFAULTS, PRICE, COST, calibrate: calibrateAll, makePlan, splitLayers, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, economics, layerMs, roofTok, roofSeg };
+  const API = { M3, HW, DEFAULTS, PRICE, COST, M3_DECODE_TSU, decodeSpeed, calibrate: calibrateAll, makePlan, splitLayers, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, economics, layerMs, roofTok, roofSeg };
   if (typeof module !== 'undefined' && module.exports) module.exports = API; else root.M3SIM = API;
 })(typeof self !== 'undefined' ? self : this);

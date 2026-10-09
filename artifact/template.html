@@ -232,10 +232,12 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
   </fieldset>
   <fieldset>
     <legend>Traffic &amp; SLO</legend>
-    <div class="row"><label for="decodeTps">Decode tok/s per request</label><input id="decodeTps" type="number" min="5" step="5"></div>
+    <div class="row"><label for="decodeTps">Decode tokens/s/u (per user)</label><input id="decodeTps" type="number" min="5" step="5"></div>
+    <div class="row"><label for="decodeCurve">Decode TSU</label><select id="decodeCurve"><option value="flat">constant</option><option value="m3">adapt to KV length</option></select></div>
+    <div class="hint">Constant: every session decodes at the tokens/s/u above. Adapt to KV length: the measured M3 curve, where time per token grows linearly with the session's context (116 tokens/s/u at 8k, 98 at 100k, 55 at 550k at 64 users), scaled so the tokens/s/u above is the speed at 100k: 180 gives about 214 at 8k, 168 at 140k, 101 at 550k.</div>
     <div class="row"><label for="decodeSlots">Decode KV slots (0 = unlimited)</label><input id="decodeSlots" type="number" min="0" step="1"></div>
-    <div class="row"><label for="decodeConcurrency">Decode sessions at once (0 = unlimited)</label><input id="decodeConcurrency" type="number" min="0" step="1"></div>
-    <div class="hint">KV slots and decode positions are separate: a 64-stage decode ring generates for at most 64 sessions at once (one per stage), while its memory holds about 85 slots of 1M tokens. A request whose prefill is done waits for a decode position while holding its slot.</div>
+    <div class="row"><label for="decodeStages">Decode pipeline stages (0 = unlimited)</label><input id="decodeStages" type="number" min="0" step="1"></div>
+    <div class="hint">The decode ring carries one token per stage, so up to this many sessions decode at the full tokens/s/u above (one token per trip through the ring); with more, they share it and each slows to tokens/s/u × stages / sessions, holding its KV slot longer. A 64-stage ring: 64 (× m with m-row batched decode). Its memory holds about 85 slots of 1M tokens.</div>
     <div class="hint">A request needs a free decode slot before its prefill may start (tt-d-gen reserves it up front to start KV migration eagerly), and holds it until decode ends; waiting for one counts in TTFT. M3 decode today holds about 64 sessions (one per pipeline stage).</div>
     <div class="row"><label for="slo">p90 TTFT SLO (s)</label><input id="slo" type="number" min="0.5" step="0.5"></div>
     <div class="row"><label for="sloR">SLO slider <span class="mono" id="sloV"></span></label><input id="sloR" type="range" min="0" max="100" step="1" aria-label="p90 TTFT SLO, log scale, right end = no SLO"></div>
@@ -445,7 +447,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Primers and warmup.</b> Every conversation active at t* first re-sends its last request before t* as a primer: a full prefill with max_tokens=1. That warms the cache the way the benchmark does. Measurement starts when all primers are done.</li>
       <li><b>Think time.</b> Each next request waits for its predecessor to end, then for the recorded gap: <span class="mono">max(0, t<sub>k</sub> − t<sub>k−1</sub> − api_time<sub>k−1</sub>)</span>. The gaps are <b>not capped</b>, as AgentX requires. Main-agent gaps have a median of 4.9 s but a mean of 395 s (p99 54 min), because humans think and tools run. The only cap is AIPerf's rule that if the whole system is idle, the next request fires within 10 s.</li>
       <li><b>Sub-agents.</b> A sub-agent starts when the main-agent turn that spawned it returns. The main agent's next dependent turn fires as soon as the last sub-agent in its group finishes.</li>
-      <li><b>End of a request.</b> Prefill finishes, then decode runs for the recorded output length at a fixed decode speed (default 180 tok/s). The output's KV is not reused: the benchmark sends synthetic assistant text in the next turn, which is prefilled like any other new text.</li>
+      <li><b>End of a request.</b> Prefill finishes, then decode runs for the recorded output length at a decode speed per user that follows the session's context (default 180 tokens/s/u at 100k, on the measured M3 curve; see Decode TSU). The output's KV is not reused: the benchmark sends synthetic assistant text in the next turn, which is prefilled like any other new text.</li>
       <li><b>Recycle.</b> When a session's whole tree is finished, the lane moves to the next session in the corpus and starts at turn 0 with a fresh cache-bust marker, so different lanes never share cache.</li>
       <li><b>Window.</b> 1800 s of profiling (the AgentX default). Goodput counts requests whose prefill ends inside the window.</li>
     </ul>
@@ -521,7 +523,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
           <li><b>Lane table ("Lane table" control).</b>
             <ul>
               <li><b>Per stage (default):</b> each stage allocates a lane only while it works through the request's chunks. That's about 1–3 chunks' worth of requests per stage.</li>
-              <li><b>Global, like today's slot_id:</b> a lane is held on every stage for the request's whole trip through the pipeline, so you need stages × requests-per-batch lanes, and its copies can only be sequential. On the best 4-galaxy config with today's kernels a global lane table drops goodput from 73.9k to 20.1k.</li>
+              <li><b>Global, like today's slot_id:</b> a lane is held on every stage for the request's whole trip through the pipeline, so you need stages × requests-per-batch lanes, and its copies can only be sequential. On the best 8-galaxy config with today's kernels a global lane table drops goodput from 150.8k to 20.3k (on the best 4-galaxy config, with a 4M arena, from 74.2k to 36.2k).</li>
               <li>Each stage keeps its own KV tensors, so a per-stage table is feasible. It is a prerequisite for combining the pool with batching.</li>
             </ul>
           </li>
@@ -531,7 +533,7 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
               <li><b>Sequential (default):</b> copy-out, copy-in, then prefill. The full copy time goes on the stage; lanes are held only while computing.</li>
               <li><b>Double-buffered:</b> copies overlap compute, and 25% of their time is charged for DRAM sharing. A lane stays held for its own copy-out and for the next occupant's copy-in. The peak is about 2× the computing lanes, briefly. The study's pool feature uses this mode.</li>
               <li><b>Triple-buffered:</b> next batch copying in, current computing, previous copying out, each for a whole chunk period. The peak is 3×.</li>
-              <li>Copies take about 1.4 ms per stage for a median 140k-token prefix and about 10 ms for 1M, against a 50–120 ms chunk. On the best configs the three modes differ by about 1%; with fixed 1M lanes, triple buffering costs more memory.</li>
+              <li>Copies take about 1.4 ms per stage for a median 140k-token prefix and about 10 ms for 1M, against a 50–120 ms chunk. On the best configs sequential and double-buffered copies differ by under 1%; triple buffering costs up to 11% (8 galaxies, today's kernels), because its lanes take memory.</li>
             </ul>
           </li>
           <li><b>How eviction is tracked.</b> Each session's prefix tree is compressed into pieces. Every request touches whole pieces, so LRU over pieces is exactly LRU over 64-token pages.</li>
@@ -566,8 +568,8 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
         With fixed layout, batching packs whole chunks: a request takes a whole number of chunk-units.</li>
       <li><b>One attention call per request per chunk</b> ("prefix gathered once", on by default). A request that takes several chunk-units of a batched chunk (a cold prefill) makes one attention call over all of them, so its cached prefix is gathered once. Off, each unit is its own call and re-gathers the prefix.
         <ul>
-          <li>With it on, smaller chunks only cut padding: chunk 128 (32·SP) matches the variable layout, and is 1–2% better than 1024.</li>
-          <li>With it off, small chunks collapse. Chunk 2048 becomes the best, and it is 2–14% below the de-duplicated best.</li>
+          <li>With it on, smaller chunks only cut padding: chunk 128 (32·SP) matches the variable layout, and is about 3% better than 1024.</li>
+          <li>With it off, small chunks collapse. Chunk 2048 becomes the best, and it is 20–26% below the de-duplicated best (within 1% at 4 galaxies with roofline kernels, where SSD reads bind).</li>
         </ul>
       </li>
       <li><b>Dynamic batch size</b> (on by default). Decides what a batch that is not full costs, e.g. a single request. On, it runs at the tokens it holds, rounded up to whole chunks (fixed layout) or 32·SP (variable layout), as ops do without tracing. Off, it is padded to the full budget, as a traced build with one fixed shape must be.
@@ -579,12 +581,12 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       </li>
       <li><b>Prefetch of KV-prefix gathers</b> (off by default). The cached-prefix gather does not depend on the current chunk, so it can overlap the layer's non-collective compute: projections, experts, and the other requests' attention. Only the part beyond that window stays exposed.
         <ul>
-          <li>It is worth 0.2–1.3% on AgentX. At 8 galaxies the bottleneck is the single-dense-layer stages, where compute already covers most of the gather.</li>
-          <li>Batches average only 2–3 requests, so the gathers are small next to the layer.</li>
+          <li>It is worth 0–3% on AgentX (most with today's kernels). At 8 galaxies the bottleneck is the single-dense-layer stages, where it hides only part of the ring gather.</li>
+          <li>Batches average 1.4–4.3 requests at the goodput point, so the gathers are small next to the layer.</li>
         </ul>
       </li>
       <li><b>Scheduling.</b> Round robin (default, as tt-d-gen): a request takes at most one token budget per turn, then goes to the back of the queue. Run to completion: oldest first, or shortest first with 30 s aging; the study uses run to completion.</li>
-      <li><b>Memory per stage.</b> Weights (bf4 experts, bf8 attention, bf16 shared expert and dense MLP; embedding on the first stage, LM head on the last) + a reserve per chip (default 3 GB) + activation buffers for the largest chunk. The remainder is KV. A replica's KV capacity is the minimum over its stages, because every token needs KV in every layer.</li>
+      <li><b>Memory per stage.</b> Weights (bf4 experts, bf8 attention, bf16 shared expert and dense MLP; embedding on the first stage, LM head on the last) + a reserve per chip (default 1 GB) + activation buffers for the largest chunk. The remainder is KV. A replica's KV capacity is the minimum over its stages, because every token needs KV in every layer.</li>
     </ul>
 
     <h2 id="m-features">Features in the study</h2>
@@ -595,7 +597,6 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
       <li><b>Not a feature: bounded dense gather.</b> Earlier versions listed bounding the dense ring-joint gather to [0, kv_len) as a P0 feature. The op already does this (tt-metal #47539), so it is part of today's baseline, and the old whole-lane behaviour is only a sensitivity row.</li>
       <li><b>Not a feature: unaligned resume.</b> Resuming at any 32-token boundary instead of rounding the cached prefix down to a chunk multiple (with chunk 2048 the rounding discards about 1024 cached tokens per request). It is merged (tt-metal #57636; validated on 5 layers, the full 60-layer two-turn accuracy check is still to run), so the simulator always resumes unaligned (<span class="mono">node run.js --set unaligned=false</span> still models the old rounding). The variable layout includes it anyway.</li>
       <li><b>index_k stored once:</b> the index-key cache is kept on one TP column instead of all four, and gathered when needed. This cuts KV size from 2112 to 1344 B per token per layer.</li>
-      <li><b>index_k bf8:</b> the index-key cache in bf8 instead of bf16. It is the runner's default dtype, but the measured runs used bf16, and it needs an accuracy check.</li>
       <li><b>Variable chunk / flexible SP layout:</b> see Pipeline. It also makes resume block-granular.</li>
       <li><b>Multi-request batching:</b> see Pipeline; 16k-token budget in the roadmap, 4k-32k in the grid.</li>
       <li><b>Fused multi-user attention:</b> one attention kernel over all requests in a chunk.</li>
@@ -622,13 +623,14 @@ details > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
         <ul>
           <li>other seeds (about ±5% noise);</li>
           <li>no host DRAM tier; 1, 4 or 64 TB of SSD per galaxy; PCIe at 181 GB/s per galaxy (x8 relay); or half the SSD bandwidth;</li>
-          <li>decode at 90 or 360 tok/s;</li>
+          <li>decode at 90 or 360 tokens/s/u @100k, at a flat 180 tokens/s/u (no context curve), or at the measured speed (98 @100k);</li>
+          <li>decode limited to 85 slots with a 64-stage ring (today's M3 decode) or 150 slots with a 128-stage ring (batched decode, m = 2);</li>
           <li>a 3 GB reserve per chip;</li>
           <li>index_k in bf16, as in the calibration runs;</li>
           <li>a TP=4-only mesh.</li>
         </ul>
-        With roofline kernels faster decode raises prefill goodput, because requests finish sooner and less KV is live; with today's kernels it moves goodput within seed noise.</li>
-      <li><b>[4,2] stages</b> (TP=2) win three of the four grids by 1-12% (at 4 galaxies with roofline kernels, 8×[4,4] stages win by 3%). The current KV cache assumes one KV head per chip (TP=4), so they need a KV-head sharding change.</li>
+        With roofline kernels faster decode raises prefill goodput, because requests finish sooner and less KV is live; with today's kernels it moves goodput within seed noise. Every other study run has unlimited decode, so the ranking assumes decode keeps up: with today's decode (85 slots, 64-stage ring) every best configuration falls to 41-46k useful tok/s, and with 150 slots and a 128-stage ring to 65-92k.</li>
+      <li><b>[4,2] stages</b> (TP=2) win both grids with today's kernels, by 12-13%. With roofline kernels 8×[4,4] stages win at 4 galaxies by 2%, and at 8 galaxies 32×[2,4] and 32×[4,2] are within 1% (seed noise). The current KV cache assumes one KV head per chip (TP=4), so [4,2] stages need a KV-head sharding change.</li>
     </ul>
 
     <h2 id="m-read">Reading the Explore tab</h2>
@@ -739,7 +741,7 @@ function slim(r, c) {
   return { conc: c, usefulTps: r.usefulTps, processedTps: r.processedTps, newTps: r.newTps, inTps: r.inTps, hitTps: r.hitTps, outTps: r.outTps, hostReadTps: r.hostReadTps, ssdReadTps: r.ssdReadTps, pcieH2DUtil: r.pcieH2DUtil, ssdUtil: r.ssdUtil, reqPerS: r.reqPerS, ttftP50: r.ttftP50, ttftP90: r.ttftP90, ttftP99: r.ttftP99,
     hitRate: r.hitRate, infHitRate: r.infHitRate, reprefillFrac: r.reprefillFrac, padFrac: r.padFrac, maxUtil: r.maxUtil, avgChunkTok: r.avgChunkTok,
     avgSegsPerChunk: r.avgSegsPerChunk, done: r.done, warmupS: r.warmupS,
-    decSlotsMean: r.decSlotsMean, decSlotsMax: r.decSlotsMax, decodingMean: r.decodingMean, decWaitPerS: r.decWaitPerS, decWaitMean: r.decWaitMean, runWaitPerS: r.runWaitPerS, runWaitMean: r.runWaitMean, runQP50: r.runQP50, runQP90: r.runQP90 };
+    decSlotsMean: r.decSlotsMean, decSlotsMax: r.decSlotsMax, decodingMean: r.decodingMean, decWaitPerS: r.decWaitPerS, decWaitMean: r.decWaitMean, decodeTpsMean: r.decodeTpsMean, ringFullFrac: r.ringFullFrac };
 }
 onmessage = (e) => {
   const m = e.data;
@@ -771,8 +773,8 @@ function mkWorker() {
 
 // ---------------------------------------------------------------- form <-> cfg
 const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'layout', 'chunk', 'batch', 'budget', 'batchDynShape', 'batchChunksPerRequest', 'attn', 'kvDedup', 'prefetchKV', 'policy',
-  'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeConcurrency', 'duration', 'seed'];
-const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchChunksPerRequest', 'lanes', 'arenaTokens', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeConcurrency', 'duration', 'seed']);
+  'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeStages', 'decodeCurve', 'duration', 'seed'];
+const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchChunksPerRequest', 'lanes', 'arenaTokens', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeSlots', 'decodeStages', 'duration', 'seed']);
 function setForm(cfg) {
   const c = Object.assign({}, SIM.DEFAULTS, cfg);
   for (const f of FIELDS) {
@@ -1102,7 +1104,7 @@ function render() {
     ['Decode Slots', '', '', v && v.decSlotsMean != null ? [
       `Mean slots held: ${Math.round(v.decSlotsMean)}`, `Max slots held: ${v.decSlotsMax}`,
       ...(v.decWaitPerS > 0 ? [`${pct(v.decWaitPerS / v.reqPerS)} waited ${fmtS(v.decWaitMean)} s for a slot`] : []),
-      ...(v.runWaitPerS > 0 ? [`${pct(v.runWaitPerS / v.reqPerS)} waited ${fmtS(v.runWaitMean)} s to decode`, `Decode queue p50 / p90: ${v.runQP50} / ${v.runQP90} requests`] : [])].join('<br>') : ''],
+      ...(v.ringFullFrac > 0 ? [`Decode speed per user: ${Math.round(v.decodeTpsMean)} tokens/s/u`, `Decode ring full ${pct(v.ringFullFrac)} of the time`] : [])].join('<br>') : ''],
     ['Requests per batch', v ? v.avgSegsPerChunk.toFixed(2) : '–', at('average (1 without batching)'), v ? `batch ${Math.round(v.avgChunkTok)} tok, busy ${pct(v.maxUtil)}` + (R.peak && R.peak !== v ? ` · at peak ${R.peak.avgSegsPerChunk.toFixed(2)}` : '') : ''],
   ];
   // a tile without a headline number (empty value and subtitle) is just its title and detail lines
@@ -1250,7 +1252,7 @@ function renderRoadmap() {
   $('roadHead').innerHTML = `<h2>What moves goodput on AgentX</h2>
   <p>Goodput = useful tok/s with p90 TTFT ≤ ${STUDY.slo} s. Baseline → best configuration found: <b>4 galaxies</b> ${fmtK(g0.greedy[0].goodput)} → <b>${fmtK(g0.grid[0].goodput)}</b> with today's kernels, ${fmtK(g1.grid[0].goodput)} with roofline kernels; <b>8 galaxies</b> ${fmtK(h0.greedy[0].goodput)} → <b>${fmtK(h0.grid[0].goodput)}</b> today, ${fmtK(h1.grid[0].goodput)} with roofline kernels.</p>
   <p>P0 features: ${top.map((k) => `<span class="pill p0">${esc(k)}</span>`).join(' ')}. The ordering, gains and complexity are below; hover the orange ticks for the infinite-cache ceiling of each step.</p>
-  <p>On AgentX traffic, KV-cache capacity is the first wall, so the features that add effective KV capacity come first: the KV offload tiers (host DRAM + SSD) and the paged pool. With them the best configurations reach 99% of their own infinite-cache goodput with today's kernels and 71-80% with roofline kernels, where reading KV back from the tiers is the next limit. After that, compute features (async handoff, batching, variable chunk) matter most. "Today's kernels" / "roofline kernels", greedy vs leave-one-out, tiers and scope are defined in the <a href="#method">Method</a> tab.</p>`;
+  <p>On AgentX traffic, KV-cache capacity is the first wall, so the features that add effective KV capacity come first: the KV offload tiers (host DRAM + SSD) and the paged pool. With them the best configurations reach 99% of their own infinite-cache goodput with today's kernels and 65-90% with roofline kernels, where reading KV back from the tiers is the next limit. After that, compute features (async handoff, batching, variable chunk) matter most. The study assumes decode keeps up: with today's decode (85 slots, 64-stage ring) every best configuration falls to 41-46k useful tok/s, and with 150 slots and a 128-stage ring (batched decode, m = 2) to 65-92k, so decode capacity, not these prefill features, sets the deployable goodput (sensitivity rows, Method tab). "Today's kernels" / "roofline kernels", greedy vs leave-one-out, tiers and scope are defined in the <a href="#method">Method</a> tab.</p>`;
 }
 
 // ---------------------------------------------------------------- model tab
