@@ -896,7 +896,6 @@ function syncUrl() { try { history.replaceState(null, '', shareUrl(location.hash
 // apply a shared link; returns null without parameters, else the list of parameters it had to ignore
 function applyUrl() {
   const q = new URLSearchParams(location.search);
-  if (q.has('layout') && !q.has('segPad')) q.set('segPad', q.get('layout') === 'var' ? 'tile' : 'chunk'); // old name of segPad
   if (![...FIELDS, 'slo', 'concs', 'inf', 'at', ...Object.keys(ECON)].some((k) => q.has(k))) return null;
   const cfg = {}, bad = [];
   for (const f of FIELDS) {

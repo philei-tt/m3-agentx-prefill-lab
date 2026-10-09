@@ -398,7 +398,7 @@
     idxBf16: false, idxDerep: false,
     // segPad: what each request's tokens in a pass (its segment) are padded to. 'chunk' (today) = a multiple of the
     //   chunk C, which is also the block-cyclic KV slab (C/SP rows per SP rank); 'tile' = whole 32-row tiles on every
-    //   SP rank (see placement). The old key `layout` ('fixed' / 'var') is still accepted.
+    //   SP rank (see placement).
     chunk: 5120, segPad: 'chunk', batch: false, budget: 16384, attn: 'seq', policy: 'rr',
     // placement (tile padding only): where a segment's new tokens are computed. 'even' = split evenly over the SP
     //   ranks (segments padded to 32*SP), then an all-to-all writes each K/V row to the rank that owns it (none is
@@ -560,9 +560,6 @@
 
   function makePlan(cfgIn, cal) {
     const cfg = Object.assign({}, DEFAULTS, cfgIn);
-    // the old name of segPad: layout 'fixed' / 'var'
-    if (cfgIn && cfgIn.layout !== undefined && cfgIn.segPad === undefined) cfg.segPad = cfgIn.layout === 'var' ? 'tile' : cfgIn.layout === 'fixed' ? 'chunk' : cfgIn.layout;
-    delete cfg.layout;
     const tile = cfg.segPad === 'tile';
     const [sp, tp] = cfg.mesh; const P = sp * tp; const S = cfg.stages;
     const chipsRep = 32 * cfg.galaxies / cfg.replicas;
