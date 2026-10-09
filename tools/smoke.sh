@@ -22,3 +22,7 @@ run --set boundedDense=true --set cache=inf --set policy=srpt
 run --set policy=rr --set cache=pool --set lanesOverride=true --set lanes=4 --set batch=true --set chunk=1024 --set budget=8192
 run --set policy=rr --set cache=pool --set copyMode=double --set hostTier=true
 run --set policy=rr --set cache=paging
+run --set cache=pool --set hostTier=true --set decodeStages=62 --set decodeSlots=75 --set decodeHostTier=true
+run --set cache=pool --set decodeStages=62 --set decodeSlots=75 --set decodeCache=paging --set decodeHostTier=true
+run --set cache=pool --set hostTier=true --set decodeStages=62 --set decodeSlots=86 --set decodeHostTier=true --set decodeBackpressure=queue
+run --set cache=pool --set hostTier=true --set decodeStages=62 --set decodeCache=paging --set decodeBackpressure=queue --set decodeHostTier=true --set decodeBatch=4 --set decodeQueueMax=400

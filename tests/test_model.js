@@ -99,11 +99,14 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   assert.ok(Math.abs(h.usd - (h.newTok * inUsdPerM + h.cachedTok * cachedUsdPerM) / 1e6) < 1e-9 * h.usd && h.usd === h.newUsd + h.cachedUsd);
   const o = SIM.hourly(r, { inUsdPerM: 2 * inUsdPerM });
   assert.ok(Math.abs(o.newUsd - 2 * h.newUsd) < 1e-9 * h.newUsd && o.cachedUsd === h.cachedUsd);
-  // output tokens: those of the requests completed in the window; points without outTps have no output revenue
+  // output tokens: outTps = those of the requests completed in the window; output revenue bills the tokens decoded in
+  // the window (outDecTps; about the same in steady state), else outTps; points with neither have no output revenue
   const l = SIM.simulate(TR, cal, Object.assign({ cache: 'slots', chunk: 2048 }, base, { concurrency: 64, logRequests: true }));
   let out = 0; for (const q of l.reqLog) out += TR.req_out[q];
-  const { outTps, ...noOut } = old;
+  const { outTps, outDecTps, ...noOut } = old;
   assert.ok(Math.abs(l.outTps - out / l.duration) < 1e-9 * l.outTps && Number.isNaN(SIM.hourly(noOut).outUsd));
+  assert.ok(Math.abs(h.outTok - 3600 * r.outDecTps) < 1e-6 * h.outTok && Math.abs(SIM.hourly(Object.assign({ outTps }, noOut)).outTok - 3600 * outTps) < 1e-6 * h.outTok);
+  assert.ok(Math.abs(r.outDecTps / r.outTps - 1) < 0.1, `decoded ${r.outDecTps} vs completed ${r.outTps} output tok/s`);
   // margin: input + output revenue minus prefill and decode galaxy-hours
   const e = SIM.economics(r, 8, null, { galaxyUsdPerH: 10, decodeGalaxies: 16 });
   assert.ok(Math.abs(e.margin - (h.usd + h.outUsd - 240)) < 1e-9 && e.cost === 240 && e.decodeUsd === 160 && h.outUsd > 0);
@@ -145,6 +148,67 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
     assert.ok(f.every((x) => x >= 0 && x <= 1) && f[0] + f[1] <= 1 + 1e-9, `starved ${f}`);
   }
   assert.ok(c.pfStarvedSlotFrac > 0 && n.pfStarvedSlotFrac === 0 && n.sendBlockFrac > 0, 'slot limits starve prefill');
+}
+
+// 10d. decode KV layouts (decodeCache). Paged decode (queue backpressure) with room to spare changes nothing; with
+//      little memory requests are parked on SSD instead of waiting, and the pinned + reserved pool never exceeds it.
+//      A decode-queue limit caps the requests holding pages or parked. Paging needs queue backpressure. Decode-side
+//      hits: a stream's next request finds its prefix in its old slot, the pool or the decode tiers.
+{
+  const cfg = Object.assign({ cache: 'pool', chunk: 512, batch: true, budget: 8192 }, base, { concurrency: 128, decodeStages: 16 });
+  const u = SIM.simulate(TR, cal, cfg);
+  const pq = { decodeCache: 'paging', decodeBackpressure: 'queue', decodeHostTier: true, decodeQueueMax: 0 };
+  const pg = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 1000 }, pq, cfg));
+  assert.ok(Math.abs(pg.usefulTps - u.usefulTps) < 1e-9 * u.usefulTps && pg.ttftP90 === u.ttftP90 && pg.decWaitPerS === 0 && pg.decHitRate > 0.5 && pg.decHitRate < 1, `paging ${pg.usefulTps} vs ${u.usefulTps}`);
+  const small = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 2 }, pq, cfg));
+  assert.ok(small.decWaitPerS === 0 && small.decParkPerS > 0 && small.decSlotWaitFrac > 0 && small.decPoolTokMean <= 2 * SIM.M3.maxCtx && small.reqPerS < u.reqPerS,
+    `paging 2M: parked ${small.decParkPerS} pool ${small.decPoolTokMean}`);
+  const lim = SIM.simulate(TR, cal, Object.assign({}, pq, cfg, { decodeSlots: 1000, decodeQueueMax: 12 }));
+  assert.ok(lim.decSlotsMax + 0 <= 12 && lim.decSlotsMean + lim.decParkedMean <= 12 + 1e-9 && lim.decWaitPerS > 0 && lim.decodingMean <= 12, `paging queue 12: held ${lim.decSlotsMax}`);
+  assert.ok(SIM.makePlan(Object.assign({}, cfg, { decodeCache: 'hybrid', decodeSlots: 75 }), cal).errors.some((e) => e.includes('decodeCache')));
+  assert.ok(SIM.makePlan(Object.assign({}, cfg, { decodeCache: 'paging', decodeSlots: 75 }), cal).errors.some((e) => e.includes('slot backpressure')));
+  assert.ok(SIM.makePlan(Object.assign({}, cfg, { decodeCache: 'paging', decodeBackpressure: 'queue', decodeSlots: 75 }), cal).errors.some((e) => e.includes('decode SSDs')));
+  // fixed slots: a released slot keeps its stream's KV; the decode tiers keep reclaimed ones, so more prefix is found
+  const sl = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 24 }, cfg)), st = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 24, decodeHostTier: true }, cfg));
+  assert.ok(sl.decHitRate > 0 && st.decHitRate > sl.decHitRate && st.decPcieD2HUtil > 0 && sl.decPcieD2HUtil === 0, `slot hits ${sl.decHitRate} / tiers ${st.decHitRate}`);
+}
+
+// 10e. queue backpressure (fixed decode slots + decode SSD; default queue limit 100): no request waits before prefill without a limit; those
+//      admitted without a slot are parked on SSD and take a slot after prefill (first token later); slots held never
+//      exceed the slots, and more requests are served than with slot backpressure. A decode-queue limit caps slots
+//      held + parked; the mode needs the decode SSD. Decode speed per session: decodeTps on an unshared ring, lower when shared.
+{
+  const cfg = Object.assign({ cache: 'pool', chunk: 512, batch: true, budget: 8192 }, base, { concurrency: 128, decodeStages: 8, decodeSlots: 10, decodeHostTier: true });
+  assert.strictEqual(SIM.DEFAULTS.decodeQueueMax, 100);
+  const sl = SIM.simulate(TR, cal, cfg), qu = SIM.simulate(TR, cal, Object.assign({ decodeBackpressure: 'queue', decodeQueueMax: 0 }, cfg));
+  const q4 = SIM.simulate(TR, cal, Object.assign({ decodeBackpressure: 'queue', decodeQueueMax: 14 }, cfg));
+  assert.ok(sl.decWaitPerS > 0 && sl.decParkPerS === 0 && qu.decWaitPerS === 0 && qu.decParkPerS > 0 && qu.decSlotsMax <= 10 && qu.decSlotWaitFrac > 0
+    && qu.decStartDelayMean > 0 && qu.decSsdUtil > 0 && qu.reqPerS > sl.reqPerS, `queue: parked ${qu.decParkPerS} req ${qu.reqPerS} vs ${sl.reqPerS}`);
+  assert.ok(q4.decParkedMean <= 4 + 1e-9 && q4.decSlotsMean + q4.decParkedMean <= 14 + 1e-9 && q4.decWaitPerS > 0 && q4.decParkPerS > 0, `queue max 14: parked ${q4.decParkedMean}`);
+  assert.ok(SIM.makePlan(Object.assign({}, cfg, { decodeBackpressure: 'queue', decodeHostTier: false }), cal).errors.some((e) => e.includes('queue backpressure')));
+  const flat = Object.assign({}, cfg, { decodeCurve: 'flat', decodeStages: 0, decodeSlots: 0, decodeHostTier: false });
+  const f = SIM.simulate(TR, cal, flat), sh = SIM.simulate(TR, cal, Object.assign({}, flat, { decodeStages: 4 }));
+  assert.ok(Math.abs(f.tsuP10 - 180) < 1e-6 && Math.abs(f.tsuP50 - 180) < 1e-6 && sh.tsuP10 < 180 && sh.tsuP10 <= sh.tsuP50, `tsu ${f.tsuP10} / shared ${sh.tsuP10}`);
+}
+
+// 10f. modelled decode KV memory and batched decode. With a finite ring decodeSlots 'auto' models the memory (87 x
+//      1M slots today; pages use every free byte); without a ring decode is unlimited; a number overrides it. Fixed
+//      slots must hold batch x stages sessions. In a batch each user is slower but the ring decodes more in total;
+//      batch 1 is the measured curve. A larger batch on a small ring decodes more output.
+{
+  const pl = (c) => SIM.makePlan(Object.assign({ chunk: 2048 }, c), cal);
+  const a = pl({ decodeStages: 62 }), pg = pl({ decodeStages: 62, decodeCache: 'paging', decodeBackpressure: 'queue', decodeHostTier: true });
+  assert.ok(a.decSlots === 87 && a.decMemTok === 87 * SIM.M3.maxCtx && pg.decMemTok > 87 * SIM.M3.maxCtx && pg.decMemTok < 88 * SIM.M3.maxCtx, `modelled ${a.decSlots}`);
+  assert.ok(pl({}).decSlots === 0 && pl({}).decMemTok === Infinity && pl({ decodeStages: 62, decodeSlots: 40 }).decSlots === 40 && SIM.DEFAULTS.decodeSlots === 'auto');
+  assert.ok(pl({ decodeStages: 62, decodeBatch: 2 }).errors.some((e) => e.startsWith('decode out of memory')) && !pl({ decodeStages: 40, decodeBatch: 2 }).errors.some((e) => e.startsWith('decode')));
+  assert.ok(pg.errors.length === 0 && !pl({ decodeStages: 62, decodeBatch: 4, decodeCache: 'paging', decodeBackpressure: 'queue', decodeHostTier: true }).errors.some((e) => e.startsWith('decode')));
+  assert.ok(pl({ decodeBatch: 2 }).errors.some((e) => e.includes('batched decode needs')));
+  const c = Object.assign({}, SIM.DEFAULTS);
+  assert.ok(SIM.decodeSpeed(c, 130000, 1) === SIM.decodeSpeed(c, 130000));
+  for (let m = 2; m <= 8; m *= 2) assert.ok(SIM.decodeSpeed(c, 130000, m) < SIM.decodeSpeed(c, 130000, m / 2) && m * SIM.decodeSpeed(c, 130000, m) > m / 2 * SIM.decodeSpeed(c, 130000, m / 2), `batch ${m}`);
+  const cfg = Object.assign({ cache: 'pool', chunk: 512, batch: true, budget: 8192 }, base, { concurrency: 128, decodeStages: 4, decodeSlots: 0, decodeCurve: 'flat' });
+  const b1 = SIM.simulate(TR, cal, cfg), b4 = SIM.simulate(TR, cal, Object.assign({ decodeBatch: 4 }, cfg));
+  assert.ok(b4.outDecTps > b1.outDecTps && b4.ringFullFrac < b1.ringFullFrac && b4.tsuP50 > b1.tsuP50 * 0.5, `batch 4: out ${b4.outDecTps} vs ${b1.outDecTps}`);
 }
 
 // 10c. batchChunksPerRequest L: rounds over the queue, up to L chunks per request per round.
