@@ -148,9 +148,36 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
     assert.ok(f.every((x) => x >= 0 && x <= 1) && f[0] + f[1] <= 1 + 1e-9, `starved ${f}`);
   }
   assert.ok(c.pfStarvedSlotFrac > 0 && n.pfStarvedSlotFrac === 0 && n.sendBlockFrac > 0, 'slot limits starve prefill');
-  // balance: an oversubscribed ring is ~always full, a huge one ~always empty (decode waiting on prefill); no ring = NaN
-  assert.ok(c.ringFillMean > 0.9 && c.ringFillMean <= 1 && c.decStarvedFrac < 0.1 && w.ringFillMean < 0.01 && w.decStarvedFrac > 0.99 && Number.isNaN(u.ringFillMean),
-    `ring fill ${c.ringFillMean} / ${w.ringFillMean}`);
+  // prefill / decode balance: every moment is one of four states, so the shares sum to 1; prefill-bound + balanced is
+  // exactly the time prefill has work; decode-bound splits into memory + queue full
+  const nc = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeSlots: 0, decodeStages: 4 }));
+  const hi = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeSlots: 0, concurrency: 256 }));
+  const hr = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeSlots: 0, concurrency: 256, decodeStages: 16 }));
+  const lo = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeSlots: 0, concurrency: 2 }));
+  const qb = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeStages: 16, decodeSlots: 8, decodeBackpressure: 'queue', decodeHostTier: true, ssdTBPerGalaxy: 4 }));
+  // queue limit at the slot count: nothing parks, so nobody waits after prefill; the requests that wait, wait before
+  // prefill for room in the decode queue
+  const ql = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeStages: 16, decodeSlots: 8, decodeBackpressure: 'queue', decodeQueueMax: 8, decodeHostTier: true, ssdTBPerGalaxy: 4 }));
+  for (const r of [u, c, w, n, nc, hi, hr, lo, qb, ql]) {
+    const f = [r.boundPrefillFrac, r.boundDecodeFrac, r.boundBalancedFrac, r.boundDemandFrac];
+    assert.ok(!r.error && f.every((x) => x >= 0 && x <= 1) && Math.abs(f[0] + f[1] + f[2] + f[3] - 1) < 1e-9, `bound shares ${f}`);
+    assert.ok(Math.abs(r.boundDecodeMemoryFrac + r.boundDecodeQueueFrac - r.boundDecodeFrac) < 1e-9, 'decode-bound causes');
+    assert.ok(Math.abs(f[0] + f[2] - (1 - r.pfStarvedSlotFrac - r.pfStarvedIdleFrac)) < 1e-9, 'prefill-bound + balanced = prefill has work');
+  }
+  // slot limit: prefill idles waiting for slots (memory; exactly the slot-starved time), with or without a full ring
+  assert.ok(u.boundDecodeMemoryFrac > 0.5 && u.boundDecodeQueueFrac === 0 && Math.abs(u.boundDecodeFrac - u.pfStarvedSlotFrac) < 1e-9 && c.boundDecodeMemoryFrac > 0.5 && c.ringFullFrac > 0.9,
+    `slot limit: memory ${u.boundDecodeMemoryFrac} / ring 4 ${c.boundDecodeMemoryFrac}`);
+  // unlimited slots on a small ring: the ring is ~always full but nobody waits on decode, so nothing is decode-bound
+  // (decode utilization, ringFullFrac, shows the limit); with prefill busy as well that time is balanced
+  assert.ok(nc.boundDecodeFrac === 0 && nc.ringFullFrac > 0.9 && nc.boundBalancedFrac > 0, `small ring, no slot limit: ${nc.boundDemandFrac}`);
+  assert.ok(hr.boundDecodeFrac === 0 && hr.boundBalancedFrac > 0.5 && hr.boundBalancedFrac <= hr.ringFullFrac + 1e-9, `prefill busy, ring full: balanced ${hr.boundBalancedFrac}`);
+  // queue backpressure: requests past prefill waiting for a slot are memory (prefill never waits); a queue limit at
+  // the slot count makes them wait before prefill instead: queue full
+  assert.ok(qb.pfStarvedSlotFrac === 0 && qb.decSlotWaitFrac > 0 && qb.boundDecodeMemoryFrac > 0.5 && qb.boundDecodeQueueFrac === 0, `queue backpressure: memory ${qb.boundDecodeMemoryFrac}`);
+  assert.ok(ql.decParkPerS === 0 && ql.decSlotWaitFrac === 0 && ql.boundDecodeQueueFrac > 0.5 && ql.boundDecodeMemoryFrac === 0, `queue full ${ql.boundDecodeQueueFrac}`);
+  // no decode limits: decode never holds anything back; prefill-bound with many lanes, demand-bound with few
+  assert.ok(n.boundDecodeFrac === 0 && n.boundBalancedFrac === 0 && Math.abs(n.boundDemandFrac - n.pfStarvedIdleFrac) < 1e-9, 'no decode limits');
+  assert.ok(hi.boundPrefillFrac > 0.9 && lo.boundDemandFrac > 0.9, `prefill-bound ${hi.boundPrefillFrac} / demand-bound ${lo.boundDemandFrac}`);
 }
 
 // 10d. decode KV layouts (decodeCache). Paged decode (queue backpressure) with room to spare changes nothing; with
@@ -166,6 +193,9 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   const small = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 2 }, pq, cfg));
   assert.ok(small.decWaitPerS === 0 && small.decParkPerS > 0 && small.decSlotWaitFrac > 0 && small.decPoolTokMean <= 2 * SIM.M3.maxCtx && small.reqPerS < u.reqPerS,
     `paging 2M: parked ${small.decParkPerS} pool ${small.decPoolTokMean}`);
+  // peak use: at least the mean, never above the memory, and full when requests park
+  assert.ok(small.decPoolTokMax >= small.decPoolTokMean && small.decPoolTokMax <= 2 * SIM.M3.maxCtx && small.decPoolTokMax > 0.9 * 2 * SIM.M3.maxCtx,
+    `paging 2M: peak ${small.decPoolTokMax}`);
   const lim = SIM.simulate(TR, cal, Object.assign({}, pq, cfg, { decodeSlots: 1000, decodeQueueMax: 12 }));
   assert.ok(lim.decSlotsMax + 0 <= 12 && lim.decSlotsMean + lim.decParkedMean <= 12 + 1e-9 && lim.decWaitPerS > 0 && lim.decodingMean <= 12, `paging queue 12: held ${lim.decSlotsMax}`);
   assert.ok(SIM.makePlan(Object.assign({}, cfg, { decodeCache: 'hybrid', decodeSlots: 75 }), cal).errors.some((e) => e.includes('decodeCache')));
@@ -176,13 +206,13 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   assert.ok(sl.decHitRate > 0 && st.decHitRate > sl.decHitRate && st.decPcieD2HUtil > 0 && sl.decPcieD2HUtil === 0, `slot hits ${sl.decHitRate} / tiers ${st.decHitRate}`);
 }
 
-// 10e. queue backpressure (fixed decode slots + decode SSD; default queue limit 100): no request waits before prefill without a limit; those
+// 10e. queue backpressure (fixed decode slots + decode SSD; default queue limit 145, the modelled slot count): no request waits before prefill without a limit; those
 //      admitted without a slot are parked on SSD and take a slot after prefill (first token later); slots held never
 //      exceed the slots, and more requests are served than with slot backpressure. A decode-queue limit caps slots
 //      held + parked; the mode needs the decode SSD. Decode speed per session: decodeTps on an unshared ring, lower when shared.
 {
   const cfg = Object.assign({ cache: 'pool', chunk: 512, batch: true, budget: 8192 }, base, { concurrency: 128, decodeStages: 8, decodeSlots: 10, decodeHostTier: true });
-  assert.strictEqual(SIM.DEFAULTS.decodeQueueMax, 100);
+  assert.strictEqual(SIM.DEFAULTS.decodeQueueMax, 145);
   const sl = SIM.simulate(TR, cal, cfg), qu = SIM.simulate(TR, cal, Object.assign({ decodeBackpressure: 'queue', decodeQueueMax: 0 }, cfg));
   const q4 = SIM.simulate(TR, cal, Object.assign({ decodeBackpressure: 'queue', decodeQueueMax: 14 }, cfg));
   assert.ok(sl.decWaitPerS > 0 && sl.decParkPerS === 0 && qu.decWaitPerS === 0 && qu.decParkPerS > 0 && qu.decSlotsMax <= 10 && qu.decSlotWaitFrac > 0
@@ -194,16 +224,17 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   assert.ok(Math.abs(f.tsuP10 - 180) < 1e-6 && Math.abs(f.tsuP50 - 180) < 1e-6 && sh.tsuP10 < 180 && sh.tsuP10 <= sh.tsuP50, `tsu ${f.tsuP10} / shared ${sh.tsuP10}`);
 }
 
-// 10f. modelled decode KV memory and batched decode. With a finite ring decodeSlots 'auto' models the memory (87 x
-//      1M slots today; pages use every free byte); without a ring decode is unlimited; a number overrides it. Fixed
+// 10f. modelled decode KV memory and batched decode. With a finite ring decodeSlots 'auto' models the memory (145 x
+//      1M slots with sparse attention TP4 x CP2; pages use every free byte); without a ring decode is unlimited; a number overrides it. Fixed
 //      slots must hold batch x stages sessions. In a batch each user is slower but the ring decodes more in total;
 //      batch 1 is the measured curve. A larger batch on a small ring decodes more output.
 {
   const pl = (c) => SIM.makePlan(Object.assign({ chunk: 2048 }, c), cal);
   const a = pl({ decodeStages: 62 }), pg = pl({ decodeStages: 62, decodeCache: 'paging', decodeBackpressure: 'queue', decodeHostTier: true });
-  assert.ok(a.decSlots === 87 && a.decMemTok === 87 * SIM.M3.maxCtx && pg.decMemTok > 87 * SIM.M3.maxCtx && pg.decMemTok < 88 * SIM.M3.maxCtx, `modelled ${a.decSlots}`);
+  assert.ok(a.decSlots === 145 && a.decMemTok === 145 * SIM.M3.maxCtx && pg.decMemTok > 145 * SIM.M3.maxCtx && pg.decMemTok < 146 * SIM.M3.maxCtx, `modelled ${a.decSlots}`);
   assert.ok(pl({}).decSlots === 0 && pl({}).decMemTok === Infinity && pl({ decodeStages: 62, decodeSlots: 40 }).decSlots === 40 && SIM.DEFAULTS.decodeSlots === 'auto');
-  assert.ok(pl({ decodeStages: 62, decodeBatch: 2 }).errors.some((e) => e.startsWith('decode out of memory')) && !pl({ decodeStages: 40, decodeBatch: 2 }).errors.some((e) => e.startsWith('decode')));
+  // fixed slots: 2 x 62 = 124 sessions fit in 145 slots, 3 x 62 = 186 do not
+  assert.ok(pl({ decodeStages: 62, decodeBatch: 3 }).errors.some((e) => e.startsWith('decode out of memory')) && !pl({ decodeStages: 62, decodeBatch: 2 }).errors.some((e) => e.startsWith('decode')));
   assert.ok(pg.errors.length === 0 && !pl({ decodeStages: 62, decodeBatch: 4, decodeCache: 'paging', decodeBackpressure: 'queue', decodeHostTier: true }).errors.some((e) => e.startsWith('decode')));
   assert.ok(pl({ decodeBatch: 2 }).errors.some((e) => e.includes('batched decode needs')));
   const c = Object.assign({}, SIM.DEFAULTS);

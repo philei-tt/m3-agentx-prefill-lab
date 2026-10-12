@@ -51,11 +51,13 @@
   // Decode KV memory, modelled from tt-blaze's M3 decode (one 4x2 mesh, 8 chips, per stage). The sparse (MSA/MoE)
   // stages bind: per chip, 8 DRAM banks x 4080 MiB (Blackhole SoC descriptor), minus all 128 routed experts at half
   // the intermediate width (bf4), the 1M x 64 bf16 RoPE table, Wo (bf8), router and norms (~1.5 MiB), and the per-chip
-  // reserve (reserveGB); q/k/v, indexer and shared-expert weights live in SRAM. KV per token per chip, bf8: K and V
-  // (one head per chip, replicated over the 2 columns) 136 B each + index_k split over the columns 68 B = 340 B.
-  // Dense stages hold 136 B/token/chip (they fit ~2.7x more); the embedding and LM-head stages hold none.
+  // reserve (reserveGB); q/k/v, indexer and shared-expert weights live in SRAM. KV per token per chip, bf8, with
+  // sparse attention TP4 x CP2 (tt-blaze #4855, the default since Oct 11): mesh row r holds KV head r and the two
+  // columns split its K/V by 128-token block, as index-K already is, so K and V are 136 B each over the 2 columns
+  // = 136 B, + index_k 68 B = 204 B (TP8 before it replicated K/V over the columns: 340 B). Dense stages (TP4 x CP2
+  // since #4703) hold 68 B/token/chip; the embedding and LM-head stages hold none.
   const DEC_DRAM = 8 * 4080 * 2 ** 20;
-  const DEC_KVB_CHIP = 2 * 128 * BF8 + 128 * BF8 / 2;
+  const DEC_KVB_CHIP = 2 * 128 * BF8 / 2 + 128 * BF8 / 2;
   const decodeWeightsChip = () => M3.Ex * 3 * M3.E * (M3.I / 2) * BF4 + M3.maxCtx * 64 * BF16 + 1024 * M3.E * BF8 + 1.5 * 2 ** 20;
 
   const OPS_MOE = ['norm_ag', 'qkv', 'idx_branch', 'misc', 'o_proj', 'attn_rs', 'shared', 'router', 'dispatch', 'experts', 'combine', 'moe_reduce'];
@@ -498,7 +500,7 @@
     // slot fit (35 x 1M slots on 16x[2,4], bf8 index_k, even split; CCL scratch + transient buffers)
     reserveGB: 1, expertImb: IMB0, maxInflight: 0,
     // decodeSlots: decode KV memory, in 1M-token slots. 'auto' (default) = modelled from the decode chips' DRAM (see
-    //   DEC_DRAM; 87 slots today, ~91M tokens paged) when the ring is finite (decodeStages > 0), unlimited otherwise; a
+    //   DEC_DRAM; 145 slots, ~152M tokens paged) when the ring is finite (decodeStages > 0), unlimited otherwise; a
     //   number overrides it (0 = unlimited). See decodeCache and decodeBackpressure for how requests use it.
     decodeSlots: 'auto',
     // decode ring: decodeTps = tokens per second per user (TSU) while the ring has room, i.e. one token per trip
@@ -537,11 +539,11 @@
     //   'slot'  (today; fixed slots only) = once it holds a free decode slot; it waits (in TTFT) until one frees.
     //   'queue' (fixed slots or paging, with the decode offload tiers) = once the decode queue has room: the requests
     //           decode has taken on (holding slots / pages, or parked) number fewer than decodeQueueMax (default
-    //           100; 0 = no limit). Its KV migrates into a free slot / pages if there are any; otherwise to the decode SSDs
+    //           145, the modelled slot count, so queue backpressure is at least slot backpressure; 0 = no limit). Its KV migrates into a free slot / pages if there are any; otherwise to the decode SSDs
     //           (parked: PCIe + SSD write). A parked request, once its prefill is done, waits for a slot / pages (FIFO,
     //           ahead of new admissions) and reads its KV back before its first token (in TTFT). Requests holding
     //           slots / pages decode round robin on the ring (decodeStages), so the limit caps how many share it.
-    decodeBackpressure: 'slot', decodeQueueMax: 100,
+    decodeBackpressure: 'slot', decodeQueueMax: 145,
     concurrency: 64, decodeTps: 180, duration: 1800, seed: 1, idleCap: 10, startMin: 0, startMax: 1, maxWarmup: 1e6,
     gapCap: Infinity,      // AgentX forbids capping recorded idle gaps (only the 10 s system-idle cap applies)
     // policy: 'rr' (default) = round robin, see below; 'rtc' = run to completion (no preemption), oldest first
@@ -1143,8 +1145,9 @@
       ttft: [], chunks: 0, segs: 0, laneWait: 0, reqs: 0, primers: 0, warmupS: 0, idleWarps: 0, primerTok: 0,
       gated: 0, gateWait: 0, legacyStarts: 0, skippedTraces: 0, rrSegs: 0, rrReuse: 0, rrCopyIn: 0,
       outTok: 0, decArea: 0, decingArea: 0, decMax: 0, decWaits: 0, decWait: 0, decWaited: 0, decTokArea: 0, ringFull: 0, pfSlot: 0, pfNone: 0, sendBlock: 0,
-      decCtxTok: 0, decHitTok: 0, decHostTok: 0, decSsdTok: 0, dH2dBusy: 0, dD2hBusy: 0, dSsdBusy: 0, decPoolArea: 0,
-      decStarts: 0, decStartDelay: 0, decSlotWaited: 0, parked: 0, parkArea: 0, tsu: [], ringFillArea: 0, decStarved: 0 };
+      decCtxTok: 0, decHitTok: 0, decHostTok: 0, decSsdTok: 0, dH2dBusy: 0, dD2hBusy: 0, dSsdBusy: 0, decPoolArea: 0, decPoolMax: 0,
+      decStarts: 0, decStartDelay: 0, decSlotWaited: 0, parked: 0, parkArea: 0, tsu: [],
+      bPrefill: 0, bDecode: 0, bDecodeMemory: 0, bDecodeQueue: 0, bBalanced: 0, bDemand: 0 };
     const decWin = () => warmDone && now >= t0 && now <= tEnd;
     // ---------- decode KV (DEFAULTS.decodeCache): reserved when a request is admitted to prefill (TTFT clock already
     // running), released when its decode ends, then cached: released slots keep their stream's KV, released pages
@@ -1188,10 +1191,7 @@
         if (b > a) {
           st.decArea += decHeld * (b - a); st.decingArea += decoding * (b - a); st.decTokArea += decSpeedSum * decShare() * (b - a);
           if (cfg.decodeStages > 0 && decoding >= decCap) st.ringFull += b - a;
-          // balance: how full the ring is on average, and how long it had free positions with no session waiting
-          // for decode (past prefill without slots / pages)
-          if (cfg.decodeStages > 0) { st.ringFillArea += Math.min(1, decoding / decCap) * (b - a); if (decoding < decCap && !slotQ.length) st.decStarved += b - a; }
-          if (decPool) st.decPoolArea += (decPool.pinnedB + decResvB) * B * (b - a);
+          if (decPool) { const u = (decPool.pinnedB + decResvB) * B; st.decPoolArea += u * (b - a); if (u > st.decPoolMax) st.decPoolMax = u; }
           st.parkArea += parkedN * (b - a);
         }
       }
@@ -1920,11 +1920,28 @@
       if (warmDone && inflightReqs === 0 && t > now + cfg.idleCap) { ev.shiftAll(t - now - cfg.idleCap); st.idleWarps++; t = ev.peekT(); }
       if (t > tEnd) break;
       if (!warmDone && t > cfg.maxWarmup) { st.warmupTimeout = true; break; }
-      if (warmDone && t > now) { // why stage 0 has nothing to issue in [now, t), see pfStarved* in the results
+      // state over [now, t) (nothing changes between events), per prefill replica: why stage 0 has nothing to issue
+      // (pfStarved* in the results), and the prefill / decode balance state (bound* in the results)
+      if (warmDone && t > now) {
         const a = Math.max(now, t0), b = Math.min(t, tEnd);
+        // decode at its limit: the ring is full (every position taken; past full every session slows), or a
+        // request waits on decode: past prefill for a slot / pages (memory), or before prefill, which counts only
+        // while prefill has no work (below; admitting it would only move it into the prefill queue), for a slot
+        // (slot backpressure: memory) or for room in the decode queue (queue backpressure: queue full)
+        const ringFull = cfg.decodeStages > 0 && decoding >= decCap, decMemAfter = slotQ.length > 0;
         if (b > a) for (const rp of reps) {
-          if (rp.free[0] > now + 1e-12 || rp.queue.length || rp.active.some((q) => q.rem > 0)) continue; // busy or has work
-          if (decQ.length) st.pfSlot += b - a; else st.pfNone += b - a;
+          // prefill has work: stage 0 is computing, or a request still has tokens not yet fed into it (not started,
+          // or started with chunks left); stage 0 idle with work left means a later stage or the lanes hold it back
+          const work = rp.free[0] > now + 1e-12 || rp.queue.length > 0 || rp.active.some((q) => q.rem > 0);
+          if (!work) { if (decQ.length) st.pfSlot += b - a; else st.pfNone += b - a; }
+          // prefill has work: balanced when decode is at its limit too (both fully used), else prefill-bound.
+          // Prefill idle: decode-bound when a request waits on decode (memory first, then queue full), else
+          // demand-bound (a full ring with nothing waiting holds nothing back; decode utilization shows it)
+          if (work) { if (ringFull || decMemAfter) st.bBalanced += b - a; else st.bPrefill += b - a; }
+          else if (decMemAfter || decQ.length > 0) {
+            st.bDecode += b - a;
+            if (decMemAfter || !decQueue) st.bDecodeMemory += b - a; else st.bDecodeQueue += b - a;
+          } else st.bDemand += b - a;
         }
       }
       now = Math.max(now, t);
@@ -1978,20 +1995,26 @@
       // speed follows the context) and the
       // share of the window it carried decodeStages or more sessions
       decodeTpsMean: st.decingArea > 0 ? st.decTokArea / st.decingArea : cfg.decodeTps, ringFullFrac: cfg.decodeStages > 0 ? st.ringFull / D : 0,
-      // prefill / decode balance: the ring's mean fill (sessions decoding / its capacity, at most 1) and the share of the
-      // window it had free positions with nothing waiting for decode (NaN without a ring); with pfStarvedSlotFrac
-      // (prefill idle because requests wait for decode KV) and maxUtil (prefill's busiest stage)
-      ringFillMean: cfg.decodeStages > 0 ? st.ringFillArea / D : NaN, decStarvedFrac: cfg.decodeStages > 0 ? st.decStarved / D : NaN,
+      // prefill / decode balance: share of the window (per prefill replica) in each state. prefill-bound = prefill
+      // has work, decode not at its limit; balanced = prefill has work and decode at its limit (ring full, or a
+      // request past prefill waiting for a slot / pages); decode-bound = prefill idle while a request waits on decode,
+      // by cause: memory (slots / pages) or queue (the decode queue full), summing to boundDecodeFrac; demand-bound =
+      // prefill idle, nothing waiting on decode. The four sum to 1.
+      boundPrefillFrac: st.bPrefill / (D * reps.length), boundDecodeFrac: st.bDecode / (D * reps.length),
+      boundDecodeMemoryFrac: st.bDecodeMemory / (D * reps.length),
+      boundDecodeQueueFrac: st.bDecodeQueue / (D * reps.length),
+      boundBalancedFrac: st.bBalanced / (D * reps.length),
+      boundDemandFrac: st.bDemand / (D * reps.length),
       // output tokens decoded per second in the window (what output revenue bills; outTps counts them at prefill end)
       outDecTps: st.decTokArea / D,
       // decode KV (decodeCache): share of the context already cached on the decode side at admission (on device or read
       // back from its host DRAM / SSD), so not migrated from prefill; tokens migrated per second (not modelled as a
-      // cost); read-backs and the decode galaxies' link shares; pool tokens pinned or reserved by sessions (mean);
+      // cost); read-backs and the decode galaxies' link shares; pool tokens pinned or reserved by sessions (mean and peak);
       // mean time from prefill end to the first token, and the share of requests that waited for a slot after prefill
       decHitRate: st.decCtxTok ? st.decHitTok / st.decCtxTok : NaN, migTps: (st.decCtxTok - st.decHitTok) / D,
       decHostReadTps: st.decHostTok / D, decSsdReadTps: st.decSsdTok / D,
       decPcieH2DUtil: st.dH2dBusy / D, decPcieD2HUtil: st.dD2hBusy / D, decSsdUtil: st.dSsdBusy / D,
-      decPoolTokMean: decPool ? st.decPoolArea / D : NaN,
+      decPoolTokMean: decPool ? st.decPoolArea / D : NaN, decPoolTokMax: decPool ? st.decPoolMax : NaN,
       decStartDelayMean: st.decStarts ? st.decStartDelay / st.decStarts : 0, decSlotWaitFrac: st.decStarts ? st.decSlotWaited / st.decStarts : 0,
       // decode speed each session got (output tokens / its decode time, tokens/s/u): 10th percentile and median
       tsuP10: tsuPct(0.1), tsuP50: tsuPct(0.5),

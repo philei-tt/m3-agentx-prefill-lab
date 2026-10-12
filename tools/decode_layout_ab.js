@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // Decode KV layout, backpressure and batching, and their effect on revenue. Decode: a 62-stage ring with its KV memory
-// modelled from the decode chips' DRAM (87 x 1M slots, 91M tokens of pages), decode-side host DRAM + SSD tiers on its 16 galaxies,
+// modelled from the decode chips' DRAM (145 x 1M slots, 152M tokens of pages), decode-side host DRAM + SSD tiers on its 16 galaxies,
 // speed on the measured M3 curve at 180 tokens/s/u @100k. Scenarios:
 //   fixed slots, slot backpressure   today: a request waits for a free slot before prefill, holds it to decode end
 //   fixed slots / paged, queue backpressure: prefill starts a request while the decode queue (requests holding slots
-//                                    / pages, or parked) is under the limit (default 100); its KV goes
+//                                    / pages, or parked) is under the limit (100 / 145 / 200 x m); its KV goes
 //                                    to free slots / pages, else to the decode SSDs, and a parked request takes slots /
 //                                    pages after prefill (FIFO), reading its KV back first
-//   paged, batched decode            m = 2 / 4 / 8 sessions per stage, decode-queue limit 100 x m (fixed slots cannot
-//                                    batch: m x 62 sessions need more than 87 slots)
+//   batched decode                   m = 2 / 4 / 8 sessions per stage on pages; fixed slots hold m = 2 at most
+//                                    (2 x 62 sessions in 145 slots)
 //   unlimited decode                 reference: no KV or ring limit
 // Prefill: the decode-backpressure setup of README.md, 6 and 8 galaxies ([2,4] stages), paged pool + host DRAM + SSD
 // tiers, today's kernels, round robin; best (by net revenue at the goodput point) of no batching (chunk 1024 / 2048)
@@ -26,11 +26,17 @@ const { RESULTS } = require('../lib/paths.js');
 const { usd } = require('../lib/price.js');
 
 const RING = { decodeStages: 62, decodeSlots: 'auto', decodeHostTier: true, decodeGalaxies: SIM.COST.decodeGalaxies };
+// queue limits per ring position (x decode batch m): below, at and above the 145 modelled slots
+const LIMITS = [100, 145, 200];
 const DECODE = [
   ['fixed slots, slot backpressure (today)', Object.assign({ decodeCache: 'slots', decodeBackpressure: 'slot' }, RING)],
-  ['fixed slots, queue backpressure (limit 100)', Object.assign({ decodeCache: 'slots', decodeBackpressure: 'queue' }, RING)],
-  ['paged, queue backpressure (limit 100)', Object.assign({ decodeCache: 'paging', decodeBackpressure: 'queue' }, RING)],
-  ...[2, 4, 8].map((m) => [`paged, batch ${m}, queue limit ${100 * m}`, Object.assign({ decodeCache: 'paging', decodeBackpressure: 'queue', decodeBatch: m, decodeQueueMax: 100 * m }, RING)]),
+  ['fixed slots, batch 2, slot backpressure', Object.assign({ decodeCache: 'slots', decodeBackpressure: 'slot', decodeBatch: 2 }, RING)],
+  ...LIMITS.flatMap((L) => [
+    [`fixed slots, queue backpressure (limit ${L})`, Object.assign({ decodeCache: 'slots', decodeBackpressure: 'queue', decodeQueueMax: L }, RING)],
+    [`fixed slots, batch 2, queue limit ${2 * L}`, Object.assign({ decodeCache: 'slots', decodeBackpressure: 'queue', decodeBatch: 2, decodeQueueMax: 2 * L }, RING)],
+    [`paged, queue backpressure (limit ${L})`, Object.assign({ decodeCache: 'paging', decodeBackpressure: 'queue', decodeQueueMax: L }, RING)],
+    ...[2, 4, 8].map((m) => [`paged, batch ${m}, queue limit ${L * m}`, Object.assign({ decodeCache: 'paging', decodeBackpressure: 'queue', decodeBatch: m, decodeQueueMax: L * m }, RING)]),
+  ]),
   ['(ref) unlimited decode', { decodeSlots: 0, decodeStages: 0 }],
 ];
 const PREFILL = [];
@@ -69,13 +75,13 @@ async function main() {
       console.log(`  ${label}`);
       console.log(`    prefill ${prefillTxt(best.pf)} | goodput ${k(best.goodput)} @C=${p.conc} | p50/p90 TTFT ${p.ttftP50.toFixed(1)}/${p.ttftP90.toFixed(1)} s | ${Math.round(3600 * p.reqPerS).toLocaleString('en-US')} req/h`);
       console.log(`    revenue ${usd(e.revenue)}/h = input ${usd(e.inUsd)} + output ${usd(e.outUsd)} (${Math.round(p.outDecTps).toLocaleString('en-US')} tok/s decoded) | cost ${usd(e.cost)} | net ${usd(e.margin)}/h`);
-      console.log(`    decode: held ${Math.round(p.decSlotsMean)} / max ${p.decSlotsMax}, decoding ${Math.round(p.decodingMean)} at ${Math.round(p.decodeTpsMean)} tokens/s/u (p10 ${Math.round(p.tsuP10)}, p50 ${Math.round(p.tsuP50)}), ring full ${pct(p.ringFullFrac)}`
+      console.log(`    decode: held ${Math.round(p.decSlotsMean)} / max ${p.decSlotsMax}, decoding ${Math.round(p.decodingMean)} at ${Math.round(p.decodeTpsMean)} tokens/s/u (p10 ${Math.round(p.tsuP10)}, p50 ${Math.round(p.tsuP50)}), decode utilization (ring full) ${pct(p.ringFullFrac)}`
         + ` | ${pct(p.decWaitPerS / p.reqPerS)} waited ${p.decWaitMean.toFixed(1)} s before prefill`
         + (p.decParkPerS > 0 ? ` | ${pct(p.decParkPerS / p.reqPerS)} parked on SSD (${Math.round(p.decParkedMean)} on average), decode SSD ${pct(p.decSsdUtil)} busy` : '')
         + (p.decSlotWaitFrac > 0 ? ` | ${pct(p.decSlotWaitFrac)} waited for slots / pages after prefill, first token +${(1e3 * p.decStartDelayMean).toFixed(0)} ms` : '')
         + (Number.isFinite(p.decHitRate) ? ` | decode-side hit ${(100 * p.decHitRate).toFixed(1)}%` : '')
         + (Number.isFinite(p.decPoolTokMean) ? ` | pool in use ${(p.decPoolTokMean / 1e6).toFixed(1)}M of ${(best.plan.decPoolTok / 1e6).toFixed(1)}M` : ''));
-      if (Number.isFinite(p.ringFillMean)) console.log(`    balance: prefill busiest stage ${pct(p.maxUtil)}, idle waiting on decode ${pct(p.pfStarvedSlotFrac)} | ring fill ${pct(p.ringFillMean)}, idle waiting on prefill ${pct(p.decStarvedFrac)}`);
+      console.log(`    balance: prefill-bound ${pct(p.boundPrefillFrac)}, decode-bound ${pct(p.boundDecodeFrac)} (memory ${pct(p.boundDecodeMemoryFrac)}, queue full ${pct(p.boundDecodeQueueFrac)}), balanced ${pct(p.boundBalancedFrac)}, demand-bound ${pct(p.boundDemandFrac)} | prefill busiest stage ${pct(p.maxUtil)}`);
       console.log(`    every prefill config (net $/h at goodput): ${all.map((r) => `${prefillTxt(r.pf)} ${r.econ ? usd(r.econ.margin) : '–'}`).join('; ')}`);
     }
   }
