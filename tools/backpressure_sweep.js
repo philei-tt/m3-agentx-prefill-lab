@@ -60,9 +60,9 @@ async function main() {
       const p = b.at, e = b.econ;
       out.cells.push({ sk, label, pfName, budget: b.budget, goodput: b.goodput, at: p, econ: e });
       console.log(`  ${label} | prefill ${pfName} (${b.budget}): net ${usd(e.margin)}/h (revenue ${usd(e.revenue)}) | goodput ${(b.goodput / 1e3).toFixed(1)}k @C=${p.conc}, ${(3.6 * p.reqPerS).toFixed(1)}k req/h, `
-        + `output ${(p.outDecTps / 1e3).toFixed(1)}k tok/s | decode p10/p50 ${Math.round(p.tsuP10)}/${Math.round(p.tsuP50)} tok/s/u | prefill busy ${pct(p.maxUtil)}, `
+        + `output ${(p.outDecTps / 1e3).toFixed(1)}k tok/s | decode p10/p50 ${Math.round(p.tsuP10)}/${Math.round(p.tsuP50)} tok/s/u | decode utilization ${pct(p.ringFullFrac)} | prefill busy ${pct(p.maxUtil)}, `
         + `waits on decode ${pct(p.pfStarvedSlotFrac)} | prefill-bound ${pct(p.boundPrefillFrac)}, `
-        + `decode-bound ${pct(p.boundDecodeFrac)} (compute ${pct(p.boundDecodeComputeFrac)}, memory ${pct(p.boundDecodeMemoryFrac)}, queue limit ${pct(p.boundDecodeQueueFrac)}), balanced ${pct(p.boundBalancedFrac)}, demand-bound ${pct(p.boundDemandFrac)}`);
+        + `decode-bound ${pct(p.boundDecodeFrac)} (memory ${pct(p.boundDecodeMemoryFrac)}, queue full ${pct(p.boundDecodeQueueFrac)}), balanced ${pct(p.boundBalancedFrac)}, demand-bound ${pct(p.boundDemandFrac)}`);
     }
   }
   fs.writeFileSync(get('--out', path.join(RESULTS, 'backpressure_sweep.json')), JSON.stringify(out));

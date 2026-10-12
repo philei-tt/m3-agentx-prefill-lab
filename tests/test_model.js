@@ -148,33 +148,33 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
     assert.ok(f.every((x) => x >= 0 && x <= 1) && f[0] + f[1] <= 1 + 1e-9, `starved ${f}`);
   }
   assert.ok(c.pfStarvedSlotFrac > 0 && n.pfStarvedSlotFrac === 0 && n.sendBlockFrac > 0, 'slot limits starve prefill');
-  // prefill / decode balance: every moment is one of four states, so the shares sum to 1; compute is part of decode
+  // prefill / decode balance: every moment is one of four states, so the shares sum to 1; prefill-bound + balanced is
+  // exactly the time prefill has work; decode-bound splits into memory + queue full
   const nc = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeSlots: 0, decodeStages: 4 }));
   const hi = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeSlots: 0, concurrency: 256 }));
+  const hr = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeSlots: 0, concurrency: 256, decodeStages: 16 }));
   const lo = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeSlots: 0, concurrency: 2 }));
   const qb = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeStages: 16, decodeSlots: 8, decodeBackpressure: 'queue', decodeHostTier: true, ssdTBPerGalaxy: 4 }));
-  for (const r of [u, c, w, n, nc, hi, lo, qb]) {
-    const f = [r.boundPrefillFrac, r.boundDecodeFrac, r.boundBalancedFrac, r.boundDemandFrac];
-    assert.ok(!r.error && f.every((x) => x >= 0 && x <= 1) && Math.abs(f[0] + f[1] + f[2] + f[3] - 1) < 1e-9 && Math.abs(r.boundDecodeComputeFrac + r.boundDecodeMemoryFrac + r.boundDecodeQueueFrac - r.boundDecodeFrac) < 1e-9, `bound shares ${f}`);
-  }
-  // slot limit, no ring: prefill idles waiting for slots (memory; exactly the slot-starved time); a huge ring adds
-  // nothing; a full one is compute
-  assert.ok(u.boundDecodeFrac > 0.5 && u.boundDecodeComputeFrac === 0 && u.boundDecodeQueueFrac === 0 && Math.abs(u.boundDecodeFrac - u.pfStarvedSlotFrac) < 1e-9 && w.boundDecodeComputeFrac === 0 && c.boundDecodeComputeFrac > 0.5,
-    `slot limit ${u.boundDecodeFrac} / ring 4 compute ${c.boundDecodeComputeFrac}`);
-  // a ring as large as the slots is never oversubscribed, but a full ring (every slot decoding) still counts as compute
-  const rs = SIM.simulate(TR, cal, Object.assign({ decodeStages: 16 }, cfg));
-  assert.ok(rs.boundDecodeComputeFrac > 0 && Math.abs(rs.boundDecodeComputeFrac - rs.ringFullFrac) < 1e-9, `full ring ${rs.boundDecodeComputeFrac} / ${rs.ringFullFrac}`);
-  // unlimited slots on a small ring: nobody waits for a slot, yet decode is the limit (the ring slows every session)
-  assert.ok(nc.pfStarvedSlotFrac === 0 && nc.boundDecodeComputeFrac > 0.5, `small ring, no slot limit: compute ${nc.boundDecodeComputeFrac}`);
-  // queue backpressure (a ring larger than the slots, so never full): requests past prefill waiting for a slot count
-  // as decode memory, though prefill never waits
-  assert.ok(qb.pfStarvedSlotFrac === 0 && qb.decSlotWaitFrac > 0 && qb.boundDecodeFrac > 0.5 && qb.boundDecodeComputeFrac === 0, `queue backpressure: decode ${qb.boundDecodeFrac}`);
-  assert.ok(qb.boundDecodeMemoryFrac > 0.5, `queue backpressure: memory ${qb.boundDecodeMemoryFrac}`);
   // queue limit at the slot count: nothing parks, so nobody waits after prefill; the requests that wait, wait before
-  // prefill for room in the decode queue (prefill idle meanwhile): queue limit, not memory
+  // prefill for room in the decode queue
   const ql = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeStages: 16, decodeSlots: 8, decodeBackpressure: 'queue', decodeQueueMax: 8, decodeHostTier: true, ssdTBPerGalaxy: 4 }));
-  assert.ok(ql.decParkPerS === 0 && ql.decSlotWaitFrac === 0 && ql.boundDecodeQueueFrac > 0.5 && ql.boundDecodeMemoryFrac === 0 && ql.boundDecodeComputeFrac === 0,
-    `queue limit ${ql.boundDecodeQueueFrac} of decode ${ql.boundDecodeFrac}`);
+  for (const r of [u, c, w, n, nc, hi, hr, lo, qb, ql]) {
+    const f = [r.boundPrefillFrac, r.boundDecodeFrac, r.boundBalancedFrac, r.boundDemandFrac];
+    assert.ok(!r.error && f.every((x) => x >= 0 && x <= 1) && Math.abs(f[0] + f[1] + f[2] + f[3] - 1) < 1e-9, `bound shares ${f}`);
+    assert.ok(Math.abs(r.boundDecodeMemoryFrac + r.boundDecodeQueueFrac - r.boundDecodeFrac) < 1e-9, 'decode-bound causes');
+    assert.ok(Math.abs(f[0] + f[2] - (1 - r.pfStarvedSlotFrac - r.pfStarvedIdleFrac)) < 1e-9, 'prefill-bound + balanced = prefill has work');
+  }
+  // slot limit: prefill idles waiting for slots (memory; exactly the slot-starved time), with or without a full ring
+  assert.ok(u.boundDecodeMemoryFrac > 0.5 && u.boundDecodeQueueFrac === 0 && Math.abs(u.boundDecodeFrac - u.pfStarvedSlotFrac) < 1e-9 && c.boundDecodeMemoryFrac > 0.5 && c.ringFullFrac > 0.9,
+    `slot limit: memory ${u.boundDecodeMemoryFrac} / ring 4 ${c.boundDecodeMemoryFrac}`);
+  // unlimited slots on a small ring: the ring is ~always full but nobody waits on decode, so nothing is decode-bound
+  // (decode utilization, ringFullFrac, shows the limit); with prefill busy as well that time is balanced
+  assert.ok(nc.boundDecodeFrac === 0 && nc.ringFullFrac > 0.9 && nc.boundBalancedFrac > 0, `small ring, no slot limit: ${nc.boundDemandFrac}`);
+  assert.ok(hr.boundDecodeFrac === 0 && hr.boundBalancedFrac > 0.5 && hr.boundBalancedFrac <= hr.ringFullFrac + 1e-9, `prefill busy, ring full: balanced ${hr.boundBalancedFrac}`);
+  // queue backpressure: requests past prefill waiting for a slot are memory (prefill never waits); a queue limit at
+  // the slot count makes them wait before prefill instead: queue full
+  assert.ok(qb.pfStarvedSlotFrac === 0 && qb.decSlotWaitFrac > 0 && qb.boundDecodeMemoryFrac > 0.5 && qb.boundDecodeQueueFrac === 0, `queue backpressure: memory ${qb.boundDecodeMemoryFrac}`);
+  assert.ok(ql.decParkPerS === 0 && ql.decSlotWaitFrac === 0 && ql.boundDecodeQueueFrac > 0.5 && ql.boundDecodeMemoryFrac === 0, `queue full ${ql.boundDecodeQueueFrac}`);
   // no decode limits: decode never holds anything back; prefill-bound with many lanes, demand-bound with few
   assert.ok(n.boundDecodeFrac === 0 && n.boundBalancedFrac === 0 && Math.abs(n.boundDemandFrac - n.pfStarvedIdleFrac) < 1e-9, 'no decode limits');
   assert.ok(hi.boundPrefillFrac > 0.9 && lo.boundDemandFrac > 0.9, `prefill-bound ${hi.boundPrefillFrac} / demand-bound ${lo.boundDemandFrac}`);

@@ -182,36 +182,36 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
   always equal in a closed loop, so throughput cannot show which side limits. Instead, every moment of the window is
   put in one of four states. Nothing changes between events, so before each event the simulator adds the gap since
   the previous one to the state the system was in; with several prefill replicas each replica counts its own state,
-  at 1/R of the gap, since prefill is per replica and the decode ring is shared. The state comes from two questions:
+  at 1/R of the gap, since prefill is per replica and the decode ring is shared. The state comes from three questions:
   * *Does prefill have work?* Its first stage is computing, or a request still has tokens not yet fed into it (not
     started, or started with chunks left). Stage 0 idle with work left (the in-flight chunk cap or the KV lanes hold
     it back) still counts as work: prefill is saturated further down. Only later stages busy does not.
-  * *Is decode holding things back?* Any of:
-    * **compute**: the ring is full, as many sessions decoding as it holds (decodeStages × decodeBatch) or more
-      (past full every session slows);
-    * **memory**: a request past prefill waits for a slot or pages (queue backpressure, parked on SSD), or prefill
-      has no work while a request waits for a slot before it can start (slot backpressure);
-    * **queue limit**: prefill has no work while a request waits for room in the decode queue (queue backpressure:
-      the requests decode has taken on are at `decodeQueueMax`). Not a memory shortage (it would park on SSD): the
-      cap that keeps the ring from being shared too widely.
+  * *Is decode at its limit?* The ring is full: as many sessions decoding as it holds (decodeStages × decodeBatch)
+    or more (past full every session slows). Or a request past prefill waits for a slot or pages (queue
+    backpressure: parked on SSD).
+  * *Is a request waiting on decode?* Past prefill for a slot or pages (**memory**), or before prefill: for a slot
+    (slot backpressure: **memory**) or for room in the decode queue (queue backpressure, the requests decode has
+    taken on at `decodeQueueMax`: **queue full**; not a memory shortage, since it would park on SSD). A wait before
+    prefill counts only while prefill has no work: admitting the request would only move it into the prefill queue.
 
-    A request waiting before prefill while prefill is busy does not count: admitting it would only move it into the
-    prefill queue. When several causes hold at once, decode-bound time goes to the first in this order.
-
-  | | decode not holding back | decode holding back |
+  | | nothing waiting on decode | a request waiting on decode |
   |---|---|---|
-  | **prefill has work** | prefill-bound | balanced |
-  | **prefill has no work** | demand-bound | decode-bound |
+  | **prefill has work, decode not at its limit** | prefill-bound | balanced |
+  | **prefill has work, decode at its limit** | balanced | balanced |
+  | **prefill has no work** | demand-bound | decode-bound (memory, else queue full) |
 
+  Prefill idle with the ring full and nothing waiting is demand-bound: nothing is held back. How busy decode is
+  shows separately as decode utilization (`ringFullFrac`, "Decode Stats" tile: the share of the time the ring was
+  full); with unlimited slots on a small ring nobody ever waits, and decode utilization is what shows the limit.
   Runs report the shares `boundPrefillFrac`, `boundDecodeFrac`, `boundBalancedFrac` and `boundDemandFrac` (they sum
-  to 1), and decode-bound time by cause: `boundDecodeComputeFrac`, `boundDecodeMemoryFrac` and `boundDecodeQueueFrac`
-  (summing to `boundDecodeFrac`). The tile shows the four shares, decode-bound split by cause, with no single verdict: a run alternates
-  between states (agentic traffic is bursty), so naming the largest one would hide the others.
+  to 1), and decode-bound time by cause, `boundDecodeMemoryFrac` and `boundDecodeQueueFrac` (summing to
+  `boundDecodeFrac`). The tile shows the four shares, decode-bound split by cause, with no single verdict: a run
+  alternates between states (agentic traffic is bursty), so naming the largest one would hide the others.
   * *Which side to grow:* compare prefill-bound against decode-bound time. Balanced time has both sides at their
     limit and demand-bound time neither, so they say nothing about it. Today's 4-galaxy config is balanced 46% of the
-    time but decode-bound 37% against prefill-bound 16%, and decode batching adds $58/h there while 8 prefill galaxies add no
+    time but decode-bound 35% against prefill-bound 16%, and decode batching adds $58/h there while 8 prefill galaxies add no
     goodput. In the backpressure sweep and the decode layout A/B, the next decode batching step added $27–59/h in every
-    cell where decode-bound time is the larger. Where prefill-bound time is the larger it added $3–15/h, except at 4
+    cell where decode-bound time is the larger. Where prefill-bound time is the larger it added $0–15/h, except at 4
     galaxies with unbatched prefill and decode batch 2 (prefill-bound 30% vs decode-bound 15%): +$32/h, though that
     step also doubles the decode queue limit (200 to 400), which admits more concurrency.
 * **Decode speed per session.** Runs report `tsuP10` and `tsuP50`: the 10th percentile and median of each session's
@@ -493,14 +493,14 @@ per cell, prefill batched / unbatched:
 | queue backpressure, paged, decode batch 4 | $191 / $178 | $143 / $143 |
 | queue backpressure, paged, decode batch 8 | **$218** / $181 | $174 / $174 |
 
-* Unbatched decode limits every cell: the ring is full for most of the window. At 8 galaxies the cells are
-  decode-bound (compute) 51–66% of the time and balanced (prefill had work as well) 30–48%; at 4 galaxies balanced
-  46–68% and decode-bound 28–37%, all compute. Prefill batching changes nothing (±$4/h), and 4 prefill galaxies net
+* Unbatched decode limits every cell: decode utilization (ring full) 80–99%. At 8 galaxies the cells are
+  decode-bound 48–62% of the time (waiting for slots with fixed slots, for room in the decode queue with paging) and
+  balanced (prefill had work as well) 30–48%; at 4 galaxies balanced 46–68% and decode-bound 26–35%. Prefill batching changes nothing (±$4/h), and 4 prefill galaxies net
   about $45/h more than 8.
 * Prefill batching only pays once decode batching relieves decode, and only at 4 galaxies: with decode batch 4 / 8,
   unbatched prefill is prefill-bound 58% / 98% of the time (busiest stage 97% busy), and batched prefill adds $13 / $37
-  per hour. At 8 galaxies every cell is still decode-bound or balanced (decode-bound 38–66% of the time, mostly
-  compute) and prefill stays under 65% busy, so batching it is worth nothing.
+  per hour. At 8 galaxies decode-bound time stays 38–59% through decode batch 4 (the decode queue full) and prefill
+  stays under 65% busy, so batching it is worth nothing.
 * The best net, $218/h (4 gx, batched prefill, decode batch 8), runs decode at p10 23 tokens/s/u.
 
 * **Earlier run (75 slots): the hybrid layouts.** With 62 global lanes and a 13.6M-token pool

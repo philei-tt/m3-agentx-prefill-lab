@@ -69,13 +69,13 @@ async function main() {
       console.log(`  ${label}`);
       console.log(`    prefill ${prefillTxt(best.pf)} | goodput ${k(best.goodput)} @C=${p.conc} | p50/p90 TTFT ${p.ttftP50.toFixed(1)}/${p.ttftP90.toFixed(1)} s | ${Math.round(3600 * p.reqPerS).toLocaleString('en-US')} req/h`);
       console.log(`    revenue ${usd(e.revenue)}/h = input ${usd(e.inUsd)} + output ${usd(e.outUsd)} (${Math.round(p.outDecTps).toLocaleString('en-US')} tok/s decoded) | cost ${usd(e.cost)} | net ${usd(e.margin)}/h`);
-      console.log(`    decode: held ${Math.round(p.decSlotsMean)} / max ${p.decSlotsMax}, decoding ${Math.round(p.decodingMean)} at ${Math.round(p.decodeTpsMean)} tokens/s/u (p10 ${Math.round(p.tsuP10)}, p50 ${Math.round(p.tsuP50)}), ring full ${pct(p.ringFullFrac)}`
+      console.log(`    decode: held ${Math.round(p.decSlotsMean)} / max ${p.decSlotsMax}, decoding ${Math.round(p.decodingMean)} at ${Math.round(p.decodeTpsMean)} tokens/s/u (p10 ${Math.round(p.tsuP10)}, p50 ${Math.round(p.tsuP50)}), decode utilization (ring full) ${pct(p.ringFullFrac)}`
         + ` | ${pct(p.decWaitPerS / p.reqPerS)} waited ${p.decWaitMean.toFixed(1)} s before prefill`
         + (p.decParkPerS > 0 ? ` | ${pct(p.decParkPerS / p.reqPerS)} parked on SSD (${Math.round(p.decParkedMean)} on average), decode SSD ${pct(p.decSsdUtil)} busy` : '')
         + (p.decSlotWaitFrac > 0 ? ` | ${pct(p.decSlotWaitFrac)} waited for slots / pages after prefill, first token +${(1e3 * p.decStartDelayMean).toFixed(0)} ms` : '')
         + (Number.isFinite(p.decHitRate) ? ` | decode-side hit ${(100 * p.decHitRate).toFixed(1)}%` : '')
         + (Number.isFinite(p.decPoolTokMean) ? ` | pool in use ${(p.decPoolTokMean / 1e6).toFixed(1)}M of ${(best.plan.decPoolTok / 1e6).toFixed(1)}M` : ''));
-      console.log(`    balance: prefill-bound ${pct(p.boundPrefillFrac)}, decode-bound ${pct(p.boundDecodeFrac)} (compute ${pct(p.boundDecodeComputeFrac)}, memory ${pct(p.boundDecodeMemoryFrac)}, queue limit ${pct(p.boundDecodeQueueFrac)}), balanced ${pct(p.boundBalancedFrac)}, demand-bound ${pct(p.boundDemandFrac)} | prefill busiest stage ${pct(p.maxUtil)}`);
+      console.log(`    balance: prefill-bound ${pct(p.boundPrefillFrac)}, decode-bound ${pct(p.boundDecodeFrac)} (memory ${pct(p.boundDecodeMemoryFrac)}, queue full ${pct(p.boundDecodeQueueFrac)}), balanced ${pct(p.boundBalancedFrac)}, demand-bound ${pct(p.boundDemandFrac)} | prefill busiest stage ${pct(p.maxUtil)}`);
       console.log(`    every prefill config (net $/h at goodput): ${all.map((r) => `${prefillTxt(r.pf)} ${r.econ ? usd(r.econ.margin) : '–'}`).join('; ')}`);
     }
   }

@@ -1145,7 +1145,7 @@
       outTok: 0, decArea: 0, decingArea: 0, decMax: 0, decWaits: 0, decWait: 0, decWaited: 0, decTokArea: 0, ringFull: 0, pfSlot: 0, pfNone: 0, sendBlock: 0,
       decCtxTok: 0, decHitTok: 0, decHostTok: 0, decSsdTok: 0, dH2dBusy: 0, dD2hBusy: 0, dSsdBusy: 0, decPoolArea: 0,
       decStarts: 0, decStartDelay: 0, decSlotWaited: 0, parked: 0, parkArea: 0, tsu: [],
-      bPrefill: 0, bDecode: 0, bDecodeCompute: 0, bDecodeMemory: 0, bDecodeQueue: 0, bBalanced: 0, bDemand: 0 };
+      bPrefill: 0, bDecode: 0, bDecodeMemory: 0, bDecodeQueue: 0, bBalanced: 0, bDemand: 0 };
     const decWin = () => warmDone && now >= t0 && now <= tEnd;
     // ---------- decode KV (DEFAULTS.decodeCache): reserved when a request is admitted to prefill (TTFT clock already
     // running), released when its decode ends, then cached: released slots keep their stream's KV, released pages
@@ -1922,24 +1922,24 @@
       // (pfStarved* in the results), and the prefill / decode balance state (bound* in the results)
       if (warmDone && t > now) {
         const a = Math.max(now, t0), b = Math.min(t, tEnd);
-        // decode holds things back: the ring is full (compute; every position taken, and past full every session
-        // slows), or a request past prefill waits for a slot / pages (memory); a request waiting for decode before
-        // prefill counts only while prefill has no work (below): for a slot (slot backpressure: memory), or for
-        // room in the decode queue (queue backpressure, the only reason it waits there: queue limit)
-        const decCompute = cfg.decodeStages > 0 && decoding >= decCap, decMemAfter = slotQ.length > 0;
+        // decode at its limit: the ring is full (every position taken; past full every session slows), or a
+        // request waits on decode: past prefill for a slot / pages (memory), or before prefill, which counts only
+        // while prefill has no work (below; admitting it would only move it into the prefill queue), for a slot
+        // (slot backpressure: memory) or for room in the decode queue (queue backpressure: queue full)
+        const ringFull = cfg.decodeStages > 0 && decoding >= decCap, decMemAfter = slotQ.length > 0;
         if (b > a) for (const rp of reps) {
           // prefill has work: stage 0 is computing, or a request still has tokens not yet fed into it (not started,
           // or started with chunks left); stage 0 idle with work left means a later stage or the lanes hold it back
           const work = rp.free[0] > now + 1e-12 || rp.queue.length > 0 || rp.active.some((q) => q.rem > 0);
           if (!work) { if (decQ.length) st.pfSlot += b - a; else st.pfNone += b - a; }
-          const dec = decCompute || decMemAfter || (!work && decQ.length > 0);
-          if (work && dec) st.bBalanced += b - a;
-          else if (work) st.bPrefill += b - a;
-          else if (dec) { // by cause, in this order: compute, memory, queue limit
+          // prefill has work: balanced when decode is at its limit too (both fully used), else prefill-bound.
+          // Prefill idle: decode-bound when a request waits on decode (memory first, then queue full), else
+          // demand-bound (a full ring with nothing waiting holds nothing back; decode utilization shows it)
+          if (work) { if (ringFull || decMemAfter) st.bBalanced += b - a; else st.bPrefill += b - a; }
+          else if (decMemAfter || decQ.length > 0) {
             st.bDecode += b - a;
-            if (decCompute) st.bDecodeCompute += b - a; else if (decMemAfter || !decQueue) st.bDecodeMemory += b - a; else st.bDecodeQueue += b - a;
-          }
-          else st.bDemand += b - a;
+            if (decMemAfter || !decQueue) st.bDecodeMemory += b - a; else st.bDecodeQueue += b - a;
+          } else st.bDemand += b - a;
         }
       }
       now = Math.max(now, t);
@@ -1993,14 +1993,13 @@
       // speed follows the context) and the
       // share of the window it carried decodeStages or more sessions
       decodeTpsMean: st.decingArea > 0 ? st.decTokArea / st.decingArea : cfg.decodeTps, ringFullFrac: cfg.decodeStages > 0 ? st.ringFull / D : 0,
-      // prefill / decode balance: share of the window (per prefill replica) in each state, by two questions: does
-      // prefill have work, and does decode hold things back (ring full, a request past prefill waiting for
-      // a slot / pages, or prefill idle while a request waits for decode KV)? prefill-bound = work, decode not
-      // holding back; decode-bound = no work, decode holding back, split by cause (compute: the ring full; memory:
-      // waiting for slots / pages; queue: the decode queue at its limit; the three sum to boundDecodeFrac);
-      // balanced = both; demand-bound = neither. The four sum to 1.
+      // prefill / decode balance: share of the window (per prefill replica) in each state. prefill-bound = prefill
+      // has work, decode not at its limit; balanced = prefill has work and decode at its limit (ring full, or a
+      // request past prefill waiting for a slot / pages); decode-bound = prefill idle while a request waits on decode,
+      // by cause: memory (slots / pages) or queue (the decode queue full), summing to boundDecodeFrac; demand-bound =
+      // prefill idle, nothing waiting on decode. The four sum to 1.
       boundPrefillFrac: st.bPrefill / (D * reps.length), boundDecodeFrac: st.bDecode / (D * reps.length),
-      boundDecodeComputeFrac: st.bDecodeCompute / (D * reps.length), boundDecodeMemoryFrac: st.bDecodeMemory / (D * reps.length),
+      boundDecodeMemoryFrac: st.bDecodeMemory / (D * reps.length),
       boundDecodeQueueFrac: st.bDecodeQueue / (D * reps.length),
       boundBalancedFrac: st.bBalanced / (D * reps.length),
       boundDemandFrac: st.bDemand / (D * reps.length),
