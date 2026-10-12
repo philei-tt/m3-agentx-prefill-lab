@@ -1145,7 +1145,7 @@
       ttft: [], chunks: 0, segs: 0, laneWait: 0, reqs: 0, primers: 0, warmupS: 0, idleWarps: 0, primerTok: 0,
       gated: 0, gateWait: 0, legacyStarts: 0, skippedTraces: 0, rrSegs: 0, rrReuse: 0, rrCopyIn: 0,
       outTok: 0, decArea: 0, decingArea: 0, decMax: 0, decWaits: 0, decWait: 0, decWaited: 0, decTokArea: 0, ringFull: 0, pfSlot: 0, pfNone: 0, sendBlock: 0,
-      decCtxTok: 0, decHitTok: 0, decHostTok: 0, decSsdTok: 0, dH2dBusy: 0, dD2hBusy: 0, dSsdBusy: 0, decPoolArea: 0,
+      decCtxTok: 0, decHitTok: 0, decHostTok: 0, decSsdTok: 0, dH2dBusy: 0, dD2hBusy: 0, dSsdBusy: 0, decPoolArea: 0, decPoolMax: 0,
       decStarts: 0, decStartDelay: 0, decSlotWaited: 0, parked: 0, parkArea: 0, tsu: [],
       bPrefill: 0, bDecode: 0, bDecodeMemory: 0, bDecodeQueue: 0, bBalanced: 0, bDemand: 0 };
     const decWin = () => warmDone && now >= t0 && now <= tEnd;
@@ -1191,7 +1191,7 @@
         if (b > a) {
           st.decArea += decHeld * (b - a); st.decingArea += decoding * (b - a); st.decTokArea += decSpeedSum * decShare() * (b - a);
           if (cfg.decodeStages > 0 && decoding >= decCap) st.ringFull += b - a;
-          if (decPool) st.decPoolArea += (decPool.pinnedB + decResvB) * B * (b - a);
+          if (decPool) { const u = (decPool.pinnedB + decResvB) * B; st.decPoolArea += u * (b - a); if (u > st.decPoolMax) st.decPoolMax = u; }
           st.parkArea += parkedN * (b - a);
         }
       }
@@ -2009,12 +2009,12 @@
       outDecTps: st.decTokArea / D,
       // decode KV (decodeCache): share of the context already cached on the decode side at admission (on device or read
       // back from its host DRAM / SSD), so not migrated from prefill; tokens migrated per second (not modelled as a
-      // cost); read-backs and the decode galaxies' link shares; pool tokens pinned or reserved by sessions (mean);
+      // cost); read-backs and the decode galaxies' link shares; pool tokens pinned or reserved by sessions (mean and peak);
       // mean time from prefill end to the first token, and the share of requests that waited for a slot after prefill
       decHitRate: st.decCtxTok ? st.decHitTok / st.decCtxTok : NaN, migTps: (st.decCtxTok - st.decHitTok) / D,
       decHostReadTps: st.decHostTok / D, decSsdReadTps: st.decSsdTok / D,
       decPcieH2DUtil: st.dH2dBusy / D, decPcieD2HUtil: st.dD2hBusy / D, decSsdUtil: st.dSsdBusy / D,
-      decPoolTokMean: decPool ? st.decPoolArea / D : NaN,
+      decPoolTokMean: decPool ? st.decPoolArea / D : NaN, decPoolTokMax: decPool ? st.decPoolMax : NaN,
       decStartDelayMean: st.decStarts ? st.decStartDelay / st.decStarts : 0, decSlotWaitFrac: st.decStarts ? st.decSlotWaited / st.decStarts : 0,
       // decode speed each session got (output tokens / its decode time, tokens/s/u): 10th percentile and median
       tsuP10: tsuPct(0.1), tsuP50: tsuPct(0.5),

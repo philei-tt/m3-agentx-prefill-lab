@@ -193,6 +193,9 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   const small = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 2 }, pq, cfg));
   assert.ok(small.decWaitPerS === 0 && small.decParkPerS > 0 && small.decSlotWaitFrac > 0 && small.decPoolTokMean <= 2 * SIM.M3.maxCtx && small.reqPerS < u.reqPerS,
     `paging 2M: parked ${small.decParkPerS} pool ${small.decPoolTokMean}`);
+  // peak use: at least the mean, never above the memory, and full when requests park
+  assert.ok(small.decPoolTokMax >= small.decPoolTokMean && small.decPoolTokMax <= 2 * SIM.M3.maxCtx && small.decPoolTokMax > 0.9 * 2 * SIM.M3.maxCtx,
+    `paging 2M: peak ${small.decPoolTokMax}`);
   const lim = SIM.simulate(TR, cal, Object.assign({}, pq, cfg, { decodeSlots: 1000, decodeQueueMax: 12 }));
   assert.ok(lim.decSlotsMax + 0 <= 12 && lim.decSlotsMean + lim.decParkedMean <= 12 + 1e-9 && lim.decWaitPerS > 0 && lim.decodingMean <= 12, `paging queue 12: held ${lim.decSlotsMax}`);
   assert.ok(SIM.makePlan(Object.assign({}, cfg, { decodeCache: 'hybrid', decodeSlots: 75 }), cal).errors.some((e) => e.includes('decodeCache')));
