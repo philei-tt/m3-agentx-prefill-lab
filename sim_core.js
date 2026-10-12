@@ -58,16 +58,7 @@
   // since #4703) hold 68 B/token/chip; the embedding and LM-head stages hold none.
   const DEC_DRAM = 8 * 4080 * 2 ** 20;
   const DEC_KVB_CHIP = 2 * 128 * BF8 / 2 + 128 * BF8 / 2;
-  // DRAM weights per chip of a decode stage holding k layers: per layer the routed experts, Wo, router and norms;
-  // once per stage the RoPE table
-  const decodeWeightsChip = (k = 1) => k * (M3.Ex * 3 * M3.E * (M3.I / 2) * BF4 + 1024 * M3.E * BF8 + 1.5 * 2 ** 20) + M3.maxCtx * 64 * BF16;
-  // The full decode ring: one stage per layer plus the embedding and LM-head stages (62), 4 stages (4x2 meshes of
-  // 8 chips) per 32-chip galaxy, so 16 galaxies. On fewer stages the layers are spread evenly over the stages left
-  // after the embedding and LM-head ones: k = ceil(60 / (stages - 2)) layers on the fullest stage, which sets the
-  // memory. A token still passes every layer, so the time per trip (decode speed per user) is unchanged, while the
-  // ring carries one session (x decode batch) per stage.
-  const DEC_RING_FULL = M3.L + 2, DEC_STAGES_PER_GALAXY = 4;
-  const decodeLayersPerStage = (stages) => (stages > 0 && stages < DEC_RING_FULL ? Math.ceil(M3.L / Math.max(1, stages - 2)) : 1);
+  const decodeWeightsChip = () => M3.Ex * 3 * M3.E * (M3.I / 2) * BF4 + M3.maxCtx * 64 * BF16 + 1024 * M3.E * BF8 + 1.5 * 2 ** 20;
 
   const OPS_MOE = ['norm_ag', 'qkv', 'idx_branch', 'misc', 'o_proj', 'attn_rs', 'shared', 'router', 'dispatch', 'experts', 'combine', 'moe_reduce'];
   const OPS_MSA_SEG = ['ag_kv', 'ag_idx', 'indexer', 'sparse', 'kv_a2a'];
@@ -771,12 +762,11 @@
     const ssdTok = offload ? tokOf(cfg.ssdTBPerGalaxy * 1e12) : 0;
     // decode side (see DEFAULTS.decodeCache): memory, pool and the decode galaxies' offload tiers
     const dc = cfg.decodeCache, autoDec = cfg.decodeSlots === 'auto';
-    const decK = decodeLayersPerStage(cfg.decodeStages), decKvb = decK * DEC_KVB_CHIP;
-    const decFreeB = DEC_DRAM - cfg.reserveGB * GB - decodeWeightsChip(decK);
-    const decSlotsModel = Math.max(0, Math.floor(decFreeB / (M3.maxCtx * decKvb)));
+    const decFreeB = DEC_DRAM - cfg.reserveGB * GB - decodeWeightsChip();
+    const decSlotsModel = Math.max(0, Math.floor(decFreeB / (M3.maxCtx * DEC_KVB_CHIP)));
     const decSlots = autoDec ? (cfg.decodeStages > 0 ? decSlotsModel : 0) : cfg.decodeSlots;
     // memory in tokens: modelled = every free byte (pages) / whole slots; a set slot count = that many 1M slots
-    const decMem = !(decSlots > 0) ? Infinity : autoDec && dc === 'paging' ? Math.floor(decFreeB / decKvb) : decSlots * M3.maxCtx;
+    const decMem = !(decSlots > 0) ? Infinity : autoDec && dc === 'paging' ? Math.floor(decFreeB / DEC_KVB_CHIP) : decSlots * M3.maxCtx;
     const decPoolTok = dc === 'slots' ? 0 : decMem;
     if (!(autoDec || cfg.decodeSlots >= 0)) errors.push(`decodeSlots must be 'auto' or a number >= 0, got ${cfg.decodeSlots}`);
     if (!(cfg.decodeBatch >= 1) || cfg.decodeBatch !== Math.floor(cfg.decodeBatch)) errors.push('decode batch must be a whole number >= 1');
@@ -790,9 +780,6 @@
     if (cfg.decodeBackpressure === 'slot' && dc !== 'slots') errors.push('slot backpressure needs fixed decode slots; paged decode KV uses queue backpressure');
     if (cfg.decodeBackpressure === 'queue' && decMem !== Infinity && !(cfg.decodeHostTier && cfg.ssdTBPerGalaxy > 0)) errors.push('queue backpressure parks KV on the decode SSDs when slots / pages are full: it needs the decode offload tiers with an SSD');
     if (!(cfg.decodeQueueMax >= 0)) errors.push('decodeQueueMax must be >= 0 (0 = no limit)');
-    // modelled decode memory: the ring is real hardware, 8 chips per stage on the decode galaxies
-    if (autoDec && cfg.decodeStages > DEC_STAGES_PER_GALAXY * cfg.decodeGalaxies) errors.push(`decode ring needs ${cfg.decodeStages} stages x 8 chips, have ${cfg.decodeGalaxies} decode galaxies (${DEC_STAGES_PER_GALAXY * cfg.decodeGalaxies} stages)`);
-    if (autoDec && cfg.decodeStages > 0 && cfg.decodeStages < 3) errors.push('the decode ring needs at least 3 stages (embedding, layers, LM head)');
     const decOffload = cfg.decodeHostTier && decMem !== Infinity;
     // decode galaxies' host DRAM left for KV: the prefill reserves, with this galaxy's share of the whole model's weights
     const hb = hostBudget;
@@ -814,7 +801,7 @@
       // in-flight chunks: round robin on static slots mirrors tt-d-gen's ChunkFifo, max(8, 4 x max_slots)
       maxInflight: cfg.maxInflight > 0 ? cfg.maxInflight : cfg.policy === 'rr' && cfg.cache === 'slots' ? Math.max(8, 4 * nSlots) : 2 * S + 4,
       // decode side: pool tokens, offload tiers (tokens) and links of the decode galaxies
-      decSlots, decSlotsModel, decMemTok: decMem, decLayersPerStage: decK, decPoolTok, decHostTok, decSsdTok, decHostKvGB,
+      decSlots, decSlotsModel, decMemTok: decMem, decPoolTok, decHostTok, decSsdTok, decHostKvGB,
       decPcieBps: cfg.pcieGBsPerGalaxy * GB * cfg.decodeGalaxies, decSsdRdBps: cfg.ssdReadGBsPerGalaxy * GB * cfg.decodeGalaxies, decSsdWrBps: cfg.ssdWriteGBsPerGalaxy * GB * cfg.decodeGalaxies,
       tokensPerSec: null,
     };
@@ -2166,6 +2153,6 @@
     return { revenue, inUsd: h.usd, outUsd: h.outUsd, cost: costUsd, prefillUsd, decodeUsd, margin: revenue - costUsd, marginFrac: (revenue - costUsd) / revenue };
   }
 
-  const API = { M3, HW, DEFAULTS, PRICE, COST, M3_DECODE_TSU, decodeSpeed, calibrate: calibrateAll, makePlan, splitLayers, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, economics, DEC_RING_FULL, DEC_STAGES_PER_GALAXY, decodeLayersPerStage, layerMs, roofTok, roofSeg, ownerWalk };
+  const API = { M3, HW, DEFAULTS, PRICE, COST, M3_DECODE_TSU, decodeSpeed, calibrate: calibrateAll, makePlan, splitLayers, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, economics, layerMs, roofTok, roofSeg, ownerWalk };
   if (typeof module !== 'undefined' && module.exports) module.exports = API; else root.M3SIM = API;
 })(typeof self !== 'undefined' ? self : this);

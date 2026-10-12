@@ -186,7 +186,7 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
 //      hits: a stream's next request finds its prefix in its old slot, the pool or the decode tiers.
 {
   const cfg = Object.assign({ cache: 'pool', chunk: 512, batch: true, budget: 8192 }, base, { concurrency: 128, decodeStages: 16 });
-  const u = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 1000 }, cfg)); // fixed slots with room to spare
+  const u = SIM.simulate(TR, cal, cfg);
   const pq = { decodeCache: 'paging', decodeBackpressure: 'queue', decodeHostTier: true, decodeQueueMax: 0 };
   const pg = SIM.simulate(TR, cal, Object.assign({ decodeSlots: 1000 }, pq, cfg));
   assert.ok(Math.abs(pg.usefulTps - u.usefulTps) < 1e-9 * u.usefulTps && pg.ttftP90 === u.ttftP90 && pg.decWaitPerS === 0 && pg.decHitRate > 0.5 && pg.decHitRate < 1, `paging ${pg.usefulTps} vs ${u.usefulTps}`);
@@ -233,13 +233,6 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   const a = pl({ decodeStages: 62 }), pg = pl({ decodeStages: 62, decodeCache: 'paging', decodeBackpressure: 'queue', decodeHostTier: true });
   assert.ok(a.decSlots === 145 && a.decMemTok === 145 * SIM.M3.maxCtx && pg.decMemTok > 145 * SIM.M3.maxCtx && pg.decMemTok < 146 * SIM.M3.maxCtx, `modelled ${a.decSlots}`);
   assert.ok(pl({}).decSlots === 0 && pl({}).decMemTok === Infinity && pl({ decodeStages: 62, decodeSlots: 40 }).decSlots === 40 && SIM.DEFAULTS.decodeSlots === 'auto');
-  // fewer decode galaxies: the ring is 4 stages per galaxy, the 60 layers spread over the stages between embedding
-  // and LM head; the fullest stage holds more weights and KV per token, so memory falls faster than the galaxies
-  const ring = (g) => pl({ decodeStages: Math.min(SIM.DEC_RING_FULL, SIM.DEC_STAGES_PER_GALAXY * g), decodeGalaxies: g });
-  const r8 = ring(8), r4 = ring(4);
-  assert.ok(SIM.DEC_RING_FULL === 62 && a.decLayersPerStage === 1 && r8.decLayersPerStage === 2 && r4.decLayersPerStage === 5 && r8.errors.length === 0 && r4.errors.length === 0, `layers ${r8.decLayersPerStage} / ${r4.decLayersPerStage}`);
-  assert.ok(r8.decSlots < a.decSlots / 2 && r4.decSlots < r8.decSlots / 2 && r4.decSlots > 0, `slots ${a.decSlots} / ${r8.decSlots} / ${r4.decSlots}`);
-  assert.ok(pl({ decodeStages: 62, decodeGalaxies: 8 }).errors.some((e) => e.startsWith('decode ring needs')) && !pl({ decodeStages: 62, decodeGalaxies: 8, decodeSlots: 100 }).errors.some((e) => e.startsWith('decode ring')));
   // fixed slots: 2 x 62 = 124 sessions fit in 145 slots, 3 x 62 = 186 do not
   assert.ok(pl({ decodeStages: 62, decodeBatch: 3 }).errors.some((e) => e.startsWith('decode out of memory')) && !pl({ decodeStages: 62, decodeBatch: 2 }).errors.some((e) => e.startsWith('decode')));
   assert.ok(pg.errors.length === 0 && !pl({ decodeStages: 62, decodeBatch: 4, decodeCache: 'paging', decodeBackpressure: 'queue', decodeHostTier: true }).errors.some((e) => e.startsWith('decode')));
