@@ -59,10 +59,9 @@ async function main() {
       if (!b) { console.log(`  ${label} | prefill ${pfName}: no point meets the SLO`); continue; }
       const p = b.at, e = b.econ;
       out.cells.push({ sk, label, pfName, budget: b.budget, goodput: b.goodput, at: p, econ: e });
-      const bv = SIM.balanceVerdict(p);
       console.log(`  ${label} | prefill ${pfName} (${b.budget}): net ${usd(e.margin)}/h (revenue ${usd(e.revenue)}) | goodput ${(b.goodput / 1e3).toFixed(1)}k @C=${p.conc}, ${(3.6 * p.reqPerS).toFixed(1)}k req/h, `
         + `output ${(p.outDecTps / 1e3).toFixed(1)}k tok/s | decode p10/p50 ${Math.round(p.tsuP10)}/${Math.round(p.tsuP50)} tok/s/u | prefill busy ${pct(p.maxUtil)}, `
-        + `waits on decode ${pct(p.pfStarvedSlotFrac)} | ${bv ? bv.state + (bv.cause ? ` (${bv.cause})` : '') : ''}: prefill-bound ${pct(p.boundPrefillFrac)}, `
+        + `waits on decode ${pct(p.pfStarvedSlotFrac)} | prefill-bound ${pct(p.boundPrefillFrac)}, `
         + `decode-bound ${pct(p.boundDecodeFrac)} (compute ${pct(p.boundDecodeComputeFrac)}), balanced ${pct(p.boundBalancedFrac)}, demand-bound ${pct(p.boundDemandFrac)}`);
     }
   }

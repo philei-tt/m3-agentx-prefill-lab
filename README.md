@@ -198,12 +198,11 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
 
   Runs report the shares `boundPrefillFrac`, `boundDecodeFrac`, `boundBalancedFrac` and `boundDemandFrac` (they sum
   to 1), and `boundDecodeComputeFrac`, the part of decode-bound time with the ring full (the rest is memory).
-  `balanceVerdict` (sim_core.js) picks the state with the largest share, with decode-bound marked compute or memory by
-  its larger part; the tile shows that verdict, one sentence on what its share means, and the time in each state.
-  * *Which side to grow* is a different question from the verdict: compare prefill-bound against decode-bound time.
-    Balanced time has both sides at their limit and demand-bound time neither, so they say nothing about it. Agentic
-    traffic is bursty, so a run alternates between states: today's 4-galaxy config is balanced 46% of the time but
-    decode-bound 37% against prefill-bound 16%, and decode batching adds $58/h there while 8 prefill galaxies add no
+  The tile shows the four shares, decode-bound split into memory and compute, with no single verdict: a run alternates
+  between states (agentic traffic is bursty), so naming the largest one would hide the others.
+  * *Which side to grow:* compare prefill-bound against decode-bound time. Balanced time has both sides at their
+    limit and demand-bound time neither, so they say nothing about it. Today's 4-galaxy config is balanced 46% of the
+    time but decode-bound 37% against prefill-bound 16%, and decode batching adds $58/h there while 8 prefill galaxies add no
     goodput. In the backpressure sweep and the decode layout A/B, the next decode batching step added $27–59/h in every
     cell where decode-bound time is the larger. Where prefill-bound time is the larger it added $3–15/h, except at 4
     galaxies with unbatched prefill and decode batch 2 (prefill-bound 30% vs decode-bound 15%): +$32/h, though that

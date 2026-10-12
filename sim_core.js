@@ -2145,17 +2145,6 @@
     return { revenue, inUsd: h.usd, outUsd: h.outUsd, cost: costUsd, prefillUsd, decodeUsd, margin: revenue - costUsd, marginFrac: (revenue - costUsd) / revenue };
   }
 
-  // Prefill / decode balance verdict of a result: the state that took the largest share of the window, and for
-  // decode-bound whether it was mostly compute (ring full) or memory (waiting for decode KV).
-  // -> { state: 'prefill-bound' | 'decode-bound' | 'balanced' | 'demand-bound', frac, cause: 'compute' | 'memory' | null }
-  function balanceVerdict(p) {
-    const s = [['prefill-bound', p.boundPrefillFrac], ['decode-bound', p.boundDecodeFrac], ['balanced', p.boundBalancedFrac], ['demand-bound', p.boundDemandFrac]];
-    if (!s.every(([, x]) => Number.isFinite(x))) return null;
-    const [state, frac] = s.reduce((x, y) => (y[1] > x[1] ? y : x));
-    const cause = state !== 'decode-bound' ? null : p.boundDecodeComputeFrac >= p.boundDecodeFrac - p.boundDecodeComputeFrac ? 'compute' : 'memory';
-    return { state, frac, cause };
-  }
-
-  const API = { M3, HW, DEFAULTS, PRICE, COST, M3_DECODE_TSU, decodeSpeed, calibrate: calibrateAll, makePlan, splitLayers, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, economics, balanceVerdict, layerMs, roofTok, roofSeg, ownerWalk };
+  const API = { M3, HW, DEFAULTS, PRICE, COST, M3_DECODE_TSU, decodeSpeed, calibrate: calibrateAll, makePlan, splitLayers, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, economics, layerMs, roofTok, roofSeg, ownerWalk };
   if (typeof module !== 'undefined' && module.exports) module.exports = API; else root.M3SIM = API;
 })(typeof self !== 'undefined' ? self : this);
