@@ -148,9 +148,32 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
     assert.ok(f.every((x) => x >= 0 && x <= 1) && f[0] + f[1] <= 1 + 1e-9, `starved ${f}`);
   }
   assert.ok(c.pfStarvedSlotFrac > 0 && n.pfStarvedSlotFrac === 0 && n.sendBlockFrac > 0, 'slot limits starve prefill');
-  // balance: an oversubscribed ring is ~always full, a huge one ~always empty (decode waiting on prefill); no ring = NaN
-  assert.ok(c.ringFillMean > 0.9 && c.ringFillMean <= 1 && c.decStarvedFrac < 0.1 && w.ringFillMean < 0.01 && w.decStarvedFrac > 0.99 && Number.isNaN(u.ringFillMean),
-    `ring fill ${c.ringFillMean} / ${w.ringFillMean}`);
+  // prefill / decode balance: every moment is one of four states, so the shares sum to 1; compute is part of decode
+  const nc = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeSlots: 0, decodeStages: 4 }));
+  const hi = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeSlots: 0, concurrency: 256 }));
+  const lo = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeSlots: 0, concurrency: 2 }));
+  const qb = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeStages: 8, decodeSlots: 8, decodeBackpressure: 'queue', decodeHostTier: true, ssdTBPerGalaxy: 4 }));
+  const bv = (r) => { const v = SIM.balanceVerdict(r); return v.state + (v.cause ? ` (${v.cause})` : ''); };
+  for (const r of [u, c, w, n, nc, hi, lo, qb]) {
+    const f = [r.boundPrefillFrac, r.boundDecodeFrac, r.boundBalancedFrac, r.boundDemandFrac];
+    assert.ok(!r.error && f.every((x) => x >= 0 && x <= 1) && Math.abs(f[0] + f[1] + f[2] + f[3] - 1) < 1e-9 && r.boundDecodeComputeFrac <= r.boundDecodeFrac + 1e-12, `bound shares ${f}`);
+  }
+  // slot limit, no ring: prefill idles waiting for slots (memory; exactly the slot-starved time); a huge ring adds
+  // nothing; an oversubscribed one is compute
+  assert.ok(bv(u) === 'decode-bound (memory)' && Math.abs(u.boundDecodeFrac - u.pfStarvedSlotFrac) < 1e-9 && w.boundDecodeComputeFrac === 0 && bv(c) === 'decode-bound (compute)', `${bv(u)} / ${bv(c)}`);
+  // unlimited slots on a small ring: nobody waits for a slot, yet decode is the limit (the ring slows every session)
+  assert.ok(nc.pfStarvedSlotFrac === 0 && bv(nc) === 'decode-bound (compute)', `small ring, no slot limit: ${bv(nc)}`);
+  // queue backpressure: requests past prefill waiting for a slot count as decode memory, though prefill never waits
+  assert.ok(qb.pfStarvedSlotFrac === 0 && qb.decSlotWaitFrac > 0 && bv(qb) === 'decode-bound (memory)', `queue backpressure: ${bv(qb)}`);
+  // no decode limits: decode never holds anything back; prefill-bound with many lanes, demand-bound with few
+  assert.ok(n.boundDecodeFrac === 0 && n.boundBalancedFrac === 0 && Math.abs(n.boundDemandFrac - n.pfStarvedIdleFrac) < 1e-9, 'no decode limits');
+  assert.ok(bv(hi) === 'prefill-bound' && bv(lo) === 'demand-bound', `${bv(hi)} / ${bv(lo)}`);
+  // the verdict: the largest share; decode split by its larger cause; null without the shares
+  const fr = (p, d, dc, b, m) => ({ boundPrefillFrac: p, boundDecodeFrac: d, boundDecodeComputeFrac: dc, boundBalancedFrac: b, boundDemandFrac: m });
+  assert.deepStrictEqual(SIM.balanceVerdict(fr(0.4, 0.35, 0.1, 0.15, 0.1)), { state: 'prefill-bound', frac: 0.4, cause: null });
+  assert.deepStrictEqual(SIM.balanceVerdict(fr(0.1, 0.5, 0.3, 0.3, 0.1)), { state: 'decode-bound', frac: 0.5, cause: 'compute' });
+  assert.deepStrictEqual(SIM.balanceVerdict(fr(0.1, 0.5, 0.2, 0.3, 0.1)), { state: 'decode-bound', frac: 0.5, cause: 'memory' });
+  assert.ok(SIM.balanceVerdict(fr(0.2, 0.2, 0, 0.5, 0.1)).state === 'balanced' && SIM.balanceVerdict({}) === null);
 }
 
 // 10d. decode KV layouts (decodeCache). Paged decode (queue backpressure) with room to spare changes nothing; with

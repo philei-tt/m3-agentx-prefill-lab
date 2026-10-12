@@ -1144,7 +1144,8 @@
       gated: 0, gateWait: 0, legacyStarts: 0, skippedTraces: 0, rrSegs: 0, rrReuse: 0, rrCopyIn: 0,
       outTok: 0, decArea: 0, decingArea: 0, decMax: 0, decWaits: 0, decWait: 0, decWaited: 0, decTokArea: 0, ringFull: 0, pfSlot: 0, pfNone: 0, sendBlock: 0,
       decCtxTok: 0, decHitTok: 0, decHostTok: 0, decSsdTok: 0, dH2dBusy: 0, dD2hBusy: 0, dSsdBusy: 0, decPoolArea: 0,
-      decStarts: 0, decStartDelay: 0, decSlotWaited: 0, parked: 0, parkArea: 0, tsu: [], ringFillArea: 0, decStarved: 0 };
+      decStarts: 0, decStartDelay: 0, decSlotWaited: 0, parked: 0, parkArea: 0, tsu: [],
+      bPrefill: 0, bDecode: 0, bDecodeCompute: 0, bBalanced: 0, bDemand: 0 };
     const decWin = () => warmDone && now >= t0 && now <= tEnd;
     // ---------- decode KV (DEFAULTS.decodeCache): reserved when a request is admitted to prefill (TTFT clock already
     // running), released when its decode ends, then cached: released slots keep their stream's KV, released pages
@@ -1188,9 +1189,6 @@
         if (b > a) {
           st.decArea += decHeld * (b - a); st.decingArea += decoding * (b - a); st.decTokArea += decSpeedSum * decShare() * (b - a);
           if (cfg.decodeStages > 0 && decoding >= decCap) st.ringFull += b - a;
-          // balance: how full the ring is on average, and how long it had free positions with no session waiting
-          // for decode (past prefill without slots / pages)
-          if (cfg.decodeStages > 0) { st.ringFillArea += Math.min(1, decoding / decCap) * (b - a); if (decoding < decCap && !slotQ.length) st.decStarved += b - a; }
           if (decPool) st.decPoolArea += (decPool.pinnedB + decResvB) * B * (b - a);
           st.parkArea += parkedN * (b - a);
         }
@@ -1920,11 +1918,24 @@
       if (warmDone && inflightReqs === 0 && t > now + cfg.idleCap) { ev.shiftAll(t - now - cfg.idleCap); st.idleWarps++; t = ev.peekT(); }
       if (t > tEnd) break;
       if (!warmDone && t > cfg.maxWarmup) { st.warmupTimeout = true; break; }
-      if (warmDone && t > now) { // why stage 0 has nothing to issue in [now, t), see pfStarved* in the results
+      // state over [now, t) (nothing changes between events), per prefill replica: why stage 0 has nothing to issue
+      // (pfStarved* in the results), and the prefill / decode balance state (bound* in the results)
+      if (warmDone && t > now) {
         const a = Math.max(now, t0), b = Math.min(t, tEnd);
+        // decode holds things back: the ring is oversubscribed (compute; every session slowed), or a request past
+        // prefill waits for a slot / pages (memory); a request waiting for decode KV before prefill counts only
+        // while prefill has no work (below)
+        const decCompute = cfg.decodeStages > 0 && decoding > decCap, decMemAfter = slotQ.length > 0;
         if (b > a) for (const rp of reps) {
-          if (rp.free[0] > now + 1e-12 || rp.queue.length || rp.active.some((q) => q.rem > 0)) continue; // busy or has work
-          if (decQ.length) st.pfSlot += b - a; else st.pfNone += b - a;
+          // prefill has work: stage 0 is computing, or a request still has tokens not yet fed into it (not started,
+          // or started with chunks left); stage 0 idle with work left means a later stage or the lanes hold it back
+          const work = rp.free[0] > now + 1e-12 || rp.queue.length > 0 || rp.active.some((q) => q.rem > 0);
+          if (!work) { if (decQ.length) st.pfSlot += b - a; else st.pfNone += b - a; }
+          const dec = decCompute || decMemAfter || (!work && decQ.length > 0);
+          if (work && dec) st.bBalanced += b - a;
+          else if (work) st.bPrefill += b - a;
+          else if (dec) { st.bDecode += b - a; if (decCompute) st.bDecodeCompute += b - a; }
+          else st.bDemand += b - a;
         }
       }
       now = Math.max(now, t);
@@ -1978,10 +1989,14 @@
       // speed follows the context) and the
       // share of the window it carried decodeStages or more sessions
       decodeTpsMean: st.decingArea > 0 ? st.decTokArea / st.decingArea : cfg.decodeTps, ringFullFrac: cfg.decodeStages > 0 ? st.ringFull / D : 0,
-      // prefill / decode balance: the ring's mean fill (sessions decoding / its capacity, at most 1) and the share of the
-      // window it had free positions with nothing waiting for decode (NaN without a ring); with pfStarvedSlotFrac
-      // (prefill idle because requests wait for decode KV) and maxUtil (prefill's busiest stage)
-      ringFillMean: cfg.decodeStages > 0 ? st.ringFillArea / D : NaN, decStarvedFrac: cfg.decodeStages > 0 ? st.decStarved / D : NaN,
+      // prefill / decode balance: share of the window (per prefill replica) in each state, by two questions: does
+      // prefill have work, and does decode hold things back (ring oversubscribed, a request past prefill waiting for
+      // a slot / pages, or prefill idle while a request waits for decode KV)? prefill-bound = work, decode not
+      // holding back; decode-bound = no work, decode holding back (boundDecodeComputeFrac: of it, the ring
+      // oversubscribed; the rest is memory); balanced = both; demand-bound = neither. The four sum to 1.
+      boundPrefillFrac: st.bPrefill / (D * reps.length), boundDecodeFrac: st.bDecode / (D * reps.length),
+      boundDecodeComputeFrac: st.bDecodeCompute / (D * reps.length), boundBalancedFrac: st.bBalanced / (D * reps.length),
+      boundDemandFrac: st.bDemand / (D * reps.length),
       // output tokens decoded per second in the window (what output revenue bills; outTps counts them at prefill end)
       outDecTps: st.decTokArea / D,
       // decode KV (decodeCache): share of the context already cached on the decode side at admission (on device or read
@@ -2130,6 +2145,17 @@
     return { revenue, inUsd: h.usd, outUsd: h.outUsd, cost: costUsd, prefillUsd, decodeUsd, margin: revenue - costUsd, marginFrac: (revenue - costUsd) / revenue };
   }
 
-  const API = { M3, HW, DEFAULTS, PRICE, COST, M3_DECODE_TSU, decodeSpeed, calibrate: calibrateAll, makePlan, splitLayers, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, economics, layerMs, roofTok, roofSeg, ownerWalk };
+  // Prefill / decode balance verdict of a result: the state that took the largest share of the window, and for
+  // decode-bound whether it was mostly compute (ring oversubscribed) or memory (waiting for decode KV).
+  // -> { state: 'prefill-bound' | 'decode-bound' | 'balanced' | 'demand-bound', frac, cause: 'compute' | 'memory' | null }
+  function balanceVerdict(p) {
+    const s = [['prefill-bound', p.boundPrefillFrac], ['decode-bound', p.boundDecodeFrac], ['balanced', p.boundBalancedFrac], ['demand-bound', p.boundDemandFrac]];
+    if (!s.every(([, x]) => Number.isFinite(x))) return null;
+    const [state, frac] = s.reduce((x, y) => (y[1] > x[1] ? y : x));
+    const cause = state !== 'decode-bound' ? null : p.boundDecodeComputeFrac >= p.boundDecodeFrac - p.boundDecodeComputeFrac ? 'compute' : 'memory';
+    return { state, frac, cause };
+  }
+
+  const API = { M3, HW, DEFAULTS, PRICE, COST, M3_DECODE_TSU, decodeSpeed, calibrate: calibrateAll, makePlan, splitLayers, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, economics, balanceVerdict, layerMs, roofTok, roofSeg, ownerWalk };
   if (typeof module !== 'undefined' && module.exports) module.exports = API; else root.M3SIM = API;
 })(typeof self !== 'undefined' ? self : this);

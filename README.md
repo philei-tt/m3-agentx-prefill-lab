@@ -178,13 +178,28 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
     requests hold KV).
   * Runs report `decParkPerS`, `decParkedMean` and `decSlotWaitFrac` (share of requests that waited for a slot or
     pages after prefill).
-* **Prefill / decode balance** (page: "Prefill / decode balance" tile). `ringFillMean` is the ring's mean fill
-  (sessions decoding / its capacity, at most 1) and `decStarvedFrac` the share of the window it had room with nothing
-  waiting for decode; with `pfStarvedSlotFrac` (prefill idle because requests wait for decode KV) and `maxUtil`
-  (prefill's busiest stage). Prefill and decode requests per hour are always equal in a closed loop, so they cannot show
-  imbalance. The tile calls a point decode-bound when the ring is ≥ 90% full, prefill-bound when it is < 70% full and
-  prefill waits on decode < 5% of the time, and balanced otherwise. Measured: decode-bound configs run the ring 97% full
-  with prefill idle 22–35% of the time waiting on decode; prefill-bound ones 34–59% full with no waiting.
+* **Prefill / decode balance** (page: "Prefill / decode balance" tile). Prefill and decode requests per hour are
+  always equal in a closed loop, so throughput cannot show which side limits. Instead, every moment of the window is
+  put in one of four states. Nothing changes between events, so before each event the simulator adds the gap since
+  the previous one to the state the system was in; with several prefill replicas each replica counts its own state,
+  at 1/R of the gap, since prefill is per replica and the decode ring is shared. The state comes from two questions:
+  * *Does prefill have work?* Its first stage is computing, or a request still has tokens not yet fed into it (not
+    started, or started with chunks left). Stage 0 idle with work left (the in-flight chunk cap or the KV lanes hold
+    it back) still counts as work: prefill is saturated further down. Only later stages busy does not.
+  * *Is decode holding things back?* More sessions are decoding than the ring holds (decodeStages × decodeBatch;
+    every session slows: compute), a request past prefill waits for a slot or pages (queue backpressure: memory), or
+    prefill has no work while a request waits for decode KV before it can start (memory). A request waiting for
+    decode KV while prefill is busy does not count: freeing a slot would only move it into the prefill queue.
+
+  | | decode not holding back | decode holding back |
+  |---|---|---|
+  | **prefill has work** | prefill-bound | balanced |
+  | **prefill has no work** | demand-bound | decode-bound |
+
+  Runs report the shares `boundPrefillFrac`, `boundDecodeFrac`, `boundBalancedFrac` and `boundDemandFrac` (they sum
+  to 1), and `boundDecodeComputeFrac`, the part of decode-bound time with the ring oversubscribed (the rest is memory).
+  `balanceVerdict` (sim_core.js) picks the state with the largest share, with decode-bound marked compute or memory by
+  its larger part; the tile shows that verdict, one sentence on what its share means, and the time in each state.
 * **Decode speed per session.** Runs report `tsuP10` and `tsuP50`: the 10th percentile and median of each session's
   output tokens / its decode time (sessions that end in the window, plus those still decoding at its end). A shared
   ring is the only thing that slows a session, so the decode-queue limit sets how low they go.
@@ -449,11 +464,11 @@ default decode-queue limit, 100, scaled to 100 × m with batch m (the same queue
   paging $78 / $71 at p10 93 / 83 tokens/s/u; no limit gave $104 / $91 at p10 37 / 19 (every session past prefill
   sharing the ring). Fixed slots gain little from a higher limit, because 87 slots cap the sessions decoding.
 **Decode backpressure on the study's best prefill configs** (`tools/backpressure_sweep.js`,
-`results/backpressure_sweep.{json,txt}`, Oct 9). The study's best stacks with today's kernels (4 gx 16×[4,2], 8 gx
-32×[4,2]: tiers, pool arena, async handoff, MSA-local, tile padding), prefill batching on (fused, budget 8k / 16k) or
-off (per-request attention, a 2k / 5k pass), against the decode strategies above (62-stage ring, modelled memory, decode
-tiers, queue limit 100 × decode batch). Net $/h at the goodput point, the better budget per cell, prefill batched /
-unbatched:
+`results/backpressure_sweep.{json,txt}`, Oct 9; balance states re-run Oct 12). The study's best stacks with today's
+kernels (4 gx 16×[4,2], 8 gx 32×[4,2]: tiers, pool arena, async handoff, MSA-local, tile padding), prefill batching on
+(fused, budget 8k / 16k) or off (per-request attention, a 2k / 5k pass), against the decode strategies above (62-stage
+ring, modelled memory, decode tiers, queue limit 100 × decode batch). Net $/h at the goodput point, the better budget
+per cell, prefill batched / unbatched:
 
 | decode | 4 gx | 8 gx |
 |---|---|---|
@@ -464,11 +479,14 @@ unbatched:
 | queue backpressure, paged, decode batch 4 | $191 / $178 | $143 / $143 |
 | queue backpressure, paged, decode batch 8 | **$218** / $181 | $174 / $174 |
 
-* Unbatched decode is decode-bound everywhere (ring 98–100% full, prefill idle 26–62% of the time waiting on decode),
-  so prefill batching changes nothing (±$4/h), and 4 prefill galaxies net about $45/h more than 8.
+* Unbatched decode limits every cell: the ring is oversubscribed for most of the window. At 8 galaxies the cells are
+  decode-bound (compute) 51–66% of the time and balanced (prefill had work as well) 29–48%; at 4 galaxies balanced
+  44–68% and decode-bound 28–37%, all compute. Prefill batching changes nothing (±$4/h), and 4 prefill galaxies net
+  about $45/h more than 8.
 * Prefill batching only pays once decode batching relieves decode, and only at 4 galaxies: with decode batch 4 / 8,
-  unbatched prefill is 97% busy (prefill-bound), batched prefill adds $13 / $37 per hour. At 8 galaxies prefill stays
-  under 65% busy, so batching it is worth nothing.
+  unbatched prefill is prefill-bound 58% / 98% of the time (busiest stage 97% busy), and batched prefill adds $13 / $37
+  per hour. At 8 galaxies every cell is still decode-bound or balanced (decode-bound 38–66% of the time, mostly
+  compute) and prefill stays under 65% busy, so batching it is worth nothing.
 * The best net, $218/h (4 gx, batched prefill, decode batch 8), runs decode at p10 23 tokens/s/u.
 
 * **Earlier run (75 slots): the hybrid layouts.** With 62 global lanes and a 13.6M-token pool
