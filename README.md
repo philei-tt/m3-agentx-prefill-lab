@@ -142,7 +142,18 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
   136 B of K + V and 68 B of index_k per chip. That gives **145 × 1M slots**, or 152M tokens of pages. q/k/v, indexer
   and shared-expert weights are in SRAM. Dense stages (TP4 × CP2 since #4703) hold 68 B/token/chip, and the embedding
   and LM-head stages none. `'auto'` applies with a finite ring (`decodeStages` > 0); without one decode is unlimited.
-  A number overrides it (0 = unlimited). Earlier layouts: TP8, K and V replicated over the columns (340 B/token/chip),
+  A number overrides it (0 = unlimited).
+  **Decode galaxies** (`decodeGalaxies`, default 16; page: "Decode galaxies" in Decode). Each galaxy holds 4 decode
+  stages, so 16 hold the full ring of 62 (`DEC_RING_FULL`: 60 layers, embedding, LM head). With fewer, the page refits
+  the ring to 4 stages per galaxy and the 60 layers spread evenly over the stages between embedding and LM head:
+  `decodeLayersPerStage` = ceil(60 / (stages − 2)), 2 at 8 galaxies (32 stages), 3 at 6, 5 at 4. The fullest stage
+  sets the memory: it holds that many layers' weights (routed experts, Wo, router, norms; the RoPE table once) and
+  that many layers' KV per token, so 145 / 67 / 41 / 21 × 1M slots at 16 / 8 / 6 / 4 galaxies (152M / 71M / 44M /
+  22M tokens paged); 12 galaxies (48 stages, some holding 2 layers) have the memory of 8. A token still passes every
+  layer, so the speed per user is unchanged; the ring carries one session (× decode batch) per stage, so decode
+  throughput falls with the stages. With modelled memory the plan rejects a ring with more than 4 stages per decode
+  galaxy. Decode galaxies also size the decode offload tiers and add to the cost.
+  Earlier layouts: TP8, K and V replicated over the columns (340 B/token/chip),
   gave 87; with index_k replicated too (408 B), 71–74, matching Jira MODEL-269's "can extend to 71" and the 62 × 1M
   served on Sep 28.
 * **Batched decode** (`decodeBatch`, page: "Decode batch"; tt-blaze #4220, not measured yet). m sessions per stage per

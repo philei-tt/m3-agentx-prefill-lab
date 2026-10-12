@@ -270,6 +270,8 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
         <div class="row"><label for="decodeTps">Decode tokens/s/u (per user)</label><input id="decodeTps" type="number" min="5" step="5"></div>
         <div class="row"><label for="decodeCurve">Decode TSU Model</label><select id="decodeCurve"><option value="flat">constant</option><option value="m3">adapt to KV length</option></select></div>
         <div class="hint">Constant: every session at the speed above. Adapt: measured M3 curve, the speed above at 100k (180 → 214 at 8k, 101 at 550k).</div>
+        <div class="row"><label for="decodeGalaxies">Decode galaxies</label><input id="decodeGalaxies" type="number" min="1" step="1"></div>
+        <div class="hint">4 decode stages (4×2 meshes) per galaxy; 16 hold the full 62-stage ring. On fewer, the stages refit and the 60 layers spread evenly over them, so each stage holds more layers and less KV fits. Also sizes the decode tiers and adds to the cost.</div>
         <div class="row"><label for="decodeStages">Decode pipeline stages (0 = unlimited)</label><input id="decodeStages" type="number" min="0" step="1"></div>
         <div class="row"><label for="decodeBatch">Decode batch (users per stage)</label><input id="decodeBatch" type="number" min="1" step="1"></div>
         <div class="hint">The ring holds stages × batch sessions at full speed. A bigger batch slows each user.</div>
@@ -292,8 +294,7 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
         <div class="row"><label for="priceOut">Output $ / M tokens</label><input id="priceOut" type="number" min="0" step="0.01"></div>
         <div class="hint">Defaults: MiniMax M3 on OpenRouter (Oct 2026). Misses bill as input, prefix hits as cached.</div>
         <div class="row"><label for="galaxyUsd">$ / galaxy-hour</label><input id="galaxyUsd" type="number" min="0" step="0.5"></div>
-        <div class="row"><label for="decodeGalaxies">Decode galaxies</label><input id="decodeGalaxies" type="number" min="0" step="1"></div>
-        <div class="hint">Decode galaxies add to cost and size the decode tiers. Prices and $/galaxy-hour apply without re-running.</div>
+        <div class="hint">Prices and $/galaxy-hour apply without re-running; decode galaxies (Decode) add to the cost.</div>
       </div>
     </details>
   </fieldset>
@@ -713,7 +714,7 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
       <li><b>Offload tiers.</b> Capacities and bandwidths come from the Galaxy Blackhole documentation and the drive datasheet, but the host DRAM reserves (OS, runtime, KV staging) are estimates, and the transfers are ideal page DMAs. SSD endurance and IO latency are not modelled. The Roadmap study runs the defaults: host DRAM plus 16 TB of SSD per galaxy (the Oct 1 study used a single 1 TB SSD tier at 64 GB/s).</li>
       <li><b>Pool copies.</b> Assumed to be page-list gather kernels at 50% DRAM efficiency. Arena fragmentation is not modelled.</li>
       <li><b>Torus rings.</b> Every measurement used line (mesh) collectives, so the ring speed-ups are textbook link-load ratios, not measurements. [4,4] has no profile at all (geometric midpoint of [2,4] and [8,4]).</li>
-      <li><b>Decode.</b> An ideal processor-sharing ring (no per-step overheads). Decode KV is a memory of 1M slots, as fixed slots or a paged pool. KV migration from prefill to decode is not modelled, so decode-side prefix hits (and the decode offload tiers) change no throughput.</li>
+      <li><b>Decode.</b> An ideal processor-sharing ring (no per-step overheads). Decode KV is a memory of 1M slots, as fixed slots or a paged pool. KV migration from prefill to decode is not modelled, so decode-side prefix hits (and the decode offload tiers) change no throughput. <b>Decode galaxies</b>: each holds 4 decode stages (4×2 meshes of 8 chips); 16 hold the full ring of 62 (60 layers, embedding, LM head). On fewer galaxies the ring takes 4 stages per galaxy and spreads the 60 layers evenly over the stages between embedding and LM head (8 galaxies: 32 stages, up to 2 layers each). The fullest stage holds that many layers' weights and KV per token, so decode memory falls faster than the galaxies (145 slots at 16, 67 at 8, 21 at 4); a token still passes every layer, so the speed per user is unchanged, while the ring carries fewer sessions at full speed.</li>
       <li><b>Extrapolation.</b> Batched chunks above 5120 tokens, meshes without a profile, and stage counts other than 16 are extrapolated. [4,2] stage costs come from a single-stage profile.</li>
       <li><b>Memory is calibrated to one measurement.</b> The 1 GB per-chip reserve reproduces the measured slot fit: 35 × 1M slots on 16×[2,4] with bf8 index_k and an even layer split, where stages with 4 MoE layers bind. The default auto split also has at most 4 layers per stage and fits the same. Weights and activation buffers are estimates.</li>
       <li><b>Complexity bins are rough</b> and not checked with the code owners.</li>
@@ -936,6 +937,9 @@ document.querySelector('aside.rail').addEventListener('input', (e) => {
   // galaxies that no longer divide into the replicas: back to one replica
   if (e.target.id === 'galaxies' && Number($('galaxies').value) % Number($('replicas').value) !== 0) $('replicas').value = '1';
   if (['galaxies', 'replicas', 'mesh', 'stages'].includes(e.target.id)) fitStages(e.target.id);
+  // decode galaxies: the ring takes every stage they hold, up to the full 62 (0 stages = unlimited stays unlimited)
+  if (e.target.id === 'decodeGalaxies' && Number($('decodeStages').value) > 0 && econVal('decodeGalaxies') >= 1)
+    $('decodeStages').value = String(Math.min(SIM.DEC_RING_FULL, SIM.DEC_STAGES_PER_GALAXY * econVal('decodeGalaxies')));
   syncUi(); updatePlan(); syncUrl();
 });
 
@@ -1002,7 +1006,7 @@ function updatePlan() {
   const fatal = plan.errors.filter((x) => !x.startsWith('no profile'));
   // decode KV memory is modelled from the decode chips' DRAM (sim_core DEC_DRAM), not entered
   $('decMemHint').textContent = plan.decSlots > 0
-    ? `Decode KV memory (modelled): ${plan.decSlots} × 1M slots${cfg.decodeCache === 'paging' ? ` = ${(plan.decMemTok / 1e6).toFixed(0)}M tokens of pages` : ''}; the ring carries ${cfg.decodeBatch * cfg.decodeStages} sessions.`
+    ? `Decode KV memory (modelled): ${plan.decSlots} × 1M slots${cfg.decodeCache === 'paging' ? ` = ${(plan.decMemTok / 1e6).toFixed(0)}M tokens of pages` : ''}; the ring carries ${cfg.decodeBatch * cfg.decodeStages} sessions${plan.decLayersPerStage > 1 ? `; up to ${plan.decLayersPerStage} layers per decode stage` : ''}.`
     : plan.decSlotsModel ? 'Decode KV memory: unlimited (0 stages = unlimited decode).' : '';
   $('cfgErr').hidden = !fatal.length; $('runBtn').disabled = !!fatal.length || $('runBtn').dataset.busy === '1';
   if (fatal.length) {
@@ -1014,6 +1018,7 @@ function updatePlan() {
       [(x) => x.startsWith('split must have'), 'Set the layer split to auto or even, or give one count per stage summing to 60.'],
       [(x) => x.startsWith('queue backpressure parks'), 'Turn on the decode offload tiers with SSD TB / galaxy above 0, or use slot backpressure.'],
       [(x) => x.startsWith('slot backpressure needs'), 'Use queue backpressure, or the fixed 1M slots decode KV layout.'],
+      [(x) => x.startsWith('decode ring needs'), 'Use at most 4 decode stages per decode galaxy, or more decode galaxies.'],
     ];
     const fix = FIXES.filter(([m]) => fatal.some(m)).map(([, f]) => f).join(' ');
     $('cfgErr').innerHTML = `<b>This configuration cannot run:</b> ${esc(fatal.join('; '))}.` + (fix ? ` ${fix}` : '');
