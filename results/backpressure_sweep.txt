@@ -27,4 +27,4 @@
   queue backpressure, paged, decode batch 8 | prefill batched (8192): net $174/h (revenue $462) | goodput 67.4k @C=1208, 53.0k req/h, output 13.0k tok/s | decode p10/p50 22/29 tok/s/u | prefill busy 49%, waits on decode 0% | decode-bound (compute): prefill-bound 12%, decode-bound 45% (compute 35%), balanced 33%, demand-bound 10%
   queue backpressure, paged, decode batch 8 | prefill unbatched (5120): net $174/h (revenue $462) | goodput 67.4k @C=1208, 53.0k req/h, output 13.0k tok/s | decode p10/p50 22/29 tok/s/u | prefill busy 55%, waits on decode 0% | decode-bound (compute): prefill-bound 13%, decode-bound 43% (compute 33%), balanced 37%, demand-bound 8%
 
-64 s
+70 s
