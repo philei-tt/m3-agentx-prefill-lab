@@ -185,7 +185,7 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
   </fieldset>
   <fieldset>
     <legend>Hardware &amp; pipeline</legend>
-    <div class="row"><label for="galaxies">Galaxies</label><select id="galaxies"><option>4</option><option>8</option></select></div>
+    <div class="row"><label for="galaxies">Galaxies</label><select id="galaxies"><option>4</option><option>6</option><option>8</option></select></div>
     <div class="row"><label for="replicas">Pipeline replicas</label><select id="replicas"><option>1</option><option>2</option><option>4</option></select></div>
     <div class="row"><label for="mesh">Stage mesh [SP,TP]</label><select id="mesh"><option value="2x4">[2,4] 8 chips</option><option value="4x4">[4,4] 16 chips</option><option value="8x4">[8,4] 32 chips</option><option value="4x2">[4,2] 8 chips (TP=2)</option></select></div>
     <div class="row"><label for="torus">Ring collectives</label><select id="torus"><option value="full">[4,4] stages (whole torus)</option><option value="axes">every 4-long axis</option><option value="off">off (line everywhere)</option></select></div>
@@ -478,7 +478,7 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
       </li>
       <li><b>Padding.</b> Tokens computed only to fill a fixed-size chunk.</li>
       <li><b>∞ cache.</b> The same configuration with an unbounded KV cache. It separates cache losses from compute limits.</li>
-      <li><b>Stage, mesh, SP/TP, split, replicas.</b> See "Context". The <b>split</b> is how many layers each stage holds; "auto" minimises the busiest stage's mean time per chunk over the context lengths AgentX chunks see; dense layers can share a stage with each other and with MoE layers. <b>Replicas</b> divides the galaxies into independent pipelines, each with its own cache; sessions stick to one replica.</li>
+      <li><b>Stage, mesh, SP/TP, split, replicas.</b> See "Context". The <b>split</b> is how many layers each stage holds; "auto" minimises the busiest stage's mean time per chunk over the context lengths AgentX chunks see; dense layers can share a stage with each other and with MoE layers. <b>Replicas</b> divides the galaxies into independent pipelines, each with its own cache; sessions stick to one replica. <b>Galaxies</b> is 4, 6 or 8 (the study and its roadmap run 4 and 8; 6 is for trying the page and the decode sweeps' middle size); replicas must divide it.</li>
       <li><b>Scenario labels.</b> "Today's kernels" = op-efficiency 0 (k0); "roofline kernels" = op-efficiency 1 (k1). See the section on kernels.</li>
       <li><b>Tiers.</b> P0 / P1 / P2 = priority from the study; the rule is in "How the study works".</li>
       <li><b>Complexity</b> (low / med / high). A rough judgement of how much of the stack a feature touches. <b>Low:</b> one op or the scheduler, plus validation. <b>Med:</b> a new op or allocator, or changes across a few ops. <b>High:</b> cross-cutting changes to the runtime, KV layout, several kernels and the scheduler. Not validated with the code owners.</li>
@@ -854,6 +854,8 @@ function getCfg() {
   return c;
 }
 function syncUi() {
+  // replicas must divide the galaxies (6 galaxies: 1 or 2 replicas)
+  for (const o of $('replicas').options) o.disabled = Number($('galaxies').value) % Number(o.value) !== 0;
   $('opEffV').textContent = Number($('opEff').value).toFixed(1);
   $('splitRow').hidden = $('split').value !== 'custom';
   const pool = $('cache').value === 'pool', paged = pool || $('cache').value === 'paging';
@@ -931,6 +933,8 @@ function presetOptions() {
 document.querySelector('aside.rail').addEventListener('input', (e) => {
   if (e.target.id === 'preset') return;
   if (FIELDS.includes(e.target.id) || e.target.id === 'splitCustom') { $('preset').value = '-1'; $('presetDesc').textContent = 'Custom configuration.'; }
+  // galaxies that no longer divide into the replicas: back to one replica
+  if (e.target.id === 'galaxies' && Number($('galaxies').value) % Number($('replicas').value) !== 0) $('replicas').value = '1';
   if (['galaxies', 'replicas', 'mesh', 'stages'].includes(e.target.id)) fitStages(e.target.id);
   syncUi(); updatePlan(); syncUrl();
 });
