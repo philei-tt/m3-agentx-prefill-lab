@@ -470,6 +470,24 @@ ring position, 100 / 145 / 200, times the decode batch m: below, at and above th
   so prefill runs at higher concurrency within the TTFT SLO. Unlimited decode would net $166 / $294.
   * The batch model is an estimate (`decodeMoeFrac`, no batched measurement yet; tt-blaze #4226 plans one at m = 1 / 8).
 
+**Best net revenue per galaxy** (`tools/best_net_sweep.js`, `results/best_net_sweep.{json,txt}`, Oct 12). Kernels at
+op efficiency 0.5, chunk 512 with fused-attention batching on the paged pool, host DRAM + SSD tiers, a 62-stage
+decode ring on 16 decode galaxies with paged decode KV and queue backpressure; p90 TTFT ≤ 10 s. Varied: prefill
+galaxies 4 / 6 / 8, prefill budget 4k–32k, decode batch 1–8, queue limit 100 / 145 / 200 / 300 × m or none. Net $/h at
+the goodput point over prefill + 16 decode galaxies (best budget and queue limit per cell):
+
+| prefill gx \ decode batch | 1 | 2 | 4 | 8 |
+|---|---|---|---|---|
+| 4 | $6.92 | $8.14 | $9.19 | $9.40 |
+| 6 | $6.13 | $7.67 | $8.78 | **$9.94** |
+| 8 | $4.57 | $6.02 | $7.16 | $8.27 |
+
+* Best: **$9.94 per galaxy-hour** ($219/h on 6 + 16 galaxies): budget 8k, decode batch 8, any queue limit ≥ 145 × 8
+  (it does not bind), 72.2k useful tok/s at C = 1672, 13.1k output tok/s, but decode p10 / p50 only 14 / 18 tokens/s/u.
+* 4 prefill galaxies come within 5%, $9.40 (budget 8k, decode batch 8, limit 800), at p10 / p50 36 / 50 tokens/s/u;
+  with p10 ≥ 40 the best is $8.81 (budget 4k). Decode batch is the main lever; 8 prefill galaxies cost more than they add.
+* A 32k budget misses the SLO at 4 and 6 galaxies, and 16k at 4.
+
 **Decode backpressure on the study's best prefill configs** (`tools/backpressure_sweep.js`,
 `results/backpressure_sweep.{json,txt}`, Oct 12). The study's best stacks with today's kernels (4 gx 16×[4,2], 8 gx
 32×[4,2]: tiers, pool arena, async handoff, MSA-local, tile padding), prefill batching on (fused, budget 8k / 16k) or

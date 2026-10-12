@@ -1,0 +1,43 @@
+== Net revenue per galaxy-hour at the goodput point (p90 TTFT <= 10 s); 180 of 240 configurations meet the SLO
+
+-- top 15
+     $9.94/gx-h | net $219/h on 6 + 16 gx | prefill 6 gx, budget 8k | decode batch 8, queue limit 145 x 8 = 1160 | goodput 72.2k @C=1672, output 13.1k tok/s | decode p10/p50 14/18 tok/s/u | decode util 89%, prefill busy 47% | prefill-bound 11%, decode-bound 8%, balanced 62%, demand-bound 19%
+     $9.94/gx-h | net $219/h on 6 + 16 gx | prefill 6 gx, budget 8k | decode batch 8, queue limit 200 x 8 = 1600 | goodput 72.2k @C=1672, output 13.1k tok/s | decode p10/p50 14/18 tok/s/u | decode util 89%, prefill busy 47% | prefill-bound 11%, decode-bound 8%, balanced 62%, demand-bound 19%
+     $9.94/gx-h | net $219/h on 6 + 16 gx | prefill 6 gx, budget 8k | decode batch 8, queue limit 300 x 8 = 2400 | goodput 72.2k @C=1672, output 13.1k tok/s | decode p10/p50 14/18 tok/s/u | decode util 89%, prefill busy 47% | prefill-bound 11%, decode-bound 8%, balanced 62%, demand-bound 19%
+     $9.94/gx-h | net $219/h on 6 + 16 gx | prefill 6 gx, budget 8k | decode batch 8, queue limit none | goodput 72.2k @C=1672, output 13.1k tok/s | decode p10/p50 14/18 tok/s/u | decode util 89%, prefill busy 47% | prefill-bound 11%, decode-bound 8%, balanced 62%, demand-bound 19%
+     $9.82/gx-h | net $216/h on 6 + 16 gx | prefill 6 gx, budget 4k | decode batch 8, queue limit 145 x 8 = 1160 | goodput 72.0k @C=1608, output 13.1k tok/s | decode p10/p50 14/19 tok/s/u | decode util 86%, prefill busy 54% | prefill-bound 14%, decode-bound 4%, balanced 67%, demand-bound 15%
+     $9.82/gx-h | net $216/h on 6 + 16 gx | prefill 6 gx, budget 4k | decode batch 8, queue limit 200 x 8 = 1600 | goodput 72.0k @C=1608, output 13.1k tok/s | decode p10/p50 14/19 tok/s/u | decode util 86%, prefill busy 54% | prefill-bound 14%, decode-bound 4%, balanced 67%, demand-bound 15%
+     $9.82/gx-h | net $216/h on 6 + 16 gx | prefill 6 gx, budget 4k | decode batch 8, queue limit 300 x 8 = 2400 | goodput 72.0k @C=1608, output 13.1k tok/s | decode p10/p50 14/19 tok/s/u | decode util 86%, prefill busy 54% | prefill-bound 14%, decode-bound 4%, balanced 67%, demand-bound 15%
+     $9.82/gx-h | net $216/h on 6 + 16 gx | prefill 6 gx, budget 4k | decode batch 8, queue limit none | goodput 72.0k @C=1608, output 13.1k tok/s | decode p10/p50 14/19 tok/s/u | decode util 86%, prefill busy 54% | prefill-bound 14%, decode-bound 4%, balanced 67%, demand-bound 15%
+     $9.62/gx-h | net $212/h on 6 + 16 gx | prefill 6 gx, budget 4k | decode batch 8, queue limit 100 x 8 = 800 | goodput 71.2k @C=1560, output 13.1k tok/s | decode p10/p50 16/21 tok/s/u | decode util 84%, prefill busy 53% | prefill-bound 16%, decode-bound 17%, balanced 62%, demand-bound 4%
+     $9.61/gx-h | net $211/h on 6 + 16 gx | prefill 6 gx, budget 16k | decode batch 8, queue limit 145 x 8 = 1160 | goodput 70.8k @C=1464, output 13.0k tok/s | decode p10/p50 17/22 tok/s/u | decode util 84%, prefill busy 44% | prefill-bound 16%, decode-bound 0%, balanced 52%, demand-bound 32%
+     $9.61/gx-h | net $211/h on 6 + 16 gx | prefill 6 gx, budget 16k | decode batch 8, queue limit 200 x 8 = 1600 | goodput 70.8k @C=1464, output 13.0k tok/s | decode p10/p50 17/22 tok/s/u | decode util 84%, prefill busy 44% | prefill-bound 16%, decode-bound 0%, balanced 52%, demand-bound 32%
+     $9.61/gx-h | net $211/h on 6 + 16 gx | prefill 6 gx, budget 16k | decode batch 8, queue limit 300 x 8 = 2400 | goodput 70.8k @C=1464, output 13.0k tok/s | decode p10/p50 17/22 tok/s/u | decode util 84%, prefill busy 44% | prefill-bound 16%, decode-bound 0%, balanced 52%, demand-bound 32%
+     $9.61/gx-h | net $211/h on 6 + 16 gx | prefill 6 gx, budget 16k | decode batch 8, queue limit none | goodput 70.8k @C=1464, output 13.0k tok/s | decode p10/p50 17/22 tok/s/u | decode util 84%, prefill busy 44% | prefill-bound 16%, decode-bound 0%, balanced 52%, demand-bound 32%
+     $9.59/gx-h | net $211/h on 6 + 16 gx | prefill 6 gx, budget 16k | decode batch 8, queue limit 100 x 8 = 800 | goodput 70.7k @C=1464, output 13.0k tok/s | decode p10/p50 17/22 tok/s/u | decode util 84%, prefill busy 43% | prefill-bound 16%, decode-bound 1%, balanced 52%, demand-bound 31%
+     $9.48/gx-h | net $209/h on 6 + 16 gx | prefill 6 gx, budget 8k | decode batch 8, queue limit 100 x 8 = 800 | goodput 71.0k @C=1592, output 13.1k tok/s | decode p10/p50 15/20 tok/s/u | decode util 87%, prefill busy 47% | prefill-bound 13%, decode-bound 27%, balanced 58%, demand-bound 2%
+
+-- best per prefill galaxy count
+     $9.40/gx-h | net $188/h on 4 + 16 gx | prefill 4 gx, budget 8k | decode batch 8, queue limit 100 x 8 = 800 | goodput 59.9k @C=864, output 12.1k tok/s | decode p10/p50 36/50 tok/s/u | decode util 0%, prefill busy 65% | prefill-bound 81%, decode-bound 0%, balanced 0%, demand-bound 19%
+     $9.94/gx-h | net $219/h on 6 + 16 gx | prefill 6 gx, budget 8k | decode batch 8, queue limit 145 x 8 = 1160 | goodput 72.2k @C=1672, output 13.1k tok/s | decode p10/p50 14/18 tok/s/u | decode util 89%, prefill busy 47% | prefill-bound 11%, decode-bound 8%, balanced 62%, demand-bound 19%
+     $8.27/gx-h | net $199/h on 8 + 16 gx | prefill 8 gx, budget 4k | decode batch 8, queue limit 145 x 8 = 1160 | goodput 73.9k @C=1720, output 13.2k tok/s | decode p10/p50 13/17 tok/s/u | decode util 93%, prefill busy 37% | prefill-bound 7%, decode-bound 12%, balanced 64%, demand-bound 18%
+
+-- best per decode batch
+     $6.92/gx-h | net $138/h on 4 + 16 gx | prefill 4 gx, budget 8k | decode batch 1, queue limit none | goodput 54.3k @C=992, output 10.4k tok/s | decode p10/p50 21/27 tok/s/u | decode util 99%, prefill busy 60% | prefill-bound 1%, decode-bound 0%, balanced 66%, demand-bound 34%
+     $8.14/gx-h | net $163/h on 4 + 16 gx | prefill 4 gx, budget 8k | decode batch 2, queue limit 300 x 2 = 600 | goodput 57.3k @C=872, output 11.4k tok/s | decode p10/p50 30/40 tok/s/u | decode util 95%, prefill busy 62% | prefill-bound 4%, decode-bound 0%, balanced 71%, demand-bound 24%
+     $9.19/gx-h | net $184/h on 4 + 16 gx | prefill 4 gx, budget 8k | decode batch 4, queue limit 100 x 4 = 400 | goodput 59.5k @C=864, output 12.0k tok/s | decode p10/p50 35/49 tok/s/u | decode util 58%, prefill busy 65% | prefill-bound 42%, decode-bound 1%, balanced 38%, demand-bound 20%
+     $9.94/gx-h | net $219/h on 6 + 16 gx | prefill 6 gx, budget 8k | decode batch 8, queue limit 145 x 8 = 1160 | goodput 72.2k @C=1672, output 13.1k tok/s | decode p10/p50 14/18 tok/s/u | decode util 89%, prefill busy 47% | prefill-bound 11%, decode-bound 8%, balanced 62%, demand-bound 19%
+
+-- best with decode p10 at or above a floor (tokens/s/u)
+  p10 >= 20:    $9.40/gx-h | net $188/h on 4 + 16 gx | prefill 4 gx, budget 8k | decode batch 8, queue limit 100 x 8 = 800 | goodput 59.9k @C=864, output 12.1k tok/s | decode p10/p50 36/50 tok/s/u | decode util 0%, prefill busy 65% | prefill-bound 81%, decode-bound 0%, balanced 0%, demand-bound 19%
+  p10 >= 40:    $8.81/gx-h | net $176/h on 4 + 16 gx | prefill 4 gx, budget 4k | decode batch 8, queue limit 100 x 8 = 800 | goodput 55.8k @C=768, output 11.7k tok/s | decode p10/p50 46/66 tok/s/u | decode util 0%, prefill busy 70% | prefill-bound 94%, decode-bound 0%, balanced 0%, demand-bound 6%
+  p10 >= 60:    $5.89/gx-h | net $118/h on 4 + 16 gx | prefill 4 gx, budget 4k | decode batch 1, queue limit 145 x 1 = 145 | goodput 47.4k @C=592, output 10.1k tok/s | decode p10/p50 69/89 tok/s/u | decode util 98%, prefill busy 60% | prefill-bound 2%, decode-bound 40%, balanced 58%, demand-bound 0%
+  p10 >= 100:    $5.13/gx-h | net $103/h on 4 + 16 gx | prefill 4 gx, budget 4k | decode batch 1, queue limit 100 x 1 = 100 | goodput 44.8k @C=480, output 10.2k tok/s | decode p10/p50 103/134 tok/s/u | decode util 94%, prefill busy 57% | prefill-bound 5%, decode-bound 41%, balanced 48%, demand-bound 5%
+
+-- net $/galaxy-hour by prefill galaxies x decode batch (best budget and queue limit in each cell)
+     gx \ m      m=1      m=2      m=4      m=8
+          4    $6.92    $8.14    $9.19    $9.40
+          6    $6.13    $7.67    $8.78    $9.94
+          8    $4.57    $6.02    $7.16    $8.27
+
+281 s
