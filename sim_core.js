@@ -1145,7 +1145,7 @@
       outTok: 0, decArea: 0, decingArea: 0, decMax: 0, decWaits: 0, decWait: 0, decWaited: 0, decTokArea: 0, ringFull: 0, pfSlot: 0, pfNone: 0, sendBlock: 0,
       decCtxTok: 0, decHitTok: 0, decHostTok: 0, decSsdTok: 0, dH2dBusy: 0, dD2hBusy: 0, dSsdBusy: 0, decPoolArea: 0,
       decStarts: 0, decStartDelay: 0, decSlotWaited: 0, parked: 0, parkArea: 0, tsu: [],
-      bPrefill: 0, bDecode: 0, bDecodeCompute: 0, bBalanced: 0, bDemand: 0 };
+      bPrefill: 0, bDecode: 0, bDecodeCompute: 0, bDecodeMemory: 0, bDecodeQueue: 0, bBalanced: 0, bDemand: 0 };
     const decWin = () => warmDone && now >= t0 && now <= tEnd;
     // ---------- decode KV (DEFAULTS.decodeCache): reserved when a request is admitted to prefill (TTFT clock already
     // running), released when its decode ends, then cached: released slots keep their stream's KV, released pages
@@ -1923,8 +1923,9 @@
       if (warmDone && t > now) {
         const a = Math.max(now, t0), b = Math.min(t, tEnd);
         // decode holds things back: the ring is full (compute; every position taken, and past full every session
-        // slows), or a request past prefill waits for a slot / pages (memory); a request waiting for decode KV
-        // before prefill counts only while prefill has no work (below)
+        // slows), or a request past prefill waits for a slot / pages (memory); a request waiting for decode before
+        // prefill counts only while prefill has no work (below): for a slot (slot backpressure: memory), or for
+        // room in the decode queue (queue backpressure, the only reason it waits there: queue limit)
         const decCompute = cfg.decodeStages > 0 && decoding >= decCap, decMemAfter = slotQ.length > 0;
         if (b > a) for (const rp of reps) {
           // prefill has work: stage 0 is computing, or a request still has tokens not yet fed into it (not started,
@@ -1934,7 +1935,10 @@
           const dec = decCompute || decMemAfter || (!work && decQ.length > 0);
           if (work && dec) st.bBalanced += b - a;
           else if (work) st.bPrefill += b - a;
-          else if (dec) { st.bDecode += b - a; if (decCompute) st.bDecodeCompute += b - a; }
+          else if (dec) { // by cause, in this order: compute, memory, queue limit
+            st.bDecode += b - a;
+            if (decCompute) st.bDecodeCompute += b - a; else if (decMemAfter || !decQueue) st.bDecodeMemory += b - a; else st.bDecodeQueue += b - a;
+          }
           else st.bDemand += b - a;
         }
       }
@@ -1992,10 +1996,13 @@
       // prefill / decode balance: share of the window (per prefill replica) in each state, by two questions: does
       // prefill have work, and does decode hold things back (ring full, a request past prefill waiting for
       // a slot / pages, or prefill idle while a request waits for decode KV)? prefill-bound = work, decode not
-      // holding back; decode-bound = no work, decode holding back (boundDecodeComputeFrac: of it, the ring full; the
-      // rest is memory); balanced = both; demand-bound = neither. The four sum to 1.
+      // holding back; decode-bound = no work, decode holding back, split by cause (compute: the ring full; memory:
+      // waiting for slots / pages; queue: the decode queue at its limit; the three sum to boundDecodeFrac);
+      // balanced = both; demand-bound = neither. The four sum to 1.
       boundPrefillFrac: st.bPrefill / (D * reps.length), boundDecodeFrac: st.bDecode / (D * reps.length),
-      boundDecodeComputeFrac: st.bDecodeCompute / (D * reps.length), boundBalancedFrac: st.bBalanced / (D * reps.length),
+      boundDecodeComputeFrac: st.bDecodeCompute / (D * reps.length), boundDecodeMemoryFrac: st.bDecodeMemory / (D * reps.length),
+      boundDecodeQueueFrac: st.bDecodeQueue / (D * reps.length),
+      boundBalancedFrac: st.bBalanced / (D * reps.length),
       boundDemandFrac: st.bDemand / (D * reps.length),
       // output tokens decoded per second in the window (what output revenue bills; outTps counts them at prefill end)
       outDecTps: st.decTokArea / D,

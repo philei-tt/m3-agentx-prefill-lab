@@ -186,10 +186,17 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
   * *Does prefill have work?* Its first stage is computing, or a request still has tokens not yet fed into it (not
     started, or started with chunks left). Stage 0 idle with work left (the in-flight chunk cap or the KV lanes hold
     it back) still counts as work: prefill is saturated further down. Only later stages busy does not.
-  * *Is decode holding things back?* The ring is full: as many sessions decoding as it holds (decodeStages ×
-    decodeBatch) or more, when every session slows (compute), a request past prefill waits for a slot or pages (queue backpressure: memory), or
-    prefill has no work while a request waits for decode KV before it can start (memory). A request waiting for
-    decode KV while prefill is busy does not count: freeing a slot would only move it into the prefill queue.
+  * *Is decode holding things back?* Any of:
+    * **compute**: the ring is full, as many sessions decoding as it holds (decodeStages × decodeBatch) or more
+      (past full every session slows);
+    * **memory**: a request past prefill waits for a slot or pages (queue backpressure, parked on SSD), or prefill
+      has no work while a request waits for a slot before it can start (slot backpressure);
+    * **queue limit**: prefill has no work while a request waits for room in the decode queue (queue backpressure:
+      the requests decode has taken on are at `decodeQueueMax`). Not a memory shortage (it would park on SSD): the
+      cap that keeps the ring from being shared too widely.
+
+    A request waiting before prefill while prefill is busy does not count: admitting it would only move it into the
+    prefill queue. When several causes hold at once, decode-bound time goes to the first in this order.
 
   | | decode not holding back | decode holding back |
   |---|---|---|
@@ -197,8 +204,8 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
   | **prefill has no work** | demand-bound | decode-bound |
 
   Runs report the shares `boundPrefillFrac`, `boundDecodeFrac`, `boundBalancedFrac` and `boundDemandFrac` (they sum
-  to 1), and `boundDecodeComputeFrac`, the part of decode-bound time with the ring full (the rest is memory).
-  The tile shows the four shares, decode-bound split into memory and compute, with no single verdict: a run alternates
+  to 1), and decode-bound time by cause: `boundDecodeComputeFrac`, `boundDecodeMemoryFrac` and `boundDecodeQueueFrac`
+  (summing to `boundDecodeFrac`). The tile shows the four shares, decode-bound split by cause, with no single verdict: a run alternates
   between states (agentic traffic is bursty), so naming the largest one would hide the others.
   * *Which side to grow:* compare prefill-bound against decode-bound time. Balanced time has both sides at their
     limit and demand-bound time neither, so they say nothing about it. Today's 4-galaxy config is balanced 46% of the

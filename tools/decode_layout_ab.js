@@ -75,7 +75,7 @@ async function main() {
         + (p.decSlotWaitFrac > 0 ? ` | ${pct(p.decSlotWaitFrac)} waited for slots / pages after prefill, first token +${(1e3 * p.decStartDelayMean).toFixed(0)} ms` : '')
         + (Number.isFinite(p.decHitRate) ? ` | decode-side hit ${(100 * p.decHitRate).toFixed(1)}%` : '')
         + (Number.isFinite(p.decPoolTokMean) ? ` | pool in use ${(p.decPoolTokMean / 1e6).toFixed(1)}M of ${(best.plan.decPoolTok / 1e6).toFixed(1)}M` : ''));
-      console.log(`    balance: prefill-bound ${pct(p.boundPrefillFrac)}, decode-bound ${pct(p.boundDecodeFrac)} (compute ${pct(p.boundDecodeComputeFrac)}), balanced ${pct(p.boundBalancedFrac)}, demand-bound ${pct(p.boundDemandFrac)} | prefill busiest stage ${pct(p.maxUtil)}`);
+      console.log(`    balance: prefill-bound ${pct(p.boundPrefillFrac)}, decode-bound ${pct(p.boundDecodeFrac)} (compute ${pct(p.boundDecodeComputeFrac)}, memory ${pct(p.boundDecodeMemoryFrac)}, queue limit ${pct(p.boundDecodeQueueFrac)}), balanced ${pct(p.boundBalancedFrac)}, demand-bound ${pct(p.boundDemandFrac)} | prefill busiest stage ${pct(p.maxUtil)}`);
       console.log(`    every prefill config (net $/h at goodput): ${all.map((r) => `${prefillTxt(r.pf)} ${r.econ ? usd(r.econ.margin) : '–'}`).join('; ')}`);
     }
   }

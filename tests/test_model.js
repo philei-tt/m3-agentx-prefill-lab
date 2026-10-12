@@ -155,11 +155,11 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   const qb = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeStages: 16, decodeSlots: 8, decodeBackpressure: 'queue', decodeHostTier: true, ssdTBPerGalaxy: 4 }));
   for (const r of [u, c, w, n, nc, hi, lo, qb]) {
     const f = [r.boundPrefillFrac, r.boundDecodeFrac, r.boundBalancedFrac, r.boundDemandFrac];
-    assert.ok(!r.error && f.every((x) => x >= 0 && x <= 1) && Math.abs(f[0] + f[1] + f[2] + f[3] - 1) < 1e-9 && r.boundDecodeComputeFrac <= r.boundDecodeFrac + 1e-12, `bound shares ${f}`);
+    assert.ok(!r.error && f.every((x) => x >= 0 && x <= 1) && Math.abs(f[0] + f[1] + f[2] + f[3] - 1) < 1e-9 && Math.abs(r.boundDecodeComputeFrac + r.boundDecodeMemoryFrac + r.boundDecodeQueueFrac - r.boundDecodeFrac) < 1e-9, `bound shares ${f}`);
   }
   // slot limit, no ring: prefill idles waiting for slots (memory; exactly the slot-starved time); a huge ring adds
   // nothing; a full one is compute
-  assert.ok(u.boundDecodeFrac > 0.5 && u.boundDecodeComputeFrac === 0 && Math.abs(u.boundDecodeFrac - u.pfStarvedSlotFrac) < 1e-9 && w.boundDecodeComputeFrac === 0 && c.boundDecodeComputeFrac > 0.5,
+  assert.ok(u.boundDecodeFrac > 0.5 && u.boundDecodeComputeFrac === 0 && u.boundDecodeQueueFrac === 0 && Math.abs(u.boundDecodeFrac - u.pfStarvedSlotFrac) < 1e-9 && w.boundDecodeComputeFrac === 0 && c.boundDecodeComputeFrac > 0.5,
     `slot limit ${u.boundDecodeFrac} / ring 4 compute ${c.boundDecodeComputeFrac}`);
   // a ring as large as the slots is never oversubscribed, but a full ring (every slot decoding) still counts as compute
   const rs = SIM.simulate(TR, cal, Object.assign({ decodeStages: 16 }, cfg));
@@ -169,6 +169,12 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   // queue backpressure (a ring larger than the slots, so never full): requests past prefill waiting for a slot count
   // as decode memory, though prefill never waits
   assert.ok(qb.pfStarvedSlotFrac === 0 && qb.decSlotWaitFrac > 0 && qb.boundDecodeFrac > 0.5 && qb.boundDecodeComputeFrac === 0, `queue backpressure: decode ${qb.boundDecodeFrac}`);
+  assert.ok(qb.boundDecodeMemoryFrac > 0.5, `queue backpressure: memory ${qb.boundDecodeMemoryFrac}`);
+  // queue limit at the slot count: nothing parks, so nobody waits after prefill; the requests that wait, wait before
+  // prefill for room in the decode queue (prefill idle meanwhile): queue limit, not memory
+  const ql = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeStages: 16, decodeSlots: 8, decodeBackpressure: 'queue', decodeQueueMax: 8, decodeHostTier: true, ssdTBPerGalaxy: 4 }));
+  assert.ok(ql.decParkPerS === 0 && ql.decSlotWaitFrac === 0 && ql.boundDecodeQueueFrac > 0.5 && ql.boundDecodeMemoryFrac === 0 && ql.boundDecodeComputeFrac === 0,
+    `queue limit ${ql.boundDecodeQueueFrac} of decode ${ql.boundDecodeFrac}`);
   // no decode limits: decode never holds anything back; prefill-bound with many lanes, demand-bound with few
   assert.ok(n.boundDecodeFrac === 0 && n.boundBalancedFrac === 0 && Math.abs(n.boundDemandFrac - n.pfStarvedIdleFrac) < 1e-9, 'no decode limits');
   assert.ok(hi.boundPrefillFrac > 0.9 && lo.boundDemandFrac > 0.9, `prefill-bound ${hi.boundPrefillFrac} / demand-bound ${lo.boundDemandFrac}`);
