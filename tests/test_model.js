@@ -221,16 +221,17 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   assert.ok(Math.abs(f.tsuP10 - 180) < 1e-6 && Math.abs(f.tsuP50 - 180) < 1e-6 && sh.tsuP10 < 180 && sh.tsuP10 <= sh.tsuP50, `tsu ${f.tsuP10} / shared ${sh.tsuP10}`);
 }
 
-// 10f. modelled decode KV memory and batched decode. With a finite ring decodeSlots 'auto' models the memory (87 x
-//      1M slots today; pages use every free byte); without a ring decode is unlimited; a number overrides it. Fixed
+// 10f. modelled decode KV memory and batched decode. With a finite ring decodeSlots 'auto' models the memory (145 x
+//      1M slots with sparse attention TP4 x CP2; pages use every free byte); without a ring decode is unlimited; a number overrides it. Fixed
 //      slots must hold batch x stages sessions. In a batch each user is slower but the ring decodes more in total;
 //      batch 1 is the measured curve. A larger batch on a small ring decodes more output.
 {
   const pl = (c) => SIM.makePlan(Object.assign({ chunk: 2048 }, c), cal);
   const a = pl({ decodeStages: 62 }), pg = pl({ decodeStages: 62, decodeCache: 'paging', decodeBackpressure: 'queue', decodeHostTier: true });
-  assert.ok(a.decSlots === 87 && a.decMemTok === 87 * SIM.M3.maxCtx && pg.decMemTok > 87 * SIM.M3.maxCtx && pg.decMemTok < 88 * SIM.M3.maxCtx, `modelled ${a.decSlots}`);
+  assert.ok(a.decSlots === 145 && a.decMemTok === 145 * SIM.M3.maxCtx && pg.decMemTok > 145 * SIM.M3.maxCtx && pg.decMemTok < 146 * SIM.M3.maxCtx, `modelled ${a.decSlots}`);
   assert.ok(pl({}).decSlots === 0 && pl({}).decMemTok === Infinity && pl({ decodeStages: 62, decodeSlots: 40 }).decSlots === 40 && SIM.DEFAULTS.decodeSlots === 'auto');
-  assert.ok(pl({ decodeStages: 62, decodeBatch: 2 }).errors.some((e) => e.startsWith('decode out of memory')) && !pl({ decodeStages: 40, decodeBatch: 2 }).errors.some((e) => e.startsWith('decode')));
+  // fixed slots: 2 x 62 = 124 sessions fit in 145 slots, 3 x 62 = 186 do not
+  assert.ok(pl({ decodeStages: 62, decodeBatch: 3 }).errors.some((e) => e.startsWith('decode out of memory')) && !pl({ decodeStages: 62, decodeBatch: 2 }).errors.some((e) => e.startsWith('decode')));
   assert.ok(pg.errors.length === 0 && !pl({ decodeStages: 62, decodeBatch: 4, decodeCache: 'paging', decodeBackpressure: 'queue', decodeHostTier: true }).errors.some((e) => e.startsWith('decode')));
   assert.ok(pl({ decodeBatch: 2 }).errors.some((e) => e.includes('batched decode needs')));
   const c = Object.assign({}, SIM.DEFAULTS);

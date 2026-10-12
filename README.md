@@ -136,13 +136,15 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
 * **Decode KV memory** (`decodeSlots`, default `'auto'`; the page shows it, there is no field). Modelled from tt-blaze's
   M3 decode (one 4×2 mesh of 8 chips per stage); the sparse MSA/MoE stages bind. Per chip: 8 DRAM banks × 4080 MiB
   (Blackhole SoC descriptor) − all 128 routed experts at half the intermediate width in bf4 (1.9 GiB) − the 1M × 64
-  bf16 RoPE table (128 MiB) − Wo, router and norms (~8 MiB) − the 1 GB reserve (`reserveGB`), at 340 B of KV per token
-  per chip (K and V 136 B each, one head per chip replicated over the 2 columns; index_k 68 B, split over them). That
-  gives **87 × 1M slots**, or 91M tokens of pages. q/k/v, indexer and shared-expert weights are in SRAM. Dense stages
-  hold 136 B/token/chip, and the embedding and LM-head stages none. `'auto'` applies with a finite ring
-  (`decodeStages` > 0); without one decode is unlimited. A number overrides it (0 = unlimited). The older layout,
-  with index_k replicated over the columns (408 B/token/chip), gives 71–74, matching Jira MODEL-269's "can extend to
-  71" and the 62 × 1M served on Sep 28.
+  bf16 RoPE table (128 MiB) − Wo, router and norms (~8 MiB) − the 1 GB reserve (`reserveGB`), at 204 B of KV per token
+  per chip. That is sparse attention TP4 × CP2 (tt-blaze #4855, merged Oct 11): mesh row r holds KV head r, and the
+  two columns split its K and V (136 B each per token) by 128-token block, the split index_k already had, so
+  136 B of K + V and 68 B of index_k per chip. That gives **145 × 1M slots**, or 152M tokens of pages. q/k/v, indexer
+  and shared-expert weights are in SRAM. Dense stages (TP4 × CP2 since #4703) hold 68 B/token/chip, and the embedding
+  and LM-head stages none. `'auto'` applies with a finite ring (`decodeStages` > 0); without one decode is unlimited.
+  A number overrides it (0 = unlimited). Earlier layouts: TP8, K and V replicated over the columns (340 B/token/chip),
+  gave 87; with index_k replicated too (408 B), 71–74, matching Jira MODEL-269's "can extend to 71" and the 62 × 1M
+  served on Sep 28.
 * **Batched decode** (`decodeBatch`, page: "Decode batch"; tt-blaze #4220, not measured yet). m sessions per stage per
   step, so the ring carries m × `decodeStages` sessions at once. A batch fills as sessions arrive: with N decoding it
   holds min(m, max(1, N / stages)), and the ring is re-rated when that changes. From the batch-1 trip a + b·context:
@@ -151,7 +153,7 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
   `decodeMoeFrac` (0.8, an estimate) is routed-expert weights, read once per distinct expert the batch selects,
   128 × (1 − (124/128)^m) against 4 at m = 1; the rest is shared. At 130k context: 171 / 94 / 50 / 27 tokens/s/u
   at m = 1 / 2 / 4 / 8, so a full 62-stage ring decodes 10.6k / 11.6k / 12.4k / 13.3k tokens/s. Fixed slots must hold
-  the full ring, m × stages slots, or the plan is out of memory: with 87 slots and 62 stages they cannot batch.
+  the full ring, m × stages slots, or the plan is out of memory: with 145 slots and 62 stages they hold m = 2 at most.
 * **Decode KV layouts** (`decodeCache`; page: "Decode KV layout"). Every layout reserves a request's decode KV when it is admitted to prefill and releases it when
   its decode ends; the released KV stays cached.
   * `'slots'` (default, today): one 1M slot per request. A released slot keeps its stream's KV, LRU over idle slots
@@ -208,12 +210,12 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
   `boundDecodeFrac`). The tile shows the four shares, decode-bound split by cause, with no single verdict: a run
   alternates between states (agentic traffic is bursty), so naming the largest one would hide the others.
   * *Which side to grow:* compare prefill-bound against decode-bound time. Balanced time has both sides at their
-    limit and demand-bound time neither, so they say nothing about it. Today's 4-galaxy config is balanced 46% of the
-    time but decode-bound 35% against prefill-bound 16%, and decode batching adds $58/h there while 8 prefill galaxies add no
-    goodput. In the backpressure sweep and the decode layout A/B, the next decode batching step added $27–59/h in every
-    cell where decode-bound time is the larger. Where prefill-bound time is the larger it added $0–15/h, except at 4
-    galaxies with unbatched prefill and decode batch 2 (prefill-bound 30% vs decode-bound 15%): +$32/h, though that
-    step also doubles the decode queue limit (200 to 400), which admits more concurrency.
+    limit and demand-bound time neither, so they say nothing about it. Today's 4-galaxy config is balanced 63% of the
+    time but decode-bound 34% against prefill-bound 1%, and decode batching adds $28–41/h there while 8 prefill
+    galaxies add no goodput. In the backpressure sweep and the decode layout A/B, the next paged decode batching step
+    added $19–53/h in all 38 cases where decode-bound time was the larger. Where prefill-bound time was the larger it
+    added $0–32/h, median $4; the larger gains there came where both shares were small (balanced most of the time),
+    or where the step also raised the queue limit, which admits more concurrency.
 * **Decode speed per session.** Runs report `tsuP10` and `tsuP50`: the 10th percentile and median of each session's
   output tokens / its decode time (sessions that end in the window, plus those still decoding at its end). A shared
   ring is the only thing that slows a session, so the decode-queue limit sets how low they go.
@@ -222,9 +224,8 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
   carries at once, one token per stage: 64 for a 64-stage ring, m × 64 with m-row batched decode. Every request past
   prefill decodes at once; with N decoding, each runs at TSU × min(1, decodeStages / N) (processor sharing), so an
   oversubscribed ring slows every session, its requests hold their KV slots longer, and total decode is at most
-  decodeStages × TSU tokens/s. The KV slots (`decodeSlots`) are the only hard limit: the ring's memory holds about 85
-  slots of 1M tokens per stage (tt-blaze: K/V sharded by head over the 4 mesh rows and replicated over the 2 columns,
-  index-K split over the columns, bf8, 340 B per token per chip). Runs report `decodeTpsMean` (mean speed per
+  decodeStages × TSU tokens/s. The KV slots (`decodeSlots`) are the only hard limit: the ring's memory holds 145
+  slots of 1M tokens per stage (see Decode KV memory: 204 B per token per chip with sparse attention TP4 × CP2). Runs report `decodeTpsMean` (mean speed per
   decoding session) and `ringFullFrac` (share of the time the ring carried decodeStages or more sessions).
 * **Decode speed vs context** (page: "Decode TSU Model", constant / adapt to KV length). `decodeCurve: 'm3'` makes each session's speed follow its context. The "Minimax M3
   Updates" deck measures 116 / 105 / 98 / 92 / 72 / 55 tokens/s/u at 8k / 60k / 100k / 140k / 310k / 550k context (64
@@ -433,75 +434,79 @@ Revenue at $0.30/M input, $0.06/M cached.
 | 8 galaxies, roofline kernels | best grid config | 3072 | 30.13B | 1.05B | 29.08B | 96.5% | 237.3k | $2,060 |
 
 **Decode KV layout, backpressure, batching and revenue** (`tools/decode_layout_ab.js`,
-`results/decode_layout_ab.{json,txt}`, Oct 9). The decode side is a 62-stage ring with its KV memory modelled (87 × 1M
-slots, 91M tokens of pages), decode offload tiers, and 180 tokens/s/u @100k on the M3 curve. The prefill side is as in
-the decode backpressure table below: pool + host DRAM + SSD tiers, today's kernels and round robin. For each decode
-scenario the table shows the best prefill config by net revenue at its goodput point (p90 TTFT ≤ 10 s, to the first
-decode token), at $12 per galaxy-hour with 16 decode galaxies. Output is billed as decoded. Queue backpressure uses the
-default decode-queue limit, 100, scaled to 100 × m with batch m (the same queue per ring position).
+`results/decode_layout_ab.{json,txt}`, Oct 12). The decode side is a 62-stage ring with its KV memory modelled (145 ×
+1M slots, 152M tokens of pages, sparse attention TP4 × CP2), decode offload tiers, and 180 tokens/s/u @100k on the M3
+curve. The prefill side is as in the decode backpressure table below: pool + host DRAM + SSD tiers, today's kernels and
+round robin. For each decode scenario the table shows the net revenue of the best prefill config at its goodput point
+(p90 TTFT ≤ 10 s, to the first decode token), at $12 per galaxy-hour with 16 decode galaxies, output billed as decoded,
+and in brackets the p10 decode speed per user (tokens/s/u). Queue backpressure runs at three decode-queue limits per
+ring position, 100 / 145 / 200, times the decode batch m: below, at and above the slot count.
 
-| decode scenario | prefill gx | best prefill | goodput | requests/h | output decoded, tok/s | holding KV / parked (mean) | decoding (mean) | tokens/s/u, p10 / p50 | ring full | waits | revenue/h, in + out | net/h |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| fixed slots, slot backpressure (today) | 6 | chunk 512, batch 4k | 41.9k @ C=456 | 34.0k | 9.7k | 86 / 0 | 64 | 127 / 166 | 65% | 94% wait 4.0 s before prefill | $284 + $42.00 | **$62.25** |
-| fixed slots, queue backpressure (limit 100) | 6 | chunk 512, batch 4k | 42.8k @ C=456 | 34.8k | 9.9k | 86 / 11 | 71 | 115 / 152 | 79% | 72% wait 2.5 s before prefill, 42% wait 0.13 s after prefill | $291 + $42.96 | **$70.07** |
-| paged, queue backpressure (limit 100) | 6 | chunk 512, batch 4k | 43.2k @ C=464 | 34.8k | 10.0k | 97 / 0 | 73 | 113 / 148 | 79% | 82% wait 3.2 s before prefill | $292 + $42.99 | **$70.65** |
-| paged, batch 2, queue limit 200 | 6 | chunk 512, batch 8k | 50.6k @ C=624 | 39.6k | 10.9k | 189 / 0 | 130 | 64 / 89 | 57% | 43% wait 1.2 s before prefill | $338 + $46.91 | **$121** |
-| paged, batch 4, queue limit 400 | 6 | chunk 512, batch 8k | 51.1k @ C=624 | 39.9k | 11.0k | 191 / 0 | 130 | 66 / 92 | 0% | – | $341 + $47.56 | **$125** |
-| paged, batch 8, queue limit 800 | 6 | chunk 512, batch 8k | 51.1k @ C=624 | 39.9k | 11.0k | 191 / 0 | 130 | 66 / 92 | 0% | – | $341 + $47.56 | **$125** |
-| (ref) unlimited decode | 6 | chunk 512, batch 8k | 54.0k @ C=592 | 42.4k | 12.1k | 152 / 0 | 75 | 139 / 181 | 0% | – | $378 + $52.22 | **$166** |
-| fixed slots, slot backpressure (today) | 8 | chunk 2048 | 44.1k @ C=464 | 35.1k | 10.1k | 86 / 0 | 69 | 122 / 160 | 87% | 89% wait 3.9 s before prefill | $295 + $43.53 | **$50.28** |
-| fixed slots, queue backpressure (limit 100) | 8 | chunk 2048 | 44.7k @ C=480 | 35.9k | 10.2k | 86 / 12 | 79 | 109 / 143 | 95% | 89% wait 4.3 s before prefill, 60% wait 0.19 s after prefill | $298 + $43.91 | **$54.14** |
-| paged, queue backpressure (limit 100) | 8 | chunk 2048 | 44.7k @ C=480 | 36.0k | 10.2k | 99 / 0 | 80 | 106 / 139 | 95% | 89% wait 4.2 s before prefill | $298 + $43.92 | **$54.38** |
-| paged, batch 2, queue limit 200 | 8 | chunk 1024, batch 4k | 53.2k @ C=712 | 41.3k | 11.1k | 196 / 0 | 168 | 55 / 73 | 93% | 87% wait 3.7 s before prefill | $346 + $48.11 | **$106** |
-| paged, batch 4, queue limit 400 | 8 | chunk 1024, batch 4k | 60.4k @ C=960 | 47.8k | 12.0k | 385 / 0 | 312 | 31 / 41 | 82% | 66% wait 1.5 s before prefill | $382 + $51.82 | **$146** |
-| paged, batch 8, queue limit 800 | 8 | chunk 512, batch 4k | 63.5k @ C=1040 | 49.4k | 12.5k | 436 / 0 | 356 | 28 / 38 | 0% | – | $395 + $53.87 | **$161** |
-| (ref) unlimited decode | 8 | chunk 512, batch 8k | 72.9k @ C=816 | 59.2k | 16.5k | 221 / 0 | 101 | 140 / 182 | 0% | – | $510 + $71.41 | **$294** |
+| decode scenario | 6 gx: slot backpressure | 6 gx: queue, limit 100 / 145 / 200 × m | 8 gx: slot backpressure | 8 gx: queue, limit 100 / 145 / 200 × m |
+|---|---|---|---|---|
+| fixed slots (today: slot backpressure) | $83 (78) | $71 (113) / $83 (78) / $96 (69) | $71 (71) | $54 (106) / $71 (71) / $73 (64) |
+| fixed slots, batch 2 | $104 (89) | $120 (78) / $120 (72) / $120 (72) | $99 (78) | $103 (67) / $103 (67) / $103 (67) |
+| paged | – | $71 (113) / $83 (78) / $97 (63) | – | $54 (106) / $71 (71) / $75 (52) |
+| paged, batch 2 | – | $121 (64) / $121 (63) / $121 (63) | – | $106 (55) / $109 (39) / $121 (28) |
+| paged, batch 4 | – | $125 (66) / $125 (66) / $125 (66) | – | $146 (31) / $147 (29) / $147 (29) |
+| paged, batch 8 | – | $125 (66) / $125 (66) / $125 (66) | – | $161 (28) / $161 (28) / $161 (28) |
+| (ref) unlimited decode | $166 (139) | | $294 (140) | |
 
-* **Unbatched, the 62-stage ring caps output at about 10.1k tokens/s.** The unbatched scenarios differ in requests per
-  hour (input revenue) and in where decode's waiting goes.
-* **Queue backpressure beats slot backpressure: +$8/h at 6 prefill galaxies, +$4/h at 8.** With slot backpressure,
-  slots are held by requests still in prefill, so 64–69 of the 87 decode. With queue backpressure up to 13 more
-  requests may start prefill with their KV parked on SSD, and a slot goes to a request once it is ready to decode:
-  71–79 decode.
-* **With the same queue limit, paging and fixed slots are within $1/h.** The limit sets how many requests decode takes
-  on; what differs is only where the ones beyond 87 wait: on SSD (slots) or in pages (paging).
-* **Batching is the larger lever, if slower decode per user is acceptable.** Paged decode at batch 2 / 4 / 8 nets $121
-  / $125 / $125 at 6 prefill galaxies and $106 / $146 / $161 at 8, against $71 / $54 unbatched. Two effects:
-  * the ring decodes more (output +9–23%), since a batch shares weight reads;
-  * more sessions decode at once (130–356 against 73–80), each from its first token, so prefill runs at higher
-    concurrency (624–1040 against 464–480) within the TTFT SLO. That is most of the gain (requests/h +14–37%).
-  * The cost is per-user speed: p10 64 / 55 tokens/s/u at batch 2, 28–31 at batch 4–8 (8 gx). At 6 prefill galaxies
-    batch 4 and 8 are the same: prefill, not decode, is the limit there.
-  * Fixed slots cannot batch: 2 × 62 sessions need 124 slots, and 87 fit.
+* **A queue limit at the slot count is slot backpressure.** At 145, fixed slots and paging both give exactly the slot
+  backpressure result ($83 / $71): decode takes on 145 requests either way. At 100 the queue leaves 45 slots idle:
+  −$12 / −$16 per hour. (With 87 slots, before CP2, the limit of 100 was above the slot count and queue backpressure
+  won; that was the limit, not the mode.)
+* **Above the slot count the limit trades decode speed for throughput.** At 200, requests beyond the 145 park on SSD
+  (fixed slots) or take more pages, and decode shares the ring more widely: +$13–14 / +$2–4 per hour, with p10 78 → 63–69
+  tokens/s/u at 6 gx and 71 → 52–64 at 8 gx.
+* **Unbatched, the 62-stage ring caps output at about 10.1k tokens/s** in every scenario.
+* **Fixed slots can now batch 2** (2 × 62 sessions in 145 slots): $104 / $99 with slot backpressure, $120 / $103 with
+  queue backpressure, against $121 / $106–121 paged. Paging pulls ahead only at 8 gx with the higher limit, where it
+  holds about 390 sessions (p10 28 tokens/s/u).
+* **Batching is the larger lever, if slower decode per user is acceptable:** paged batch 4 / 8 nets $125 / $125 at 6
+  gx (prefill, not decode, is the limit there, at any queue limit) and $146–147 / $161 at 8 gx, at p10 28–66
+  tokens/s/u. A batch shares weight reads, so the ring decodes more (output +10–24%), and more sessions decode at once,
+  so prefill runs at higher concurrency within the TTFT SLO. Unlimited decode would net $166 / $294.
   * The batch model is an estimate (`decodeMoeFrac`, no batched measurement yet; tt-blaze #4226 plans one at m = 1 / 8).
-* **The queue limit trades decode speed for throughput, unbatched too.** Earlier runs with higher limits: 124 gave
-  paging $78 / $71 at p10 93 / 83 tokens/s/u; no limit gave $104 / $91 at p10 37 / 19 (every session past prefill
-  sharing the ring). Fixed slots gain little from a higher limit, because 87 slots cap the sessions decoding.
+
 **Decode backpressure on the study's best prefill configs** (`tools/backpressure_sweep.js`,
-`results/backpressure_sweep.{json,txt}`, Oct 9; balance states re-run Oct 12). The study's best stacks with today's
-kernels (4 gx 16×[4,2], 8 gx 32×[4,2]: tiers, pool arena, async handoff, MSA-local, tile padding), prefill batching on
-(fused, budget 8k / 16k) or off (per-request attention, a 2k / 5k pass), against the decode strategies above (62-stage
-ring, modelled memory, decode tiers, queue limit 100 × decode batch). Net $/h at the goodput point, the better budget
-per cell, prefill batched / unbatched:
+`results/backpressure_sweep.{json,txt}`, Oct 12). The study's best stacks with today's kernels (4 gx 16×[4,2], 8 gx
+32×[4,2]: tiers, pool arena, async handoff, MSA-local, tile padding), prefill batching on (fused, budget 8k / 16k) or
+off (per-request attention, a 2k / 5k pass), against the decode strategies above (62-stage ring, 145 slots or 152M
+tokens of pages, decode tiers; queue limit 100 / 145 / 200 × decode batch m). Net $/h at the goodput point, the better
+budget per cell, prefill batched / unbatched:
 
-| decode | 4 gx | 8 gx |
-|---|---|---|
-| slot backpressure, fixed slots (today) | $96 / $99 | $53 / $55 |
-| queue backpressure, fixed slots | $102 / $102 | $55 / $56 |
-| queue backpressure, paged, decode batch 1 | $102 / $103 | $55 / $59 |
-| queue backpressure, paged, decode batch 2 | $154 / $146 | $107 / $110 |
-| queue backpressure, paged, decode batch 4 | $191 / $178 | $143 / $143 |
-| queue backpressure, paged, decode batch 8 | **$218** / $181 | $174 / $174 |
+| decode, 4 gx | slot backpressure | queue, limit 100 × m | 145 × m | 200 × m |
+|---|---|---|---|---|
+| fixed slots (today: slot backpressure) | $118 / $118 | $102 / $103 | $118 / $118 | $120 / $121 |
+| fixed slots, batch 2 | $146 / $146 | $149 / $150 | $149 / $151 | $149 / $151 |
+| paged, batch 1 | – | $102 / $103 | $118 / $118 | $119 / $119 |
+| paged, batch 2 | – | $154 / $146 | $159 / $159 | $162 / $165 |
+| paged, batch 4 | – | $191 / $178 | $197 / $178 | $201 / $178 |
+| paged, batch 8 | – | **$222** / $181 | **$222** / $181 | **$222** / $181 |
 
-* Unbatched decode limits every cell: decode utilization (ring full) 80–99%. At 8 galaxies the cells are
-  decode-bound 48–62% of the time (waiting for slots with fixed slots, for room in the decode queue with paging) and
-  balanced (prefill had work as well) 30–48%; at 4 galaxies balanced 46–68% and decode-bound 26–35%. Prefill batching changes nothing (±$4/h), and 4 prefill galaxies net
-  about $45/h more than 8.
+| decode, 8 gx | slot backpressure | queue, limit 100 × m | 145 × m | 200 × m |
+|---|---|---|---|---|
+| fixed slots (today: slot backpressure) | $70 / $71 | $55 / $59 | $70 / $71 | $73 / $74 |
+| fixed slots, batch 2 | $100 / $102 | $101 / $102 | $102 / $103 | $102 / $103 |
+| paged, batch 1 | – | $55 / $59 | $70 / $71 | $72 / $76 |
+| paged, batch 2 | – | $107 / $110 | $109 / $110 | $121 / $120 |
+| paged, batch 4 | – | $143 / $143 | $147 / $148 | $160 / $162 |
+| paged, batch 8 | – | $186 / $189 | $198 / **$199** | $198 / **$199** |
+
+* As above, a limit of 145 (the slot count) reproduces slot backpressure, 100 costs $12–16/h unbatched, and 200 adds
+  $1–5/h unbatched and $10–14/h at decode batch 2–4 on 8 gx ($0–6 on 4 gx), at a lower p10 (8 gx paged batch 1: 94–102 / 65–68 /
+  47–51 tokens/s/u at 100 / 145 / 200).
+* Unbatched decode limits every cell: decode utilization (ring full) 94–99%. At 8 galaxies the cells are decode-bound
+  47–63% of the time (waiting for slots, or for room in the decode queue) and balanced 32–49%; at 4 galaxies balanced
+  58–76% and decode-bound 23–35%. Prefill batching changes at most $4/h, and 4 prefill galaxies net $43–48/h more
+  than 8.
+* Fixed-slot decode batch 2 adds $28–47/h over batch 1; paged batch 2 adds as much or more at the higher limits.
 * Prefill batching only pays once decode batching relieves decode, and only at 4 galaxies: with decode batch 4 / 8,
-  unbatched prefill is prefill-bound 58% / 98% of the time (busiest stage 97% busy), and batched prefill adds $13 / $37
-  per hour. At 8 galaxies decode-bound time stays 38–59% through decode batch 4 (the decode queue full) and prefill
-  stays under 65% busy, so batching it is worth nothing.
-* The best net, $218/h (4 gx, batched prefill, decode batch 8), runs decode at p10 23 tokens/s/u.
+  unbatched prefill is prefill-bound 58% / 98% of the time (busiest stage 97% busy), and batched prefill adds
+  $13–23 / $41 per hour. At 8 galaxies it changes at most $4/h.
+* The best net, $222/h (4 gx, batched prefill, paged decode batch 8, any limit), runs decode at p10 21 tokens/s/u; 8 gx
+  peaks at $199/h (batch 8, limit ≥ 145, p10 13).
 
 * **Earlier run (75 slots): the hybrid layouts.** With 62 global lanes and a 13.6M-token pool
   the hybrid beat slot backpressure by $14–25/h, the same effect as queue backpressure (a slot only for a session

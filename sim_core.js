@@ -51,11 +51,13 @@
   // Decode KV memory, modelled from tt-blaze's M3 decode (one 4x2 mesh, 8 chips, per stage). The sparse (MSA/MoE)
   // stages bind: per chip, 8 DRAM banks x 4080 MiB (Blackhole SoC descriptor), minus all 128 routed experts at half
   // the intermediate width (bf4), the 1M x 64 bf16 RoPE table, Wo (bf8), router and norms (~1.5 MiB), and the per-chip
-  // reserve (reserveGB); q/k/v, indexer and shared-expert weights live in SRAM. KV per token per chip, bf8: K and V
-  // (one head per chip, replicated over the 2 columns) 136 B each + index_k split over the columns 68 B = 340 B.
-  // Dense stages hold 136 B/token/chip (they fit ~2.7x more); the embedding and LM-head stages hold none.
+  // reserve (reserveGB); q/k/v, indexer and shared-expert weights live in SRAM. KV per token per chip, bf8, with
+  // sparse attention TP4 x CP2 (tt-blaze #4855, the default since Oct 11): mesh row r holds KV head r and the two
+  // columns split its K/V by 128-token block, as index-K already is, so K and V are 136 B each over the 2 columns
+  // = 136 B, + index_k 68 B = 204 B (TP8 before it replicated K/V over the columns: 340 B). Dense stages (TP4 x CP2
+  // since #4703) hold 68 B/token/chip; the embedding and LM-head stages hold none.
   const DEC_DRAM = 8 * 4080 * 2 ** 20;
-  const DEC_KVB_CHIP = 2 * 128 * BF8 + 128 * BF8 / 2;
+  const DEC_KVB_CHIP = 2 * 128 * BF8 / 2 + 128 * BF8 / 2;
   const decodeWeightsChip = () => M3.Ex * 3 * M3.E * (M3.I / 2) * BF4 + M3.maxCtx * 64 * BF16 + 1024 * M3.E * BF8 + 1.5 * 2 ** 20;
 
   const OPS_MOE = ['norm_ag', 'qkv', 'idx_branch', 'misc', 'o_proj', 'attn_rs', 'shared', 'router', 'dispatch', 'experts', 'combine', 'moe_reduce'];
@@ -498,7 +500,7 @@
     // slot fit (35 x 1M slots on 16x[2,4], bf8 index_k, even split; CCL scratch + transient buffers)
     reserveGB: 1, expertImb: IMB0, maxInflight: 0,
     // decodeSlots: decode KV memory, in 1M-token slots. 'auto' (default) = modelled from the decode chips' DRAM (see
-    //   DEC_DRAM; 87 slots today, ~91M tokens paged) when the ring is finite (decodeStages > 0), unlimited otherwise; a
+    //   DEC_DRAM; 145 slots, ~152M tokens paged) when the ring is finite (decodeStages > 0), unlimited otherwise; a
     //   number overrides it (0 = unlimited). See decodeCache and decodeBackpressure for how requests use it.
     decodeSlots: 'auto',
     // decode ring: decodeTps = tokens per second per user (TSU) while the ring has room, i.e. one token per trip

@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // Decode KV layout, backpressure and batching, and their effect on revenue. Decode: a 62-stage ring with its KV memory
-// modelled from the decode chips' DRAM (87 x 1M slots, 91M tokens of pages), decode-side host DRAM + SSD tiers on its 16 galaxies,
+// modelled from the decode chips' DRAM (145 x 1M slots, 152M tokens of pages), decode-side host DRAM + SSD tiers on its 16 galaxies,
 // speed on the measured M3 curve at 180 tokens/s/u @100k. Scenarios:
 //   fixed slots, slot backpressure   today: a request waits for a free slot before prefill, holds it to decode end
 //   fixed slots / paged, queue backpressure: prefill starts a request while the decode queue (requests holding slots
-//                                    / pages, or parked) is under the limit (default 100); its KV goes
+//                                    / pages, or parked) is under the limit (100 / 145 / 200 x m); its KV goes
 //                                    to free slots / pages, else to the decode SSDs, and a parked request takes slots /
 //                                    pages after prefill (FIFO), reading its KV back first
-//   paged, batched decode            m = 2 / 4 / 8 sessions per stage, decode-queue limit 100 x m (fixed slots cannot
-//                                    batch: m x 62 sessions need more than 87 slots)
+//   batched decode                   m = 2 / 4 / 8 sessions per stage on pages; fixed slots hold m = 2 at most
+//                                    (2 x 62 sessions in 145 slots)
 //   unlimited decode                 reference: no KV or ring limit
 // Prefill: the decode-backpressure setup of README.md, 6 and 8 galaxies ([2,4] stages), paged pool + host DRAM + SSD
 // tiers, today's kernels, round robin; best (by net revenue at the goodput point) of no batching (chunk 1024 / 2048)
@@ -26,11 +26,17 @@ const { RESULTS } = require('../lib/paths.js');
 const { usd } = require('../lib/price.js');
 
 const RING = { decodeStages: 62, decodeSlots: 'auto', decodeHostTier: true, decodeGalaxies: SIM.COST.decodeGalaxies };
+// queue limits per ring position (x decode batch m): below, at and above the 145 modelled slots
+const LIMITS = [100, 145, 200];
 const DECODE = [
   ['fixed slots, slot backpressure (today)', Object.assign({ decodeCache: 'slots', decodeBackpressure: 'slot' }, RING)],
-  ['fixed slots, queue backpressure (limit 100)', Object.assign({ decodeCache: 'slots', decodeBackpressure: 'queue' }, RING)],
-  ['paged, queue backpressure (limit 100)', Object.assign({ decodeCache: 'paging', decodeBackpressure: 'queue' }, RING)],
-  ...[2, 4, 8].map((m) => [`paged, batch ${m}, queue limit ${100 * m}`, Object.assign({ decodeCache: 'paging', decodeBackpressure: 'queue', decodeBatch: m, decodeQueueMax: 100 * m }, RING)]),
+  ['fixed slots, batch 2, slot backpressure', Object.assign({ decodeCache: 'slots', decodeBackpressure: 'slot', decodeBatch: 2 }, RING)],
+  ...LIMITS.flatMap((L) => [
+    [`fixed slots, queue backpressure (limit ${L})`, Object.assign({ decodeCache: 'slots', decodeBackpressure: 'queue', decodeQueueMax: L }, RING)],
+    [`fixed slots, batch 2, queue limit ${2 * L}`, Object.assign({ decodeCache: 'slots', decodeBackpressure: 'queue', decodeBatch: 2, decodeQueueMax: 2 * L }, RING)],
+    [`paged, queue backpressure (limit ${L})`, Object.assign({ decodeCache: 'paging', decodeBackpressure: 'queue', decodeQueueMax: L }, RING)],
+    ...[2, 4, 8].map((m) => [`paged, batch ${m}, queue limit ${L * m}`, Object.assign({ decodeCache: 'paging', decodeBackpressure: 'queue', decodeBatch: m, decodeQueueMax: L * m }, RING)]),
+  ]),
   ['(ref) unlimited decode', { decodeSlots: 0, decodeStages: 0 }],
 ];
 const PREFILL = [];

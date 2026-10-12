@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Decode backpressure strategies on the study's best prefill configurations (today's kernels, 4 and 8 galaxies), with
-// and without prefill batching. Decode: a 62-stage ring with modelled KV memory (87 x 1M slots), decode host DRAM + SSD
+// and without prefill batching. Decode: a 62-stage ring with modelled KV memory (145 x 1M slots), decode host DRAM + SSD
 // tiers, 180 tokens/s/u @100k on the M3 curve.
-//   decode: slot backpressure on fixed slots (today) | queue backpressure on fixed slots (limit 100) | queue
-//           backpressure on paged decode KV at decode batch 1 / 2 / 4 / 8 (limit 100 x batch)
+//   decode: slot backpressure on fixed slots at decode batch 1 (today) / 2 | queue backpressure, limit 100 / 145 /
+//           200 x decode batch m, on fixed slots at m = 1 / 2 and on paged decode KV at m = 1 / 2 / 4 / 8
 //   prefill batching: on (the best config's fused, tile-padded batches; budget 8k / 16k) | off (per-request
 //           attention, a 2048 / 5120-token pass)
 // Each cell keeps the prefill budget with the higher net revenue at the goodput point (p90 TTFT <= 10 s); MiniMax's
@@ -19,10 +19,16 @@ const { RESULTS, STUDY } = require('../lib/paths.js');
 const { usd } = require('../lib/price.js');
 
 const RING = { decodeStages: 62, decodeSlots: 'auto', decodeHostTier: true, decodeGalaxies: SIM.COST.decodeGalaxies };
+// queue limits per ring position (x decode batch m): below, at and above the 145 modelled slots
+const LIMITS = [100, 145, 200];
 const DECODE = [
   ['slot backpressure, fixed slots (today)', { decodeCache: 'slots', decodeBackpressure: 'slot' }],
-  ['queue backpressure, fixed slots', { decodeCache: 'slots', decodeBackpressure: 'queue' }],
-  ...[1, 2, 4, 8].map((m) => [`queue backpressure, paged, decode batch ${m}`, { decodeCache: 'paging', decodeBackpressure: 'queue', decodeBatch: m, decodeQueueMax: 100 * m }]),
+  ['slot backpressure, fixed slots, decode batch 2', { decodeCache: 'slots', decodeBackpressure: 'slot', decodeBatch: 2 }],
+  ...LIMITS.flatMap((L) => [
+    [`queue backpressure (limit ${L} x m), fixed slots`, { decodeCache: 'slots', decodeBackpressure: 'queue', decodeQueueMax: L }],
+    [`queue backpressure (limit ${L} x m), fixed slots, decode batch 2`, { decodeCache: 'slots', decodeBackpressure: 'queue', decodeBatch: 2, decodeQueueMax: 2 * L }],
+    ...[1, 2, 4, 8].map((m) => [`queue backpressure (limit ${L} x m), paged, decode batch ${m}`, { decodeCache: 'paging', decodeBackpressure: 'queue', decodeBatch: m, decodeQueueMax: L * m }]),
+  ]),
 ];
 const PREFILL = [
   ['batched', [8192, 16384].map((b) => ({ batch: true, attn: 'fused', lanesOverride: true, budget: b }))],
