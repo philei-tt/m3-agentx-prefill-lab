@@ -172,7 +172,8 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
   * `'slot'` (default, today; fixed slots only): a request waits for a free decode slot before its prefill starts.
   * `'queue'` (fixed slots or paging; with a finite memory it needs the decode offload tiers): prefill starts a request
     as long as the decode queue, the requests holding slots or pages plus those parked, is under `decodeQueueMax`
-    (default 100; 0 = no limit); otherwise the request waits. Its KV migrates into a free slot or free pages if there are any, else to
+    (default 145, the modelled slot count: at that limit queue backpressure on fixed slots matches slot backpressure,
+    and below it slots sit idle; 0 = no limit); otherwise the request waits. Its KV migrates into a free slot or free pages if there are any, else to
     the decode SSDs (parked: PCIe + SSD write). Once its prefill is done a parked request waits for a slot or pages
     (FIFO, ahead of new admissions) and reads its KV back from SSD before its first token; that wait counts in TTFT.
     Requests holding slots or pages decode round robin on the ring, so the limit also caps how many share it. With the

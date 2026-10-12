@@ -539,11 +539,11 @@
     //   'slot'  (today; fixed slots only) = once it holds a free decode slot; it waits (in TTFT) until one frees.
     //   'queue' (fixed slots or paging, with the decode offload tiers) = once the decode queue has room: the requests
     //           decode has taken on (holding slots / pages, or parked) number fewer than decodeQueueMax (default
-    //           100; 0 = no limit). Its KV migrates into a free slot / pages if there are any; otherwise to the decode SSDs
+    //           145, the modelled slot count, so queue backpressure is at least slot backpressure; 0 = no limit). Its KV migrates into a free slot / pages if there are any; otherwise to the decode SSDs
     //           (parked: PCIe + SSD write). A parked request, once its prefill is done, waits for a slot / pages (FIFO,
     //           ahead of new admissions) and reads its KV back before its first token (in TTFT). Requests holding
     //           slots / pages decode round robin on the ring (decodeStages), so the limit caps how many share it.
-    decodeBackpressure: 'slot', decodeQueueMax: 100,
+    decodeBackpressure: 'slot', decodeQueueMax: 145,
     concurrency: 64, decodeTps: 180, duration: 1800, seed: 1, idleCap: 10, startMin: 0, startMax: 1, maxWarmup: 1e6,
     gapCap: Infinity,      // AgentX forbids capping recorded idle gaps (only the 10 s system-idle cap applies)
     // policy: 'rr' (default) = round robin, see below; 'rtc' = run to completion (no preemption), oldest first

@@ -203,13 +203,13 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   assert.ok(sl.decHitRate > 0 && st.decHitRate > sl.decHitRate && st.decPcieD2HUtil > 0 && sl.decPcieD2HUtil === 0, `slot hits ${sl.decHitRate} / tiers ${st.decHitRate}`);
 }
 
-// 10e. queue backpressure (fixed decode slots + decode SSD; default queue limit 100): no request waits before prefill without a limit; those
+// 10e. queue backpressure (fixed decode slots + decode SSD; default queue limit 145, the modelled slot count): no request waits before prefill without a limit; those
 //      admitted without a slot are parked on SSD and take a slot after prefill (first token later); slots held never
 //      exceed the slots, and more requests are served than with slot backpressure. A decode-queue limit caps slots
 //      held + parked; the mode needs the decode SSD. Decode speed per session: decodeTps on an unshared ring, lower when shared.
 {
   const cfg = Object.assign({ cache: 'pool', chunk: 512, batch: true, budget: 8192 }, base, { concurrency: 128, decodeStages: 8, decodeSlots: 10, decodeHostTier: true });
-  assert.strictEqual(SIM.DEFAULTS.decodeQueueMax, 100);
+  assert.strictEqual(SIM.DEFAULTS.decodeQueueMax, 145);
   const sl = SIM.simulate(TR, cal, cfg), qu = SIM.simulate(TR, cal, Object.assign({ decodeBackpressure: 'queue', decodeQueueMax: 0 }, cfg));
   const q4 = SIM.simulate(TR, cal, Object.assign({ decodeBackpressure: 'queue', decodeQueueMax: 14 }, cfg));
   assert.ok(sl.decWaitPerS > 0 && sl.decParkPerS === 0 && qu.decWaitPerS === 0 && qu.decParkPerS > 0 && qu.decSlotsMax <= 10 && qu.decSlotWaitFrac > 0
