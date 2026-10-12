@@ -152,18 +152,22 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   const nc = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeSlots: 0, decodeStages: 4 }));
   const hi = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeSlots: 0, concurrency: 256 }));
   const lo = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeSlots: 0, concurrency: 2 }));
-  const qb = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeStages: 8, decodeSlots: 8, decodeBackpressure: 'queue', decodeHostTier: true, ssdTBPerGalaxy: 4 }));
+  const qb = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeStages: 16, decodeSlots: 8, decodeBackpressure: 'queue', decodeHostTier: true, ssdTBPerGalaxy: 4 }));
   const bv = (r) => { const v = SIM.balanceVerdict(r); return v.state + (v.cause ? ` (${v.cause})` : ''); };
   for (const r of [u, c, w, n, nc, hi, lo, qb]) {
     const f = [r.boundPrefillFrac, r.boundDecodeFrac, r.boundBalancedFrac, r.boundDemandFrac];
     assert.ok(!r.error && f.every((x) => x >= 0 && x <= 1) && Math.abs(f[0] + f[1] + f[2] + f[3] - 1) < 1e-9 && r.boundDecodeComputeFrac <= r.boundDecodeFrac + 1e-12, `bound shares ${f}`);
   }
   // slot limit, no ring: prefill idles waiting for slots (memory; exactly the slot-starved time); a huge ring adds
-  // nothing; an oversubscribed one is compute
+  // nothing; a full one is compute
   assert.ok(bv(u) === 'decode-bound (memory)' && Math.abs(u.boundDecodeFrac - u.pfStarvedSlotFrac) < 1e-9 && w.boundDecodeComputeFrac === 0 && bv(c) === 'decode-bound (compute)', `${bv(u)} / ${bv(c)}`);
+  // a ring as large as the slots is never oversubscribed, but a full ring (every slot decoding) still counts as compute
+  const rs = SIM.simulate(TR, cal, Object.assign({ decodeStages: 16 }, cfg));
+  assert.ok(rs.boundDecodeComputeFrac > 0 && Math.abs(rs.boundDecodeComputeFrac - rs.ringFullFrac) < 1e-9, `full ring ${rs.boundDecodeComputeFrac} / ${rs.ringFullFrac}`);
   // unlimited slots on a small ring: nobody waits for a slot, yet decode is the limit (the ring slows every session)
   assert.ok(nc.pfStarvedSlotFrac === 0 && bv(nc) === 'decode-bound (compute)', `small ring, no slot limit: ${bv(nc)}`);
-  // queue backpressure: requests past prefill waiting for a slot count as decode memory, though prefill never waits
+  // queue backpressure (a ring larger than the slots, so never full): requests past prefill waiting for a slot count
+  // as decode memory, though prefill never waits
   assert.ok(qb.pfStarvedSlotFrac === 0 && qb.decSlotWaitFrac > 0 && bv(qb) === 'decode-bound (memory)', `queue backpressure: ${bv(qb)}`);
   // no decode limits: decode never holds anything back; prefill-bound with many lanes, demand-bound with few
   assert.ok(n.boundDecodeFrac === 0 && n.boundBalancedFrac === 0 && Math.abs(n.boundDemandFrac - n.pfStarvedIdleFrac) < 1e-9, 'no decode limits');

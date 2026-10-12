@@ -186,8 +186,8 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
   * *Does prefill have work?* Its first stage is computing, or a request still has tokens not yet fed into it (not
     started, or started with chunks left). Stage 0 idle with work left (the in-flight chunk cap or the KV lanes hold
     it back) still counts as work: prefill is saturated further down. Only later stages busy does not.
-  * *Is decode holding things back?* More sessions are decoding than the ring holds (decodeStages × decodeBatch;
-    every session slows: compute), a request past prefill waits for a slot or pages (queue backpressure: memory), or
+  * *Is decode holding things back?* The ring is full: as many sessions decoding as it holds (decodeStages ×
+    decodeBatch) or more, when every session slows (compute), a request past prefill waits for a slot or pages (queue backpressure: memory), or
     prefill has no work while a request waits for decode KV before it can start (memory). A request waiting for
     decode KV while prefill is busy does not count: freeing a slot would only move it into the prefill queue.
 
@@ -197,7 +197,7 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
   | **prefill has no work** | demand-bound | decode-bound |
 
   Runs report the shares `boundPrefillFrac`, `boundDecodeFrac`, `boundBalancedFrac` and `boundDemandFrac` (they sum
-  to 1), and `boundDecodeComputeFrac`, the part of decode-bound time with the ring oversubscribed (the rest is memory).
+  to 1), and `boundDecodeComputeFrac`, the part of decode-bound time with the ring full (the rest is memory).
   `balanceVerdict` (sim_core.js) picks the state with the largest share, with decode-bound marked compute or memory by
   its larger part; the tile shows that verdict, one sentence on what its share means, and the time in each state.
 * **Decode speed per session.** Runs report `tsuP10` and `tsuP50`: the 10th percentile and median of each session's
@@ -479,9 +479,9 @@ per cell, prefill batched / unbatched:
 | queue backpressure, paged, decode batch 4 | $191 / $178 | $143 / $143 |
 | queue backpressure, paged, decode batch 8 | **$218** / $181 | $174 / $174 |
 
-* Unbatched decode limits every cell: the ring is oversubscribed for most of the window. At 8 galaxies the cells are
-  decode-bound (compute) 51–66% of the time and balanced (prefill had work as well) 29–48%; at 4 galaxies balanced
-  44–68% and decode-bound 28–37%, all compute. Prefill batching changes nothing (±$4/h), and 4 prefill galaxies net
+* Unbatched decode limits every cell: the ring is full for most of the window. At 8 galaxies the cells are
+  decode-bound (compute) 51–66% of the time and balanced (prefill had work as well) 30–48%; at 4 galaxies balanced
+  46–68% and decode-bound 28–37%, all compute. Prefill batching changes nothing (±$4/h), and 4 prefill galaxies net
   about $45/h more than 8.
 * Prefill batching only pays once decode batching relieves decode, and only at 4 galaxies: with decode batch 4 / 8,
   unbatched prefill is prefill-bound 58% / 98% of the time (busiest stage 97% busy), and batched prefill adds $13 / $37

@@ -1922,10 +1922,10 @@
       // (pfStarved* in the results), and the prefill / decode balance state (bound* in the results)
       if (warmDone && t > now) {
         const a = Math.max(now, t0), b = Math.min(t, tEnd);
-        // decode holds things back: the ring is oversubscribed (compute; every session slowed), or a request past
-        // prefill waits for a slot / pages (memory); a request waiting for decode KV before prefill counts only
-        // while prefill has no work (below)
-        const decCompute = cfg.decodeStages > 0 && decoding > decCap, decMemAfter = slotQ.length > 0;
+        // decode holds things back: the ring is full (compute; every position taken, and past full every session
+        // slows), or a request past prefill waits for a slot / pages (memory); a request waiting for decode KV
+        // before prefill counts only while prefill has no work (below)
+        const decCompute = cfg.decodeStages > 0 && decoding >= decCap, decMemAfter = slotQ.length > 0;
         if (b > a) for (const rp of reps) {
           // prefill has work: stage 0 is computing, or a request still has tokens not yet fed into it (not started,
           // or started with chunks left); stage 0 idle with work left means a later stage or the lanes hold it back
@@ -1990,10 +1990,10 @@
       // share of the window it carried decodeStages or more sessions
       decodeTpsMean: st.decingArea > 0 ? st.decTokArea / st.decingArea : cfg.decodeTps, ringFullFrac: cfg.decodeStages > 0 ? st.ringFull / D : 0,
       // prefill / decode balance: share of the window (per prefill replica) in each state, by two questions: does
-      // prefill have work, and does decode hold things back (ring oversubscribed, a request past prefill waiting for
+      // prefill have work, and does decode hold things back (ring full, a request past prefill waiting for
       // a slot / pages, or prefill idle while a request waits for decode KV)? prefill-bound = work, decode not
-      // holding back; decode-bound = no work, decode holding back (boundDecodeComputeFrac: of it, the ring
-      // oversubscribed; the rest is memory); balanced = both; demand-bound = neither. The four sum to 1.
+      // holding back; decode-bound = no work, decode holding back (boundDecodeComputeFrac: of it, the ring full; the
+      // rest is memory); balanced = both; demand-bound = neither. The four sum to 1.
       boundPrefillFrac: st.bPrefill / (D * reps.length), boundDecodeFrac: st.bDecode / (D * reps.length),
       boundDecodeComputeFrac: st.bDecodeCompute / (D * reps.length), boundBalancedFrac: st.bBalanced / (D * reps.length),
       boundDemandFrac: st.bDemand / (D * reps.length),
@@ -2146,7 +2146,7 @@
   }
 
   // Prefill / decode balance verdict of a result: the state that took the largest share of the window, and for
-  // decode-bound whether it was mostly compute (ring oversubscribed) or memory (waiting for decode KV).
+  // decode-bound whether it was mostly compute (ring full) or memory (waiting for decode KV).
   // -> { state: 'prefill-bound' | 'decode-bound' | 'balanced' | 'demand-bound', frac, cause: 'compute' | 'memory' | null }
   function balanceVerdict(p) {
     const s = [['prefill-bound', p.boundPrefillFrac], ['decode-bound', p.boundDecodeFrac], ['balanced', p.boundBalancedFrac], ['demand-bound', p.boundDemandFrac]];
