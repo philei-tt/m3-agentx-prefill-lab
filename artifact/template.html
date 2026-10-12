@@ -314,6 +314,10 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
     <div class="viewat"><label for="viewAt">Metrics at</label><select id="viewAt"></select><label for="viewConc">or any C =</label><input id="viewConc" type="number" min="1" max="16384" step="1" placeholder="e.g. 300" style="width:90px"><span class="muted small">or click a chart</span></div>
     <div class="tiles" id="tiles"></div>
   </div>
+  <details class="panel" id="decodePanel" open>
+    <summary>Decode stats <span class="muted small" id="decAt"></span></summary>
+    <div class="tiles" id="decTiles" style="margin-top:10px"></div>
+  </details>
   <div class="panel">
     <div class="legend" id="legend"></div>
     <div class="charts">
@@ -682,7 +686,8 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
     <ul>
       <li><b>Loading.</b> On load, the charts show the precomputed baseline (<span class="mono">today-C</span>) while a live sweep of the starting configuration runs, which then replaces it. <b>Run sweep</b> simulates your configuration at every concurrency in the grid, in your browser, in about 5-30 s. It also runs the same configuration with an infinite cache, unless you untick that option.</li>
       <li><b>Metrics at.</b> Picks the concurrency the tiles and "Where processed tokens go" show: the goodput point by default, any concurrency of the sweep (also by clicking a chart; a dashed line marks it), or any other concurrency typed into the box, which is simulated on demand (with its infinite-cache twin) and added to the charts. At a picked concurrency the first tile shows useful tok/s there instead of goodput, and the infinite-cache tile compares at the same concurrency. Added concurrencies never move goodput, which comes from the sweep alone. Peak useful always describes the sweep. Copy link keeps the choice.</li>
-      <li><b>Tiles.</b> Goodput; goodput with an infinite cache; TTFT p50/p90 and hit rate at the goodput point; input tokens per hour at the goodput point (the input of the requests completed there, split into new tokens the pipeline prefilled, re-prefill included, and cached prefix hits) and requests completed per hour; revenue (below); the peak useful throughput regardless of TTFT; wasted compute (the share of processed tokens that is re-prefill or padding, the complement of the useful share in "Where processed tokens go"); prefill / decode balance (every moment of the run, per prefill replica, is one of four states. Prefill-bound: prefill has work (its first stage is computing, or a request still has tokens not yet fed into it) and decode is not at its limit. Balanced: prefill has work and decode is at its limit (the decode ring full, or a request past prefill waiting for a slot or pages). Decode-bound: prefill is idle while a request waits on decode, split by cause: memory (a slot or pages, before or after prefill) or queue full (room in the decode queue, with queue backpressure). Demand-bound: prefill is idle and nothing waits on decode, even with the ring full. The tile shows the share of the time in each state, with no single verdict: a run alternates between states. To choose which side to grow, compare prefill-bound against decode-bound time, with decode utilization in decode stats); decode stats (requests holding decode KV, mean and max: from admission to prefill until the end of their decode, which is what the decode memory caps; the pool in use with a paged layout; with a limit, the share of requests that waited before prefill (for a decode slot, or with queue backpressure for room in the decode queue) and the mean wait; with queue backpressure, the share parked on SSD and the share that waited for a slot after prefill, with the mean delay of their first token; the decode speed per user, 10th percentile and median; decode utilization, the share of the time the decode ring was full; the decode-side prefix hit); requests per batch at the goodput point and at the peak.</li>
+      <li><b>Tiles.</b> Goodput; goodput with an infinite cache; TTFT p50/p90 and hit rate at the goodput point; input tokens per hour at the goodput point (the input of the requests completed there, split into new tokens the pipeline prefilled, re-prefill included, and cached prefix hits) and requests completed per hour; revenue (below); the peak useful throughput regardless of TTFT; wasted compute (the share of processed tokens that is re-prefill or padding, the complement of the useful share in "Where processed tokens go"); prefill / decode balance (every moment of the run, per prefill replica, is one of four states. Prefill-bound: prefill has work (its first stage is computing, or a request still has tokens not yet fed into it) and decode is not at its limit. Balanced: prefill has work and decode is at its limit (the decode ring full, or a request past prefill waiting for a slot or pages). Decode-bound: prefill is idle while a request waits on decode, split by cause: memory (a slot or pages, before or after prefill) or queue full (room in the decode queue, with queue backpressure). Demand-bound: prefill is idle and nothing waits on decode, even with the ring full. The tile shows the share of the time in each state, with no single verdict: a run alternates between states. To choose which side to grow, compare prefill-bound against decode-bound time, with decode utilization in decode stats); requests per batch at the goodput point and at the peak.</li>
+      <li><b>Decode stats</b> (a collapsible panel under the tiles, at the same concurrency). Decode utilization (the share of the time the decode ring was full) with the sessions decoding on average; the decode speed per user, 10th percentile and median; requests holding decode KV, mean and max (from admission to prefill until the end of their decode, which is what the decode memory caps), the pool in use with a paged layout, and with queue backpressure the share parked on SSD; the share of requests that waited before prefill (for a decode slot, or with queue backpressure for room in the decode queue) with the mean wait, and with queue backpressure the share that waited for a slot or pages after prefill, with the delay of their first token; the decode-side prefix hit.</li>
       <li><b>Charts</b> share a log concurrency axis:
         <ul>
           <li>useful tok/s;</li>
@@ -1102,6 +1107,26 @@ function balanceLines(v) {
     `Balanced: ${pct(v.boundBalancedFrac)}`, `Demand-bound: ${pct(v.boundDemandFrac)}`];
 }
 
+// decode stats at a point: [title, value, subtitle, detail lines] per tile, as the result tiles
+function decodeTiles(v) {
+  const stages = Number($('decodeStages').value), ring = stages > 0, queue = $('decodeBackpressure').value === 'queue';
+  const paged = $('decodeCache').value === 'paging', cap = stages * Number($('decodeBatch').value);
+  const waited = v.decWaitPerS > 0 ? v.decWaitPerS / v.reqPerS : 0;
+  return [
+    ['Decode utilization', ring ? pct(v.ringFullFrac) : '–', ring ? 'share of the time the ring was full' : 'no ring: decode unlimited',
+      `${Math.round(v.decodingMean)} decoding on average` + (ring ? ` (ring holds ${cap})` : '')],
+    ['Decode speed per user', isFinite(v.tsuP10) ? `${Math.round(v.tsuP10)}<small> / ${Math.round(v.tsuP50)}</small>` : '–', 'tokens/s/u, p10 / p50', ''],
+    ['Requests holding decode KV', String(Math.round(v.decSlotsMean)), 'mean, from admission to decode end', [
+      `max ${v.decSlotsMax}`,
+      ...(v.decPoolTokMean != null && isFinite(v.decPoolTokMean) ? [`pool in use ${fmtBig(v.decPoolTokMean)} tokens`] : []),
+      ...(v.decParkPerS > 0 ? [`${pct(v.decParkPerS / v.reqPerS)} parked on SSD (${Math.round(v.decParkedMean)} on average)`] : [])].join('<br>')],
+    ['Waited for decode', pct(waited), queue ? 'before prefill, for room in the decode queue' : 'before prefill, for a decode slot', [
+      ...(waited > 0 ? [`mean wait ${fmtS(v.decWaitMean)} s`] : []),
+      ...(v.decSlotWaitFrac > 0 ? [`${pct(v.decSlotWaitFrac)} waited for ${paged ? 'pages' : 'a slot'} after prefill (first token +${fmtS(v.decStartDelayMean)} s)`] : [])].join('<br>')],
+    ['Decode-side prefix hit', v.decHitRate != null && isFinite(v.decHitRate) ? pct(v.decHitRate, 1) : '–', 'context already on the decode side', ''],
+  ];
+}
+
 // ---------------------------------------------------------------- run
 let run = null, pinned = null, workers = [];
 // concurrency the per-point tiles show ("Metrics at" or a chart click); null = the goodput point
@@ -1193,19 +1218,14 @@ function render() {
     ['Peak useful', R && R.peak ? fmtK(R.peak.usefulTps) : '–', 'any TTFT', R && R.peak ? `C = ${R.peak.conc}, p90 ${fmtS(R.peak.ttftP90)} s` : ''],
     ['Wasted compute', sp && sp.proc ? pct((sp.rep + sp.pad) / sp.proc, 1) : '–', at('of processed tokens'), sp && sp.proc ? `re-prefill ${pct(sp.rep / sp.proc, 1)} · padding ${pct(sp.pad / sp.proc, 1)}` : ''],
     ['Prefill / decode balance', v ? '' : '–', where || '', v ? balanceLines(v).join('<br>') : ''],
-    ['Decode Stats', '', '', v && v.decSlotsMean != null ? [
-      `Mean requests held: ${Math.round(v.decSlotsMean)}`, `Max requests held: ${v.decSlotsMax}`,
-      ...(v.decPoolTokMean != null && isFinite(v.decPoolTokMean) ? [`Pool in use: ${fmtBig(v.decPoolTokMean)} tokens`] : []),
-      ...(v.decWaitPerS > 0 ? [`${pct(v.decWaitPerS / v.reqPerS)} waited ${fmtS(v.decWaitMean)} s for ${$('decodeBackpressure').value === 'queue' ? 'room in the decode queue' : 'a decode slot'} before prefill`] : []),
-      ...(v.decParkPerS > 0 ? [`${pct(v.decParkPerS / v.reqPerS)} parked on SSD (${Math.round(v.decParkedMean)} on average)`] : []),
-      ...(v.decSlotWaitFrac > 0 ? [`${pct(v.decSlotWaitFrac)} waited for ${$('decodeCache').value === 'paging' ? 'pages' : 'a slot'} after prefill (first token +${fmtS(v.decStartDelayMean)} s)`] : []),
-      ...(v.tsuP10 != null && isFinite(v.tsuP10) ? [`Decode speed per user p10 / p50: ${Math.round(v.tsuP10)} / ${Math.round(v.tsuP50)} tokens/s/u`] : []),
-      ...(Number($('decodeStages').value) > 0 ? [`Decode utilization: ${pct(v.ringFullFrac)} (share of the time the ring was full)`] : []),
-      ...(v.decHitRate != null && isFinite(v.decHitRate) ? [`Decode-side prefix hit: ${pct(v.decHitRate, 1)}`] : [])].join('<br>') : ''],
     ['Requests per batch', v ? v.avgSegsPerChunk.toFixed(2) : '–', at('average (1 without batching)'), v ? `batch ${Math.round(v.avgChunkTok)} tok, busy ${pct(v.maxUtil)}` + (R.peak && R.peak !== v ? ` · at peak ${R.peak.avgSegsPerChunk.toFixed(2)}` : '') : ''],
   ];
   // a tile without a headline number (empty value and subtitle) is just its title and detail lines
-  $('tiles').innerHTML = tiles.map(([k, v, s, d]) => `<div class="tile"><div class="k">${k}</div>${v !== '' ? `<div class="v">${v}</div>` : ''}${s !== '' ? `<div class="k">${s}</div>` : ''}<div class="d">${d}</div></div>`).join('');
+  const tileHtml = (ts) => ts.map(([k, v, s, d]) => `<div class="tile"><div class="k">${k}</div>${v !== '' ? `<div class="v">${v}</div>` : ''}${s !== '' ? `<div class="k">${s}</div>` : ''}<div class="d">${d}</div></div>`).join('');
+  $('tiles').innerHTML = tileHtml(tiles);
+  // decode stats, in their own collapsible panel, at the same concurrency as the tiles
+  const dec = v && v.decSlotsMean != null ? decodeTiles(v) : [];
+  $('decodePanel').hidden = !dec.length; $('decTiles').innerHTML = tileHtml(dec); $('decAt').textContent = where;
   // breakdown
   if (bp) {
     const { proc, use, rep, pad } = sp;

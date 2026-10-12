@@ -204,7 +204,7 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
   | **prefill has no work** | demand-bound | decode-bound (memory, else queue full) |
 
   Prefill idle with the ring full and nothing waiting is demand-bound: nothing is held back. How busy decode is
-  shows separately as decode utilization (`ringFullFrac`, "Decode Stats" tile: the share of the time the ring was
+  shows separately as decode utilization (`ringFullFrac`, page: "Decode stats" panel: the share of the time the ring was
   full); with unlimited slots on a small ring nobody ever waits, and decode utilization is what shows the limit.
   Runs report the shares `boundPrefillFrac`, `boundDecodeFrac`, `boundBalancedFrac` and `boundDemandFrac` (they sum
   to 1), and decode-bound time by cause, `boundDecodeMemoryFrac` and `boundDecodeQueueFrac` (summing to
