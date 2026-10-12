@@ -997,11 +997,17 @@ function updatePlan() {
     : plan.decSlotsModel ? 'Decode KV memory: unlimited (0 stages = unlimited decode).' : '';
   $('cfgErr').hidden = !fatal.length; $('runBtn').disabled = !!fatal.length || $('runBtn').dataset.busy === '1';
   if (fatal.length) {
-    const fix = fatal.some((x) => x.startsWith('decode out of memory')) ? 'Use paged decode KV or a smaller decode batch.'
-      : fatal.some((x) => x.startsWith('out of memory'))
-      ? 'Use a smaller token budget or a larger chunk (fewer requests per batch), fewer stages, or another KV residency.'
-      : 'Adjust galaxies, replicas, mesh or stages (stages × chips per stage must fit in 32 × galaxies / replicas chips), or set the layer split to auto.';
-    $('cfgErr').innerHTML = `<b>This configuration cannot run:</b> ${esc(fatal.join('; '))}. ${fix}`;
+    // a fix line for each kind of error that needs one (the others already say what to change), once each
+    const FIXES = [
+      [(x) => x.startsWith('decode out of memory'), 'Use paged decode KV or a smaller decode batch.'],
+      [(x) => x.startsWith('out of memory'), 'Use a smaller token budget or a larger chunk (fewer requests per batch), fewer stages, or another KV residency.'],
+      [(x) => /chips per replica|divide evenly into replicas/.test(x), 'Adjust galaxies, replicas, mesh or stages: stages × chips per stage must fit in 32 × galaxies / replicas chips.'],
+      [(x) => x.startsWith('split must have'), 'Set the layer split to auto or even, or give one count per stage summing to 60.'],
+      [(x) => x.startsWith('queue backpressure parks'), 'Turn on the decode offload tiers with SSD TB / galaxy above 0, or use slot backpressure.'],
+      [(x) => x.startsWith('slot backpressure needs'), 'Use queue backpressure, or the fixed 1M slots decode KV layout.'],
+    ];
+    const fix = FIXES.filter(([m]) => fatal.some(m)).map(([, f]) => f).join(' ');
+    $('cfgErr').innerHTML = `<b>This configuration cannot run:</b> ${esc(fatal.join('; '))}.` + (fix ? ` ${fix}` : '');
     $('planKv').innerHTML = ''; $('planStages').innerHTML = ''; $('planNote').textContent = '';
     return;
   }
