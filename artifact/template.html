@@ -292,8 +292,8 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
         <div class="row"><label for="priceOut">Output $ / M tokens</label><input id="priceOut" type="number" min="0" step="0.01"></div>
         <div class="hint">Defaults: MiniMax M3 on OpenRouter (Oct 2026). Misses bill as input, prefix hits as cached.</div>
         <div class="row"><label for="galaxyUsd">$ / galaxy-hour</label><input id="galaxyUsd" type="number" min="0" step="0.5"></div>
-        <div class="row"><label for="decodeGalaxies">Decode galaxies</label><input id="decodeGalaxies" type="number" min="0" step="1"></div>
-        <div class="hint">Decode galaxies add to cost and size the decode tiers. Prices and $/galaxy-hour apply without re-running.</div>
+        <div class="row"><label for="decodeGalaxies">Decode galaxies</label><input id="decodeGalaxies" type="number" min="0" step="1" disabled title="Fixed at 16 for now: the full 62-stage decode ring"></div>
+        <div class="hint">Decode galaxies are fixed at 16 for now (the full 62-stage decode ring); they add to cost and size the decode tiers. Prices and $/galaxy-hour apply without re-running.</div>
       </div>
     </details>
   </fieldset>
@@ -980,12 +980,17 @@ function applyUrl() {
   if (Object.keys(cfg).some((f) => f.startsWith('decode'))) $('decodeBox').open = true; // show the decode settings a link sets
   const key = formKey(getCfg()), pi = PRESETS.findIndex((p) => formKey(p.cfg) === key);
   $('preset').value = String(pi);
-  $('presetDesc').textContent = (pi >= 0 ? PRESETS[pi].desc : 'Custom configuration') + ' (from a shared link)' + (bad.length ? `; ignored ${bad.join(', ')}.` : '.');
   if (q.has('slo')) { const v = Number(q.get('slo')); if (v > 0) $('slo').value = v; else bad.push('slo=' + q.get('slo')); }
   if (q.has('concs')) { const v = q.get('concs'); if (/^\d+(,\d+)*$/.test(v)) $('concs').value = v; else bad.push('concs=' + v); }
   $('compareInf').checked = q.get('inf') !== '0';
   if (q.has('at')) { const v = Number(q.get('at')); if (v > 0) viewC = v; else bad.push('at=' + q.get('at')); }
-  for (const k of Object.keys(ECON)) if (q.has(k)) { const v = Number(q.get(k)); if (q.get(k) !== '' && v >= 0) $(k).value = v; else bad.push(`${k}=${q.get(k)}`); }
+  for (const k of Object.keys(ECON)) if (q.has(k)) {
+    const v = Number(q.get(k));
+    if (k === 'decodeGalaxies') { if (v !== SIM.COST.decodeGalaxies) bad.push(`${k}=${q.get(k)} (fixed at ${SIM.COST.decodeGalaxies})`); continue; } // fixed for now
+    if (q.get(k) !== '' && v >= 0) $(k).value = v; else bad.push(`${k}=${q.get(k)}`);
+  }
+  // after every field, so ignored SLO, concurrency and cost values are reported too
+  $('presetDesc').textContent = (pi >= 0 ? PRESETS[pi].desc : 'Custom configuration') + ' (from a shared link)' + (bad.length ? `; ignored ${bad.join(', ')}.` : '.');
   return bad;
 }
 $('shareBtn').addEventListener('click', async () => {
