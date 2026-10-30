@@ -8,6 +8,14 @@
 // and, since decode turns out to bind, a decode grid on M3.1-Flash with roofline prefill kernels: decode speed per
 // user decodeTps 180 (the target, the default) / 270 / 360 at 100k context, decode batch m 16 / 32, prefill galaxies
 // 4 / 6 / 8, budget 4k / 8k.
+// and measured M3.1-Flash decode with bf4 routed experts (tt-blaze, Oct 30), prefill galaxies 4 / 6 / 8, budget 4k / 8k,
+// opEff 0.5 / 1:
+//   unbatched (main 87c36f578a, 4x2 stages, one user per step): stage step 81.46 / 108.59 / 181.77 us at 1K / 128K /
+//     512K in a 64-stage ring, i.e. 192 / 144 / 86 tok/s/u; a linear fit gives 154 at 100K, and M3's curve shape
+//     scaled to it (decodeCurve 'm3', decodeTps 154) is within 4% of all three. 62 stages, batch 1.
+//   batched (tt-blaze #5966, draft: 4x8 stages, 16 users per step, all weights in L1): 56.6 / 54.6 tok/s/u at 128K /
+//     512K, flat in context, 906 / 874 tok/s per galaxy. On 16 decode galaxies: 16 stages x 16 users = 256 sessions at
+//     56 tok/s/u (decodeCurve 'flat', decodeTps 56, decodeStages 256; a part-filled step is not modelled faster).
 // Each configuration at its goodput point (p90 TTFT <= 10 s): net $/h at M3.1-Flash's prices (SIM.PRICE) and at M3's,
 // and, since revenue is linear in prices and cost in $/galaxy-hour, the break-even galaxy-hour cost (revenue / galaxies)
 // and the break-even price multiple on M3.1-Flash's list price (cost / revenue).
@@ -29,6 +37,10 @@ const BASE = {
 };
 const MODELS = ['m3', 'm3.1-flash'], OPEFF = [0.5, 1], GALAXIES = [4, 6, 8], BUDGETS = [4096, 8192, 16384], DBATCH = [8, 16];
 const DEC_TPS = [180, 270, 360], DEC_BATCH = [16, 32], DEC_BUDGETS = [4096, 8192];
+const DEC_MEASURED = [
+  { name: 'bf4 unbatched (main)', cfg: { decodeCurve: 'm3', decodeTps: 154, decodeStages: 62, decodeBatch: 1 } },
+  { name: 'bf4 batched 4x8 x16 (#5966)', cfg: { decodeCurve: 'flat', decodeTps: 56, decodeStages: 256, decodeBatch: 1 } },
+];
 
 async function main() {
   const args = process.argv.slice(2);
@@ -47,11 +59,17 @@ async function main() {
     const key = { model: 'm3.1-flash', opEff: 1, gx, budget, m, tps };
     decJobs.push(evalRow(key, Object.assign({}, BASE, { model: 'm3.1-flash', opEff: 1, galaxies: gx, stages: 4 * gx, budget, decodeBatch: m, decodeTps: tps })));
   }
+  const measJobs = [];
+  for (const d of DEC_MEASURED) for (const opEff of OPEFF) for (const gx of GALAXIES) for (const budget of DEC_BUDGETS) {
+    const key = { dec: d.name, opEff, gx, budget, m: d.cfg.decodeBatch };
+    measJobs.push(evalRow(key, Object.assign({}, BASE, { model: 'm3.1-flash', opEff, galaxies: gx, stages: 4 * gx, budget }, d.cfg)));
+  }
   for (const model of MODELS) for (const opEff of OPEFF) for (const gx of GALAXIES) for (const budget of BUDGETS) for (const m of DBATCH) {
     jobs.push(evalRow({ model, opEff, gx, budget, m }, Object.assign({}, BASE, { model, opEff, galaxies: gx, stages: 4 * gx, budget, decodeBatch: m })));
   }
   const rows = (await Promise.all(jobs)).filter((r) => r.econ);
   const dec = (await Promise.all(decJobs)).filter((r) => r.econ);
+  const meas = (await Promise.all(measJobs)).filter((r) => r.econ);
   pool.close();
   const k = (x) => (x / 1e3).toFixed(1) + 'k';
   const line = (r) => {
@@ -81,8 +99,16 @@ async function main() {
   console.log(`\n-- net $/h by decode speed x prefill galaxies (M3.1-Flash, opEff 1; best budget and decode batch)`);
   console.log('  ' + ['decode tok/s/u', ...GALAXIES.map((g) => `${g} gx`)].map((x, i) => (i ? x.padStart(9) : x.padEnd(16))).join(''));
   for (const tps of DEC_TPS) console.log('  ' + [String(tps), ...GALAXIES.map((gx) => { const b = bestD((r) => r.tps === tps && r.gx === gx); return b ? usd(b.econ.margin) : '–'; })].map((x, i) => (i ? x.padStart(9) : x.padEnd(16))).join(''));
+  console.log(`\n-- measured M3.1-Flash decode, bf4 routed experts: net $/h by prefill galaxies (best budget)`);
+  console.log('  ' + ['decode, opEff', ...GALAXIES.map((g) => `${g} gx`)].map((x, i) => (i ? x.padStart(9) : x.padEnd(36))).join(''));
+  for (const d of DEC_MEASURED) for (const opEff of OPEFF) {
+    console.log('  ' + [`${d.name}, ${opEff}`, ...GALAXIES.map((gx) => { const b = meas.filter((r) => r.dec === d.name && r.opEff === opEff && r.gx === gx).sort((a, c) => c.econ.margin - a.econ.margin)[0]; return b ? usd(b.econ.margin) : '–'; })]
+      .map((x, i) => (i ? x.padStart(9) : x.padEnd(36))).join(''));
+  }
+  for (const d of DEC_MEASURED) { const b = meas.filter((r) => r.dec === d.name).sort((a, c) => c.econ.margin - a.econ.margin)[0]; if (b) console.log(`  best, ${d.name}, opEff ${b.opEff}: ` + line(b)); }
   fs.writeFileSync(get('--out', path.join(RESULTS, 'revenue_paths.json')), JSON.stringify({ slo: SLO, base: BASE, price: SIM.PRICE, priceM3: M3_PRICE, cost: SIM.COST,
     rows: rows.map((r) => ({ model: r.model, opEff: r.opEff, gx: r.gx, budget: r.budget, m: r.m, goodput: r.goodput, atEdge: r.atEdge, at: r.at, econ: r.econ, econM3: r.econM3, beGxUsd: r.beGxUsd, bePriceX: r.bePriceX })),
+    measured: meas.map((r) => ({ dec: r.dec, opEff: r.opEff, gx: r.gx, budget: r.budget, goodput: r.goodput, atEdge: r.atEdge, at: r.at, econ: r.econ, econM3: r.econM3, beGxUsd: r.beGxUsd, bePriceX: r.bePriceX })),
     decode: dec.map((r) => ({ tps: r.tps, gx: r.gx, budget: r.budget, m: r.m, goodput: r.goodput, atEdge: r.atEdge, at: r.at, econ: r.econ, econM3: r.econM3, beGxUsd: r.beGxUsd, bePriceX: r.bePriceX })) }));
   console.log(`\n${((Date.now() - t0) / 1000).toFixed(0)} s`);
 }

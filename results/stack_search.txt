@@ -1,0 +1,37 @@
+== Best M3.1-Flash prefill stacks (decode unlimited; goodput at p90 TTFT <= 10 s, finite cache; peak = cache 'inf', no SLO)
+  4 gx, opEff 0.5: goodput 131.1k (inf peak 146.5k) | 2x[4,4]/gx, paging, tile even, budget 16k, async, MSA-local, idx once, prefetch, tiers, srpt | start 121193, cache -> 126361, topo -> 130072, prefetch -> 130802, policy -> 131140
+  4 gx, opEff 1: goodput 141.2k (inf peak 228.3k) | 2x[4,4]/gx, paging, tile even, budget 8k, async, MSA-local, idx once, tiers, rr | start 124223, topo -> 136608, cache -> 140807, budget -> 141236
+  6 gx, opEff 0.5: goodput 203.7k (inf peak 234.3k) | 2x[4,4]/gx, paging, tile even, budget 16k, async, MSA-local, idx once, prefetch, tiers, srpt | start 170272, topo -> 196017, cache -> 202195, policy -> 203203, prefetch -> 203727
+  6 gx, opEff 1: goodput 222.8k (inf peak 364.8k) | 2x[4,4]/gx, paging, tile even, budget 8k, async, MSA-local, idx once, tiers, rr | start 178000, topo -> 216924, cache -> 221416, budget -> 222778
+  8 gx, opEff 0.5: goodput 276.1k (inf peak 323.6k) | 4x[4,2]/gx, paging, tile even, budget 16k, async, MSA-local, idx once, prefetch, tiers, rr | start 268896, cache -> 275018, prefetch -> 276148
+  8 gx, opEff 1: goodput 288.6k (inf peak 380.0k) | 4x[4,2]/gx, paging, tile even, budget 4k, async, MSA-local, idx once, tiers, rr | start 280343, budget -> 284263, cache -> 288646
+
+== Net $/h with those stacks (2 and 3 gx: the 4 gx stack): M3.1-Flash prices ($0.15 / $0.015 / $0.6), $10 per galaxy-hour, 16 decode galaxies (best budget)
+
+-- opEff 0.5
+  decode                                 2 gx     3 gx     4 gx     6 gx     8 gx
+  180 target, batch 8 (modelled)      −$50.76  −$41.02  −$44.02  −$63.70  −$83.61
+  180 target, batch 16 (modelled)     −$50.76  −$39.90  −$35.48  −$54.64  −$74.38
+  bf4 unbatched (main, measured)      −$77.56  −$80.90  −$88.24    −$108    −$128
+  bf4 batched 4x8 x16 (#5966)         −$54.03  −$25.64  −$29.30  −$45.75  −$64.87
+  270 @100k, batch 16                  −$9.45   $12.02   $20.84   $16.39   −$3.46
+  360 @100k, batch 16                  −$3.38   $62.72   $73.65   $90.55   $71.22
+
+-- opEff 1
+  decode                                 2 gx     3 gx     4 gx     6 gx     8 gx
+  180 target, batch 8 (modelled)      −$48.43  −$40.27  −$43.75  −$63.56  −$83.52
+  180 target, batch 16 (modelled)     −$48.43  −$38.04  −$34.91  −$54.28  −$74.26
+  bf4 unbatched (main, measured)      −$77.48  −$78.40  −$88.15    −$108    −$128
+  bf4 batched 4x8 x16 (#5966)         −$48.13  −$24.86  −$28.14  −$44.78  −$64.63
+  270 @100k, batch 16                   $0.34   $15.48   $24.18   $16.81   −$3.48
+  360 @100k, batch 16                  $29.37   $68.77   $77.72   $91.42   $71.59
+
+-- best per decode scenario
+  180 target, batch 8 (modelled)     net −$40.27/h (in $121 + out $28.29 - cost $190) | break-even $7.88/gx-h or 1.27x list | 3 + 16 gx, opEff 1, budget 8k | goodput 69.2k @C=1288, output 13.1k tok/s, decode p10/p50 19/25 tok/s/u, prefill busy 44%
+  180 target, batch 16 (modelled)    net −$34.91/h (in $135 + out $30.51 - cost $200) | break-even $8.25/gx-h or 1.21x list | 4 + 16 gx, opEff 1, budget 8k | goodput 77.6k @C=1720, output 14.1k tok/s, decode p10/p50 14/19 tok/s/u, prefill busy 40%
+  bf4 unbatched (main, measured)     net −$77.48/h (in $83.29 + out $19.23 - cost $180) | break-even $5.70/gx-h or 1.76x list | 2 + 16 gx, opEff 1, budget 8k | goodput 45.5k @C=776, output 8.9k tok/s, decode p10/p50 25/32 tok/s/u, prefill busy 43%
+  bf4 batched 4x8 x16 (#5966)        net −$24.86/h (in $135 + out $30.60 - cost $190) | break-even $8.69/gx-h or 1.15x list | 3 + 16 gx, opEff 1, budget 8k | goodput 70.3k @C=1072, output 14.2k tok/s, decode p10/p50 32/34 tok/s/u, prefill busy 45%
+  270 @100k, batch 16                net  $24.18/h (in $181 + out $43.01 - cost $200) | break-even $11.21/gx-h or 0.89x list | 4 + 16 gx, opEff 1, budget 8k | goodput 98.2k @C=1592, output 19.9k tok/s, decode p10/p50 29/38 tok/s/u, prefill busy 50%
+  360 @100k, batch 16                net  $91.42/h (in $251 + out $60.05 - cost $220) | break-even $14.16/gx-h or 0.71x list | 6 + 16 gx, opEff 1, budget 8k | goodput 138.7k @C=2352, output 27.8k tok/s, decode p10/p50 28/38 tok/s/u, prefill busy 44%
+
+1413 s

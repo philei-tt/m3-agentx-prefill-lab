@@ -2143,9 +2143,9 @@
   // Prefill revenue is input tokens only; output tokens are decode's, and count only in the margin (economics()),
   // which also pays for the decode galaxies.
   const PRICE = { inUsdPerM: 0.15, cachedUsdPerM: 0.015, outUsdPerM: 0.60 };
-  // Operating cost: a rough USD per galaxy-hour, and the decode galaxies paired with the prefill: one M3 decode
-  // instance, 64 sessions (decodeSlots) on 16 galaxies.
-  const COST = { galaxyUsdPerH: 12, decodeGalaxies: 16 };
+  // Operating cost: a rough USD per galaxy-hour ($10 since Oct 30; $12 before), and the decode galaxies paired with
+  // the prefill: one M3 decode instance, 64 sessions (decodeSlots) on 16 galaxies.
+  const COST = { galaxyUsdPerH: 10, decodeGalaxies: 16 };
 
   // Hourly volume of one sweep point: input tokens of the completed requests, split into new (prefilled) and cached
   // (prefix hit), requests completed, the input revenue they bill at `price` (USD per hour), and their output tokens

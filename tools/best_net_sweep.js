@@ -9,7 +9,7 @@
 //   decode batch m = 1 / 2 / 4 / 8
 //   decode-queue limit 100 / 145 / 200 / 300 per ring position (x m), or none
 // Each configuration at its goodput point (p90 TTFT <= 10 s): net $/h (MiniMax's prices, output billed as decoded,
-// $12 per galaxy-hour) over prefill + decode galaxies. There is no target on decode speed per user, so the tables
+// SIM.COST's $ per galaxy-hour) over prefill + decode galaxies. There is no target on decode speed per user, so the tables
 // show it (p10 / p50 tokens/s/u) next to each result.
 // Usage: node tools/best_net_sweep.js [--workers 14] [--out results/best_net_sweep.json] > results/best_net_sweep.txt
 'use strict';
