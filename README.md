@@ -1,6 +1,6 @@
-# MiniMax-M3 prefill: AgentX traffic roofline
+# MiniMax-M3.1-Flash prefill: AgentX traffic roofline
 
-Traffic-level model of the M3 pipeline-prefill system on Blackhole galaxies. It replays the **AgentX 1M corpus** the way
+Traffic-level model of the MiniMax-M3.1-Flash (and M3) pipeline-prefill system on Blackhole galaxies. It replays the **AgentX 1M corpus** the way
 AIPerf's `inferencex-agentx-mvp` scenario does and runs every request through a **per-op roofline** calibrated to the
 16-stage hardware runs of #57827. The goal is to rank features and hyperparameters by what they do for the whole system
 on realistic traffic, not by single-cell benchmarks.
@@ -8,6 +8,15 @@ on realistic traffic, not by single-cell benchmarks.
 * Repository: https://github.com/philei-tt/m3-agentx-prefill-lab (also mirrored in tt-metal branch `philei/m3-traffic-sim`, `models/demos/minimax_m3/traffic_sim/`)
 * Hosted copy of the web app: https://claude.ai/artifact/3Yresb3qbWJQpvpQMabaq6
 * Tracking issue: https://github.com/tenstorrent/tt-metal/issues/57827
+
+**Model.** The default is **MiniMax-M3.1-Flash** (`model: 'm3.1-flash'`; HF `MiniMaxAI/MiniMax-M3.1-Flash`). Its
+shapes are M3's (60 layers, the first 3 with a dense MLP, hidden 6144, 64 / 4 heads, 128 experts top-4 + 1 shared,
+1M context). The one structural change is attention: M3.1-Flash runs MSA sparse attention in **all 60 layers**
+(`sparse_attention_freq` all 1), where M3 ran full ring-joint attention in the 3 dense layers. It also drops M3's MTP
+module (not modelled) and ships NVFP4 experts / MXFP8 elsewhere (the model keeps the deployment's bf4 experts / bf8
+attention, which are the same size). `model: 'm3'` keeps the old model. The calibration runs (#57827) were taken on M3,
+so the calibration and its replays (`validate.js`, the matrix cells) pin `model: 'm3'`. The precomputed study
+(`results/study.json`, Findings below) and the other `results/` files from before Oct 30 are M3 at M3's prices.
 
 ## Quick start: run the web app
 
@@ -47,19 +56,22 @@ tokens into useful, re-prefill and padding. At the goodput point it also reports
 those input tokens bill per hour.
 
 **Revenue per hour** prices new tokens (cache misses, re-prefill included) at the input price and prefix hits at the
-cache-read price. The defaults (`SIM.PRICE` in `sim_core.js`) are MiniMax's own endpoint for `minimax/minimax-m3` on
-OpenRouter (provider "Minimax", Oct 7 2026): **$0.30 / M input, $0.06 / M cache read, $1.20 / M output**, no cache-write
-charge. That is also the model-level price and most providers' (the cheapest third-party provider is about 20% lower). Override it with `--price-in` / `--price-cached` (USD per
+cache-read price. The defaults (`SIM.PRICE` in `sim_core.js`) are the OpenRouter price of `minimax/minimax-m3.1-flash`
+(Oct 30 2026): **$0.15 / M input, $0.015 / M cache read, $0.60 / M output**, no cache-write charge. That is what 10 of
+its 14 endpoints charge (Tenstorrent's own fp8 endpoint, Together, Fireworks, Nebius, ...) and MiniMax's own endpoint at
+peak (01:00–15:00 UTC). MiniMax charges half off-peak ($0.075 / $0.0075 / $0.30), and the cheapest provider (SambaNova)
+$0.06 / $0.006 / $0.24. M3 was $0.30 / $0.06 / $1.20 (Oct 7): half the input and output price, and a cache read now
+bills a tenth of a miss instead of a fifth. Override it with `--price-in` / `--price-cached` (USD per
 million tokens) on `run.js`, `analyze.js` and `tools/feature_table.js`, or with the Revenue & cost fields on the web page.
 * **Output tokens are not counted in revenue.** This system only prefills; decode generates the output tokens, so their
-  revenue ($1.20 / M) counts only in the margin below, next to the decode galaxies' cost. AgentX requests average about
+  revenue ($0.60 / M) counts only in the margin below, next to the decode galaxies' cost. AgentX requests average about
   1.1k output tokens against 120k–150k input tokens at the goodput points, so output adds roughly 10–15% to a bill.
-* **A better cache bills less per token** (a hit costs a fifth of a miss); it raises revenue only through the extra
+* **A better cache bills less per token** (a hit costs a tenth of a miss); it raises revenue only through the extra
   requests the same hardware can then serve.
 
 **Net revenue per hour** (the page's Net Revenue tile, `economics()` in `sim_core.js`) is input + output revenue of the requests completed per hour, minus
-(prefill galaxies + decode galaxies) × USD per galaxy-hour. Defaults (`SIM.COST`): **$12 per galaxy-hour** (a rough
-operating cost) and **16 decode galaxies**, one M3 decode instance of 64 sessions, so pair it with `decodeSlots: 64`
+(prefill galaxies + decode galaxies) × USD per galaxy-hour. Defaults (`SIM.COST`): **$10 per galaxy-hour** (a rough
+operating cost; $12 before Oct 30, which the older results below use) and **16 decode galaxies**, one M3 decode instance of 64 sessions, so pair it with `decodeSlots: 64`
 (unlimited slots overstate what 16 decode galaxies serve). Output revenue bills `outDecTps`, the output tokens decoded
 in the window. Runs also report `outTps`, the output tokens of the requests completed in the window, which is what runs
 before `outDecTps` bill. The two agree in steady state, but `outTps` runs ahead while a decode backlog grows. Study
@@ -86,7 +98,7 @@ points from before both have no margin. Override with `--price-out`, `--galaxy-u
 | `lib/price.js` | `--price-in` / `--price-cached` / `--price-out` / `--galaxy-usd` / `--decode-galaxies` overrides of `SIM.PRICE` and `SIM.COST` for the CLIs. |
 | `lib/paths.js` | Where data and results are read from: env `M3SIM_DATA` / `M3SIM_RESULTS`, else `./data` and `./results`, else the exabox scratch copies. |
 | `on_node.sh` | `JOB=<slurm id> ./on_node.sh <cmd>` runs on the compute node with soft ulimits raised to the hard limits. |
-| `tools/` | Helpers: `feature_table.js` (README tables), `study_detail.js`, `grid_by_topology.js`, `dump_cells.js` (per-cell stage medians), `traffic_stats.js`, `smoke.sh` (every feature path), `investigate.sh`, `decode_layout_ab.js` (decode KV layouts vs revenue). |
+| `tools/` | Helpers: `feature_table.js` (README tables), `study_detail.js`, `grid_by_topology.js`, `dump_cells.js` (per-cell stage medians), `traffic_stats.js`, `smoke.sh` (every feature path), `investigate.sh`, `decode_layout_ab.js` (decode KV layouts vs revenue), `best_net_sweep.js` (net revenue grid), `revenue_paths.js` (M3 vs M3.1-Flash, kernels and decode speed vs net revenue, break-even cost and price), `stack_search.js` (best prefill stack per galaxy count, then net revenue per decode scenario), `spec_sweep.js` (speculative decoding on the measured decode curves). |
 
 Data:
 * `data/traffic.bin` + `traffic.json`: the preprocessed corpus, 5 MB, derived from the Apache-2.0 HF dataset.
@@ -106,7 +118,7 @@ node run.js --study-preset g8_k0 --set decodeTps=90 --conc 512,1024
 node study.js --workers 36                                        # full study -> results/study.json (about 23 min with `--workers 13` on 14 cores; about 8 min on 36 threads before the offload tiers)
 node analyze.js && node tools/feature_table.js                    # print results / README tables
 node tools/feature_table.js --price-in 0.6 --price-cached 0.06     # revenue at other prices
-node run.js --preset today-C --set decodeSlots=64 --galaxy-usd 12 --decode-galaxies 16   # margin per hour
+node run.js --preset today-C --set decodeSlots=64 --galaxy-usd 10 --decode-galaxies 16   # margin per hour
 node build_artifact.js --standalone                               # rebuild dist/index.html (server.js does this itself)
 # regenerate the inputs (needs numpy, the AgentX traces and the #57827 run directories):
 python3 prep_traffic.py --traces <traces.jsonl> --procs 32        # data/traffic.bin + traffic.json
@@ -154,6 +166,22 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
   128 × (1 − (124/128)^m) against 4 at m = 1; the rest is shared. At 130k context: 171 / 94 / 50 / 27 tokens/s/u
   at m = 1 / 2 / 4 / 8, so a full 62-stage ring decodes 10.6k / 11.6k / 12.4k / 13.3k tokens/s. Fixed slots must hold
   the full ring, m × stages slots, or the plan is out of memory: with 145 slots and 62 stages they hold m = 2 at most.
+* **Speculative decoding** (`specDraft`, `specAL`, `specVerify`, `specDraftFrac`; page: "Spec decode"; off by
+  default). A drafter proposes `specDraft` tokens; the target verifies them together with the session's own next token
+  (D = `specDraft` + 1 tokens per cycle) and commits `specAL` of them on average. `specAL` is the acceptance length,
+  bonus token included (1 ≤ AL ≤ D); AgentX submissions run at a committed AL measured on SPEED-Bench coding
+  (tt-d-gen #1370). A cycle also costs the drafter, `specDraftFrac` (0.1) of a plain step. The drafter's own galaxies
+  are not in the cost (`SIM.COST`); tt-blaze's spec-decode layouts add about 4 (see "Speculative decoding" below).
+  M3.1-Flash ships a DSpark draft head in place of
+  M3's MTP; nobody has measured its AL or a blaze verify step.
+  * `'batch'` (batched verification, proposed in "SpecDecode on Blaze", not built yet): the session's D tokens are
+    verified in its own step. The KV is read once, so the attention term is unchanged. The experts are those of
+    m × D tokens, through the batched-decode model above (`decodeMoeFrac`), except on `'m31-b16'`, whose step costs per
+    8-row block (#5966: every weight in L1, every row through every local expert). Per user: AL / (verify step +
+    drafter).
+  * `'pipe'` (tt-blaze's MTP / DFlash today): each draft token goes through the ring as a token of its own. A user
+    speeds up by AL / (1 + drafter) on an empty ring, but each session takes D places in it, so on a full ring it
+    decodes AL / D as much. Not modelled with `decodeBatch` > 1.
 * **Decode KV layouts** (`decodeCache`; page: "Decode KV layout"). Every layout reserves a request's decode KV when it is admitted to prefill and releases it when
   its decode ends; the released KV stays cached.
   * `'slots'` (default, today): one 1M slot per request. A released slot keeps its stream's KV, LRU over idle slots
@@ -252,7 +280,8 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
 Each layer is decomposed into the ops the implementation runs.
 
 * **MoE/MSA layer:** 2× norm all-gather, qkv, index branch, all-gathers of the K/V and index_k prefix, indexer, sparse SDPA, o_proj + RS, shared expert (+RS), router, dispatch, experts, combine, moe_reduce (+RS), misc.
-* **Dense layer:** ring-joint SDPA = max(compute ∝ T·(k+T/2), gather of the valid prefix ∝ kv_len/SP) + a fixed cost per call, plus the MLP and its CCLs. The op bounds the gather to [0, kv_len) since tt-metal #47539 (M3 passes `kv_actual_isl` and `logical_n`). Only the gather *buffer* is capacity-sized. `boundedDense: false` models the old whole-lane gather.
+* **Dense layer, M3.1-Flash:** the MSA attention ops above (index branch, K/V and index_k gathers, indexer, sparse SDPA) at the efficiencies measured on the MoE layers (the same kernels), plus the dense layer's own norm all-gathers, qkv, o_proj + RS, misc and MLP with its CCLs (as measured on layer 0). No pipeline multiplier, as before.
+* **Dense layer, M3:** ring-joint SDPA = max(compute ∝ T·(k+T/2), gather of the valid prefix ∝ kv_len/SP) + a fixed cost per call, plus the MLP and its CCLs. The op bounds the gather to [0, kv_len) since tt-metal #47539 (M3 passes `kv_actual_isl` and `logical_n`). Only the gather *buffer* is capacity-sized. `boundedDense: false` models the old whole-lane gather.
 
 **Roofline.** Each op gets a roofline time from FLOPs, DRAM bytes and ethernet bytes on the stage mesh. The Blackhole numbers come from tt-moe-nappkin `lib/system.py`: 608/304 TF (LoFi/HiFi2), 512 GB/s, 100/50 GB/s CCL bi/uni.
 
@@ -340,6 +369,175 @@ Every buffer that must hold a whole request (slots, fixed lanes, the lane arena)
   * The lane count is the same as for the other policies (see **Lanes per stage** under KV residency). A request takes a lane for each turn, so the count caps the requests per batch but not the requests in progress.
   * Copy-in: a request whose lane still holds its context, i.e. no other request has used that lane since its last turn, skips the copy-in. On a miss it takes a free lane (an empty one first, else the least recently used) and copies its whole context so far in. Arena lanes always copy in. Results report `rrLaneReuse` (share of continuation turns that skipped the copy-in) and `rrCopyInTps`. Copying in every turn instead made no measurable difference to goodput (≤0.5%, even with sequential copies), so it is not an option.
   * Round robin on the pool, and paging under rr, pin the cached prefix of every request in progress. A request is admitted only while the pool can hold all in-progress requests in full; until then it waits in the queue. This matches tt-d-gen, where admission needs a free slot, a full pool queues the request rather than rejecting it, and in-flight slots are never evicted.
+
+## M3.1-Flash: net revenue and the path to positive (Oct 30 2026)
+
+M3.1-Flash's list price ($0.15 / $0.015 / $0.60 per M input / cached / output), **$10 per galaxy-hour**, 16 decode
+galaxies with paged decode KV, decode tiers and queue backpressure; net $/h at the goodput point (p90 TTFT ≤ 10 s).
+Tools: `tools/best_net_sweep.js`, `tools/revenue_paths.js` (fixed prefill stack: the Oct 12 best-net base, 4 × [2,4]
+stages per galaxy, chunk 512, fused batching on a fixed-lane pool with host tiers) and `tools/stack_search.js` (the best
+prefill stack per galaxy count); results in `results/{best_net_sweep,revenue_paths,stack_search}.{json,txt}`.
+
+**Short answer: not with today's decode.** With the best prefill stack the best case is **−$24/h** on measured batched
+bf4 decode (#5966, 3 + 16 galaxies); unbatched it is **−$49/h** on main (the model card, our unbatched baseline), −$68/h with #5614 and −$78/h on the old
+main @87c36f5 (all on 2 + 16). Prefill is no longer the limit: it more than
+doubles with the right stack and then sits 30–50% busy, waiting on decode. Positive margin needs about 15% more decode
+throughput per galaxy than tt-blaze #5966 measures (≈ 1.05k instead of 906 output tok/s per galaxy), or 1.15× the list
+price, or ≤ $8.73 per galaxy-hour. **Speculative decoding does not close that gap** (next sections). On #5966 a
+verify token costs as much as another user's token, so spec decode lowers its throughput. On unbatched main it reaches
+break-even only at 3 drafts / AL 3.0 with a less expert-bound step, and then only before paying for the drafter's
+galaxies (about 4 more).
+
+### Decode: what was measured (bf4 routed experts, M3.1-Flash, Oct 30)
+
+Each is a named `decodeCurve` (`SIM.DECODE_CURVES`): the measured tokens/s/u, interpolated piecewise-linearly in time
+per token (absolute: `decodeTps` does not apply). Ring t/s/u = 1e6 / (64 × stage step), #5966's convention.
+
+| `decodeCurve` | source | tok/s/u | output tok/s per galaxy | ring / memory |
+|---|---|---|---|---|
+| `m31-main` | old main: tt-blaze main @87c36f5, 4x2 stages, 1 user per step | 192 / 144 / 86 at 1K / 128K / 512K | 576 at 128K | 62 stages, 145 slots (modelled) |
+| `m31-5614` | tt-blaze #5614 (open): all-sparse, index-K split over 8 chips | 154 / 135 at 100K / 550K (MoE stage 101 / 116 µs); 180 at 1K (main + 6.5%, #5490's 8K cost) | 615 at 100K | 62 stages, 193 slots (index-K split: 4/3 of 145) |
+| `m31-card` | **main**: the model card (minimax-bringup, Oct 29) of tt-blaze #6059 (open; stack #6064 → #6066 → #6059 → #6063), taken as what main will run: its own CP8 indexer, bf4 attention weights in SRAM, 512 of each routed expert's 3072 channels in SRAM, HiFi4 | 218 / 181 / 156 / 136 at 1K / 128K / 512K / 1M | 725 at 128K | 62 stages, 209 slots (as stated) |
+| `m31-b16` | tt-blaze #5966 (draft): 4x8 stages, 16 users per step, weights in L1 | 56.6 / 54.6 at 128K / 512K | 906 / 874 | 256 sessions (16 stages × 16) |
+| `'m3'` at 180 (default) | the target, M3's shape; modelled batching (`decodeMoeFrac` 0.8) | 180 at 100K, batch 1 | 682 (batch 1) – 956 (batch 16) at 112K | 62 stages |
+
+Unbatched, all three measurements are below the 180 target at 100K except main (the model card, 189), and they reach
+8.8–11.6k output tok/s on the 62-stage ring. Batched, #5966's 906 tok/s per galaxy lands between the model's batch 8
+and 16 (862 / 956 at 112K) with far fewer sessions in flight (256 against 496 / 992), and does not slow with context.
+32 users per step does not work yet in #5966. The model card's bf4 attention weights are under question for accuracy;
+it states bf8 attention costs 0.4 tok/s/u at 128K, so its speed holds with bf8 attention (bf8 routed experts: 135).
+
+**main is the model card,** which comes from tt-blaze #6059 ("Add MiniMax M3.1 Flash decode pipeline", Nikhil
+Soraba, open since Oct 29). It is a new `minimax_m3_1_flash` model, separate from `minimax_m3`. `BLAZE_M31_ATTN_DTYPE`
+defaults to bf4 (bf8 is the card's accuracy knob). Routed experts are hot / cold, with resident channels in SRAM and
+the rest streamed from DRAM. It was measured end to end (62 stages, GPQA-Diamond 174/198), so it is taken as what main
+will run; the older main @87c36f5 stays as a reference. It is not tt-blaze #5614, which changes `minimax_m3`'s decode
+with no dtype or weight-placement changes: #5490's index-K split over 8 chips, index-K prefetch, the block-max scan
+split over two RISCs and a direct CP exchange. Both store index-K once per stage over its 8 chips (209 vs 193 users at
+1M), but #6059 does it with its own indexer ops.
+
+### Prefill: the best stack (`tools/stack_search.js`)
+
+Coordinate descent on goodput (decode unlimited, finite cache), from the study's best stack, over topology ([2,4] /
+[4,2] / [4,4]), cache (fixed lanes, arena 2M / 4M, full paging), padding (tile even / owner, chunk 512 / 2048), budget
+4k–32k, and on/off for host tiers, async handoff, MSA-local, index_k stored once, KV prefetch and srpt:
+
+| prefill galaxies | opEff 0.5 | opEff 1 | stack (opEff 1) |
+|---|---|---|---|
+| 4 | 131k (∞ peak 147k) | 141k (228k) | 2 × [4,4] per galaxy, full paging, tile even, budget 8k, async, MSA-local, index_k once, host tiers |
+| 6 | 204k (234k) | 223k (365k) | same |
+| 8 | 276k (324k) | 289k (380k) | 4 × [4,2] per galaxy, otherwise the same, budget 4k |
+
+That is about 2× the fixed best-net base (64k / 71k at 4 galaxies). Every winner keeps the host tiers, tile padding,
+async handoff, MSA-local and index_k once, and moves to full paging (the ideal paged kernel; the 4M arena is 3–4%
+behind). Halving the stages to [4,4] helps at 4–6 galaxies with M3.1-Flash's cheaper dense layers.
+
+### Net revenue
+
+| net $/h, best stack, roofline kernels (opEff 1) | 2 gx | 3 gx | 4 gx | 6 gx | 8 gx |
+|---|---|---|---|---|---|
+| decode 180 target, batch 8 (modelled) | −$48 | −$40 | −$44 | −$64 | −$84 |
+| decode 180 target, batch 16 (modelled) | −$48 | −$38 | −$35 | −$54 | −$74 |
+| bf4 unbatched, old main @87c36f5 | **−$78** | −$79 | −$89 | −$109 | −$129 |
+| **bf4 unbatched, #5614** | **−$68** | −$72 | −$75 | −$94 | −$114 |
+| **bf4 unbatched, main (model card)** | **−$49** | −$53 | −$55 | −$71 | −$92 |
+| **bf4 batched, #5966** | −$48 | **−$24** | −$27 | −$45 | −$65 |
+| 270 tokens/s/u @100K, batch 16 | +$0.3 | +$16 | **+$24** | +$17 | −$3 |
+| 360 tokens/s/u @100K, batch 16 | +$29 | +$69 | +$78 | **+$91** | +$72 |
+
+(2 and 3 galaxies run the 4-galaxy stack. opEff 0.5 is within $6 of these in every decode-bound cell.)
+
+| net $/h, fixed best-net base (opEff 1) | 4 gx | 6 gx | 8 gx |
+|---|---|---|---|
+| decode 180 target (best of batch 8 / 16) | −$47 | −$55 | −$75 |
+| bf4 unbatched, old main @87c36f5 | −$89 | −$109 | −$129 |
+| bf4 unbatched, #5614 | −$80 | −$94 | −$114 |
+| bf4 unbatched, main (model card) | −$63 | −$71 | −$91 |
+| bf4 batched, #5966 | −$34 | −$44 | −$65 |
+| 270 @100K | +$1 | +$7 | −$4 |
+| 360 @100K | +$30 | +$38 | +$48 |
+
+* **Decode caps revenue.** A request bills $0.0029 (56% cache reads at a 96% hit rate, 25% new input, 19% output)
+  and needs ~900 output tokens: $3.15 per M output tokens decoded. At $10 per galaxy-hour a decode galaxy has to
+  decode ~880 output tok/s just to pay for itself. Measured unbatched decode does ~550–710 (old main, #5614, main = model card), #5966
+  ~900, so decode alone is at or below break-even before any prefill is paid for. More prefill galaxies only lose money; the best prefill stack
+  gains $10–12/h in decode-bound cells (it feeds the same decode from fewer prefill galaxies).
+* **M3.1-Flash vs M3 (fixed base, opEff 0.5, 4 gx):** +7.5% goodput (dense layers 1.5 ms instead of 6.0 at 140k
+  context) and +$7/h. The price is half M3's, and a cache read bills a tenth of a miss instead of a fifth: the same
+  point nets +$248/h at M3's prices.
+
+**Break-even at the best measured cell** (batched #5966 decode, 3 + 16 galaxies, revenue $166/h): 1.15× list price,
+or $8.73 per galaxy-hour, or ~16.7k output tok/s from the 16 decode galaxies (+15%). Unbatched (2 + 16): main (model card) 1.37× or
+$7.28, #5614 1.61× or $6.21, old main 1.77× or $5.65. With the 180 target and modelled batch 16 (4 + 16): 1.21× or
+$8.25.
+
+Caveats:
+* Decode memory and decode KV migration are modelled as for M3's 4x2 decode; #5966 keeps all weights in L1, so it
+  has more DRAM for KV than modelled (not binding here). A part-filled batched step is not modelled faster than a full
+  one, which slightly understates #5966 at low load.
+* #5966 is one layer at 16 users, and #5614 one MoE layer at two contexts; the 64-stage ring is assumed to run at the
+  slowest stage's step. Batching on top of the unbatched curves is not modelled (#5966 already ports #5614's
+  indexer work). No speculative decoding in these tables (see the next section).
+* Full paging is the ideal paged-attention kernel; the arena is the implementable fallback (3–4% less goodput).
+* $10 per galaxy-hour is a rough operating cost. AgentX is cache-heavy (96% hits), so its requests bill little per
+  token of compute; a workload with fewer hits bills more for the same prefill work.
+
+### Speculative decoding (`tools/spec_sweep.js`)
+
+The tables above decode one token per session per step. They include no speculative decoding, batched or not.
+`tools/spec_sweep.js` adds spec decode to the three measured curves (main = the model card, the old main @87c36f5 and
+#5966), with the best stacks above (opEff 1; `results/spec_sweep.{json,txt}`). No AL has been measured for
+M3.1-Flash's DSpark head yet, so the sweep brackets it:
+
+* 1 draft / AL 1.87: M3's MTP at bf4 experts (accept rate 0.868, Models weekly status).
+* 3 / 1.49: DeepSeek-V4 MTP's AgentX golden AL.
+* 3 / 2.5 and 3 / 3.0.
+* 7 / 3.7: Kimi-K2.5 EAGLE3's AgentX golden AL.
+
+How a verify step costs depends on the decode layout:
+
+* **Unbatched (main, old main): per distinct expert.** One user's step reads 4 experts from DRAM; verifying D tokens
+  reads ~15 for D = 4. The step's expert-weight share decides how much that costs: `decodeMoeFrac` 0.8 (the default)
+  or 0.4 (a rough roofline for the old main: one expert's bf4 weights per chip is ~31 µs of its 81 µs stage).
+* **#5966 batched: per 8-row block.** Every weight sits in L1 and every row runs through every local expert (EP32),
+  so the step does not depend on routing. It costs ~13 µs plus ~123 µs per 8-row block (#5856 at 128K: 16 users
+  259.6 µs, 24 users 383.0 µs; "17–23 users cost the same as 24"), so a verify token costs as much as another user's.
+  The expert-weight share does not apply.
+
+Revenue per galaxy-hour over the prefill galaxies and the 16 decode galaxies, at the best prefill galaxy count. The
+drafter's galaxies are not included (see below). Cost is $10, so above $10 is profit. Two numbers mean expert-weight
+share 0.8 / 0.4:
+
+| revenue $/gx-h, best gx (opEff 1) | old main @87c36f5 | main (model card) | #5966 batched |
+|---|---|---|---|
+| no spec decode | $5.83 | $7.28 | $8.73 |
+| batch 1 / 1.87 | $6.36 / $7.37 | $7.62 / $9.28 | $8.12 |
+| batch 3 / 1.49 | $3.52 / $4.69 | $4.14 / $5.63 | $4.00 |
+| batch 3 / 2.5 | $5.38 / $7.14 | $6.25 / $8.83 | $6.07 |
+| batch 3 / 3.0 | $6.22 / $8.38 | $7.30 / **$10.24** | $6.92 |
+| batch 7 / 3.7 | $4.77 / $7.05 | $5.47 / $8.31 | $4.86 |
+| pipelined 3 / 3.0 | $4.26 | $5.35 | $6.43 |
+
+* **Spec decode is not a path to positive revenue.** It is a per-user latency lever.
+* **On #5966 it loses money in every case.** Verifying D tokens per user takes D × the rows for AL tokens, and AL < D,
+  so throughput drops to about AL / D, the same loss as pipelined verification. It also does not fit: 16 users × 4
+  tokens is 64 rows, and #5966 composes at most 24 (B = 32 fails on the semaphore pool and L1 arena).
+* **On unbatched main it helps only if the step is not expert-bound.** At share 0.4 main reaches $10.24 at
+  3 / 3.0 and $9.28 at 1 / 1.87. At the default 0.8 the gains mostly vanish, and long drafts lose.
+* **Pipelined verification (what blaze runs today) loses money on a full ring.** Each session takes D ring places for
+  AL tokens, so throughput drops by AL / D. It is a latency win at low load (392 tok/s/u at 128K on the old main).
+* **The drafter needs its own galaxies.** In tt-blaze the drafter is a separate branch behind a router stage. Every
+  spec-decode layout so far adds about 4 galaxies, because clusters come in 4-galaxy steps:
+  * Kimi K2.6/2.7 DFlash: 63 target + 9 drafter stages, SC16 → SC20.
+  * Kimi K3 DSpark: 95 + 14, SC24 → SC28.
+  * gpt-oss-120b DFlash: 38 + 11.
+  * GLM MTP: SC20 → SC24.
+  * DeepSeek-V3: MTP level 1 fits its 64-stage ring; deeper MTP needs SC20.
+
+  For M3.1-Flash: 62 target + 1 router + 8–14 drafter stages = 71–77, so SC20, 16 → 20 decode galaxies. That
+  takes main's best cell from $10.24 to about $8.4 per galaxy-hour.
+* Unmeasured: DSpark's AL on AgentX / SPEED-Bench, a blaze verify step (batched verification is not built), and an
+  M3.1-Flash DSpark drafter (blaze has an M3 DFlash drafter config, 5 dense layers, but no target + drafter fork).
 
 ## Findings (study of Oct 8 2026, third run: decode speed follows each session's context along the measured M3 curve, 180 tokens/s/u at 100k; with the new auto split, deployed memory defaults (bf8 index_k, 1 GB reserve), KV offload tiers (host DRAM + 16 TB SSD per galaxy) behind static slots, round-robin scheduling, sequential pool copies, derived lane counts, unaligned resume in the baseline; decode ring and decode slots unlimited, AIPerf-exact replay, `results/study.json`)
 
@@ -470,7 +668,8 @@ ring position, 100 / 145 / 200, times the decode batch m: below, at and above th
   so prefill runs at higher concurrency within the TTFT SLO. Unlimited decode would net $166 / $294.
   * The batch model is an estimate (`decodeMoeFrac`, no batched measurement yet; tt-blaze #4226 plans one at m = 1 / 8).
 
-**Best net revenue per galaxy** (`tools/best_net_sweep.js`, `results/best_net_sweep.{json,txt}`, Oct 12). Kernels at
+**Best net revenue per galaxy, M3 at M3's prices** (`tools/best_net_sweep.js`, Oct 12; `results/best_net_sweep.{json,txt}`
+now hold the Oct 30 M3.1-Flash re-run, see "M3.1-Flash: net revenue" above). Kernels at
 op efficiency 0.5, chunk 512 with fused-attention batching on the paged pool, host DRAM + SSD tiers, a 62-stage
 decode ring on 16 decode galaxies with paged decode KV and queue backpressure; p90 TTFT ≤ 10 s. Varied: prefill
 galaxies 4 / 6 / 8, prefill budget 4k–32k, decode batch 1–8, queue limit 100 / 145 / 200 / 300 × m or none. Net $/h at

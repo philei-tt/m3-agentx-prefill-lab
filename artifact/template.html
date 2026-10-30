@@ -161,7 +161,7 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
 <div class="wrap">
 <header class="top">
   <div>
-    <div class="eyebrow">MiniMax-M3 pipeline prefill · Blackhole galaxies · AgentX 1M replay</div>
+    <div class="eyebrow">MiniMax-M3.1-Flash pipeline prefill · Blackhole galaxies · AgentX 1M replay</div>
     <h1>M3 AgentX Prefill Lab</h1>
     <p class="sub">Replays the full AgentX corpus (393 Claude Code sessions, 98,827 requests, up to 990k context) the way AIPerf's <span class="mono">inferencex-agentx-mvp</span> scenario does, against a per-op roofline of the M3 prefill pipeline calibrated to the hardware runs tracked in tt-metal issue #57827. Goodput is useful tok/s (tokens an infinite prefix cache would still have to prefill) at p90 TTFT under the SLO. New here? Start with the <a href="#method">Method</a> tab: it defines every term and explains every assumption.</p>
   </div>
@@ -182,6 +182,11 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
     <legend>Preset</legend>
     <select id="preset" aria-label="Preset"></select>
     <div class="hint" id="presetDesc"></div>
+  </fieldset>
+  <fieldset>
+    <legend>Model</legend>
+    <div class="row"><label for="model">Model</label><select id="model"><option value="m3.1-flash">MiniMax-M3.1-Flash</option><option value="m3">MiniMax-M3</option></select></div>
+    <div class="hint">M3.1-Flash runs sparse (MSA) attention in all 60 layers; M3 runs full ring-joint attention in the 3 dense layers. Same shapes otherwise.</div>
   </fieldset>
   <fieldset>
     <legend>Hardware &amp; pipeline</legend>
@@ -268,11 +273,17 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
       <summary>Decode</summary>
       <div class="reveal-body">
         <div class="row"><label for="decodeTps">Decode tokens/s/u (per user)</label><input id="decodeTps" type="number" min="5" step="5"></div>
-        <div class="row"><label for="decodeCurve">Decode TSU Model</label><select id="decodeCurve"><option value="flat">constant</option><option value="m3">adapt to KV length</option></select></div>
-        <div class="hint">Constant: every session at the speed above. Adapt: measured M3 curve, the speed above at 100k (180 → 214 at 8k, 101 at 550k).</div>
+        <div class="row"><label for="decodeCurve">Decode TSU Model</label><select id="decodeCurve"><option value="flat">constant</option><option value="m3">adapt to KV length</option><option value="m31-main">measured: old main @87c36f5 (bf4)</option><option value="m31-5614">measured: tt-blaze #5614 (bf4)</option><option value="m31-card">measured: main (model card, bf4)</option><option value="m31-b16">measured: #5966 batched 4x8 x16</option></select></div>
+        <div class="hint">Constant: every session at the speed above. Adapt: measured M3 curve, the speed above at 100k (180 → 214 at 8k, 101 at 550k). Measured: M3.1-Flash with bf4 experts as measured, the speed above unused (main = model card 181 / 156 at 128K / 512K; old main 144 / 86; #5614 154 / 134 at 100K / 550K; #5966 57 / 55 per user with 16 users per 4x8 stage: set 256 stages).</div>
         <div class="row"><label for="decodeStages">Decode pipeline stages (0 = unlimited)</label><input id="decodeStages" type="number" min="0" step="1"></div>
         <div class="row"><label for="decodeBatch">Decode batch (users per stage)</label><input id="decodeBatch" type="number" min="1" step="1"></div>
         <div class="hint">The ring holds stages × batch sessions at full speed. A bigger batch slows each user.</div>
+        <div class="row"><label for="decodeMoeFrac">Expert-weight share of a decode step</label><input id="decodeMoeFrac" type="number" min="0" max="1" step="0.1"></div>
+        <div class="row"><label for="specDraft">Spec decode: draft tokens per cycle (0 = off)</label><input id="specDraft" type="number" min="0" step="1"></div>
+        <div class="row"><label for="specAL">Spec decode: acceptance length (tokens per cycle)</label><input id="specAL" type="number" min="1" step="0.1"></div>
+        <div class="row"><label for="specVerify">Spec verification</label><select id="specVerify"><option value="batch">batched (one step per cycle)</option><option value="pipe">pipelined (one ring token per draft)</option></select></div>
+        <div class="row"><label for="specDraftFrac">Drafter time (share of a decode step)</label><input id="specDraftFrac" type="number" min="0" step="0.05"></div>
+        <div class="hint">Each cycle commits the acceptance length in tokens, bonus token included; it runs from 1 to drafts + 1. Batched verification reads the KV once but reads the experts of drafts + 1 tokens, so it pays off when the expert-weight share is low. Pipelined verification speeds up each user but fills drafts + 1 ring places per session, so on a full ring it decodes less.</div>
         <div class="row"><label for="decodeCache">Decode KV layout</label><select id="decodeCache"><option value="slots">fixed 1M slots</option><option value="paging">paged</option></select></div>
         <div class="hint" id="decMemHint"></div>
         <div class="row check"><input id="decodeHostTier" type="checkbox"><label for="decodeHostTier">Decode offload tiers (host DRAM + SSD of the decode galaxies)</label></div>
@@ -290,7 +301,7 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
         <div class="row"><label for="priceIn">Input $ / M tokens</label><input id="priceIn" type="number" min="0" step="0.01"></div>
         <div class="row"><label for="priceCached">Cached input $ / M tokens</label><input id="priceCached" type="number" min="0" step="0.01"></div>
         <div class="row"><label for="priceOut">Output $ / M tokens</label><input id="priceOut" type="number" min="0" step="0.01"></div>
-        <div class="hint">Defaults: MiniMax M3 on OpenRouter (Oct 2026). Misses bill as input, prefix hits as cached.</div>
+        <div class="hint">Defaults: MiniMax M3.1-Flash on OpenRouter (Oct 30 2026; most providers, and MiniMax at peak). Misses bill as input, prefix hits as cached.</div>
         <div class="row"><label for="galaxyUsd">$ / galaxy-hour</label><input id="galaxyUsd" type="number" min="0" step="0.5"></div>
         <div class="row"><label for="decodeGalaxies">Decode galaxies</label><input id="decodeGalaxies" type="number" min="0" step="1" disabled title="Fixed at 16 for now: the full 62-stage decode ring"></div>
         <div class="hint">Decode galaxies are fixed at 16 for now (the full 62-stage decode ring); they add to cost and size the decode tiers. Prices and $/galaxy-hour apply without re-running.</div>
@@ -422,9 +433,9 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
 
     <h2 id="m-context">Context: the system being modelled</h2>
     <ul>
-      <li><b>Model.</b> MiniMax-M3: 60 layers.
+      <li><b>Model.</b> MiniMax-M3.1-Flash (the default) or MiniMax-M3: 60 layers, the same shapes in both.
         <ul>
-          <li>Layers 0-2 are dense: full-attention GQA plus a dense SwiGLU MLP.</li>
+          <li>Layers 0-2 have a dense SwiGLU MLP. In M3.1-Flash their attention is MSA sparse attention like every other layer's; in M3 it is full-attention GQA (ring-joint).</li>
           <li>Layers 3-59 are MoE with MSA sparse attention: 128 experts, top-4, plus 1 shared expert; the indexer selects 16 blocks of 128 keys per query.</li>
           <li>Dimensions: hidden 6144, 64 query heads, 4 KV heads, head dim 128, max context 1,048,576 tokens.</li>
         </ul>
@@ -501,7 +512,7 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
     <p><b>Per-op roofline.</b> Every layer is broken into the ops the implementation runs.</p>
     <ul>
       <li><b>MoE/MSA layer:</b> two norm all-gathers, QKV projection, index branch, all-gather of the cached K/V and index keys over SP, indexer, sparse attention, output projection + reduce-scatter, shared expert, router, dispatch, experts, combine, MoE reduce, misc.</li>
-      <li><b>Dense layer:</b> ring-joint attention plus the dense MLP and its collectives.</li>
+      <li><b>Dense layer:</b> the dense MLP and its collectives, plus attention: on M3.1-Flash the MSA ops above (at the efficiencies measured on the MoE layers, since the kernels are the same), on M3 ring-joint attention. The calibration runs were taken on M3.</li>
     </ul>
     <p>For every op the model computes its FLOPs, DRAM bytes and ethernet bytes for the given mesh, chunk, request lengths and cache depth. From these it takes the time the op would need at peak hardware rates, its "roofline": 608 TFLOP/s LoFi / 304 HiFi2 per chip, 512 GB/s DRAM, 100 GB/s bidirectional ethernet per mesh axis.</p>
     <p><b>Step 1: per-op efficiency from profiles.</b> Profiles of one prefill chunk (5120 tokens attending a 51,200-token cache) give each op's measured time on [2,4], [8,4] and [4,2] stages. Each op's efficiency is <span class="mono">roofline / (measured − fixed latency)</span>. Examples at [2,4]: <span class="mono">experts_mm</span> runs at 28% of max(weight read, compute) (45% of their sum, which is how today&#39;s kernel behaves) and <span class="mono">sparse_sdpa</span> at 4% (Model tab). Other chunk sizes and cache depths are predicted by scaling each op's roofline at that fixed efficiency. [4,4] has no profile and uses the geometric midpoint of [2,4] and [8,4].</p>
@@ -698,9 +709,9 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
         "Pin as comparison" keeps a run as a third line.</li>
       <li><b>Net Revenue.</b> Per hour, for the requests completed: input-token revenue + output-token revenue − galaxy cost.
         <ul>
-          <li><b>Input tokens</b> bill new tokens (cache misses, re-prefill included) at the input price, cached prefix hits ("cache") at the cache-read price. The defaults are MiniMax's own endpoint for <span class="mono">minimax/minimax-m3</span> on OpenRouter, on Oct 7 2026: $0.30 per M input tokens and $0.06 per M cache reads. That is also the model-level price and most providers' (the cheapest third-party provider is about 20% lower). There is no cache-write charge. A better cache bills less per token: a hit pays a fifth of a miss, so a higher hit rate raises revenue only by letting the same hardware serve more requests.</li>
-          <li><b>Output tokens</b> bill at $1.20 per M (MiniMax's own price on OpenRouter), counted as decoded in the window. Decode generates them, so they belong next to the decode galaxies' cost. AgentX requests average about 1.1k output tokens against 120k-150k input tokens at the study's goodput points, so output adds roughly 10-15% to a request's bill. The precomputed baseline has no output counts, so its net needs a live run.</li>
-          <li><b>Cost</b> is the prefill galaxies of the run plus the decode galaxies, at $12 per galaxy-hour by default (a rough operating cost). The default decode is one M3 instance on 16 galaxies: set its pipeline stages (62) so its KV memory is modelled (unlimited decode overstates what 16 decode galaxies serve).</li>
+          <li><b>Input tokens</b> bill new tokens (cache misses, re-prefill included) at the input price, cached prefix hits ("cache") at the cache-read price. The defaults are the price of <span class="mono">minimax/minimax-m3.1-flash</span> on OpenRouter, on Oct 30 2026: $0.15 per M input tokens and $0.015 per M cache reads. That is what 10 of its 14 endpoints charge (Tenstorrent's own among them) and MiniMax's own price at peak (01:00-15:00 UTC); MiniMax charges half that off-peak, and the cheapest provider 40% less. M3 was $0.30 / $0.06. There is no cache-write charge. A better cache bills less per token: a hit pays a tenth of a miss, so a higher hit rate raises revenue only by letting the same hardware serve more requests.</li>
+          <li><b>Output tokens</b> bill at $0.60 per M (M3.1-Flash on OpenRouter, as above), counted as decoded in the window. Decode generates them, so they belong next to the decode galaxies' cost. AgentX requests average about 1.1k output tokens against 120k-150k input tokens at the study's goodput points, so output adds roughly 10-15% to a request's bill. The precomputed baseline has no output counts, so its net needs a live run.</li>
+          <li><b>Cost</b> is the prefill galaxies of the run plus the decode galaxies, at $10 per galaxy-hour by default (a rough operating cost). The default decode is one M3 instance on 16 galaxies: set its pipeline stages (62) so its KV memory is modelled (unlimited decode overstates what 16 decode galaxies serve).</li>
         </ul>
         Set other prices and costs in the Revenue &amp; cost fields; the tile, the points table (input $/h and net $/h) and the Roadmap hourly table (input revenue) update without re-running, and Copy link keeps them.</li>
       <li><b>Copy link.</b> Copies a URL holding every setting that differs from the defaults (plus SLO, concurrency grid, the infinite-cache option, the prices and costs); the address bar also tracks it. Opening the link loads that configuration and runs the sweep.</li>
@@ -825,9 +836,9 @@ function mkWorker() {
 }
 
 // ---------------------------------------------------------------- form <-> cfg
-const FIELDS = ['galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'reqPad', 'placement', 'chunk', 'batch', 'budget', 'batchMaxReqs', 'batchDynShape', 'batchChunksPerRequest', 'batchTokensPerRequest', 'attn', 'prefetchKV', 'policy',
-  'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'decodeStages', 'decodeBatch', 'decodeCurve', 'decodeCache', 'decodeHostTier', 'decodeBackpressure', 'decodeQueueMax', 'duration', 'seed'];
-const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchMaxReqs', 'batchChunksPerRequest', 'batchTokensPerRequest', 'lanes', 'arenaTokens', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeStages', 'decodeBatch', 'decodeQueueMax', 'duration', 'seed']);
+const FIELDS = ['model', 'galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'reqPad', 'placement', 'chunk', 'batch', 'budget', 'batchMaxReqs', 'batchDynShape', 'batchChunksPerRequest', 'batchTokensPerRequest', 'attn', 'prefetchKV', 'policy',
+  'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'decodeStages', 'decodeBatch', 'decodeMoeFrac', 'decodeCurve', 'specDraft', 'specAL', 'specVerify', 'specDraftFrac', 'decodeCache', 'decodeHostTier', 'decodeBackpressure', 'decodeQueueMax', 'duration', 'seed'];
+const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchMaxReqs', 'batchChunksPerRequest', 'batchTokensPerRequest', 'lanes', 'arenaTokens', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeStages', 'decodeBatch', 'decodeMoeFrac', 'specDraft', 'specAL', 'specDraftFrac', 'decodeQueueMax', 'duration', 'seed']);
 function setForm(cfg) {
   const c = Object.assign({}, SIM.DEFAULTS, cfg);
   for (const f of FIELDS) {

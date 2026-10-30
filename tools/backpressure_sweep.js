@@ -7,7 +7,7 @@
 //   prefill batching: on (the best config's fused, tile-padded batches; budget 8k / 16k) | off (per-request
 //           attention, a 2048 / 5120-token pass)
 // Each cell keeps the prefill budget with the higher net revenue at the goodput point (p90 TTFT <= 10 s); MiniMax's
-// prices, output billed as decoded, $12 per galaxy-hour, prefill + 16 decode galaxies.
+// prices, output billed as decoded, SIM.COST's $ per galaxy-hour (results/ from Oct 12: $12), prefill + 16 decode galaxies.
 // Usage: node tools/backpressure_sweep.js [--workers 14] [--out results/backpressure_sweep.json] > results/backpressure_sweep.txt
 'use strict';
 const fs = require('fs');

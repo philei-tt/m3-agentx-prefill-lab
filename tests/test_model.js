@@ -139,7 +139,7 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   const m3 = Object.assign({}, SIM.DEFAULTS, { decodeCurve: 'm3' });
   assert.ok(Math.abs(SIM.decodeSpeed(m3, 100000) - 180) < 1e-9 && SIM.decodeSpeed(m3, 550000) < SIM.decodeSpeed(m3, 8000) && SIM.decodeSpeed(Object.assign({}, SIM.DEFAULTS, { decodeCurve: 'flat' }), 550000) === 180 && SIM.DEFAULTS.decodeCurve === 'm3');
   for (const [x, t] of SIM.M3_DECODE_TSU) assert.ok(Math.abs(SIM.decodeSpeed(m3, x) * 98 / 180 / t - 1) < 0.006, `curve at ${x}`);
-  const cu = SIM.simulate(TR, cal, Object.assign({ decodeCurve: 'm3' }, cfg)), cw = SIM.simulate(TR, cal, Object.assign({ decodeCurve: 'm3', decodeStages: 1e6 }, cfg));
+  const cu = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeCurve: 'm3' })), cw = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeCurve: 'm3', decodeStages: 1e6 }));
   assert.ok(cu.decodeTpsMean < 180 && cu.decodeTpsMean > 100 && Math.abs(cw.usefulTps - cu.usefulTps) < 1e-3 * cu.usefulTps, `m3 mean speed ${cu.decodeTpsMean}`);
   // starvation causes: shares of the window, summing to at most 1; none from slots without a slot limit
   const n = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeSlots: 0 }));
@@ -326,6 +326,75 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   assert.ok(pE < pO && pO < pF, `pad even ${pE} owner ${pO} fixed ${pF}`);
   const rb = SIM.simulate(TR, cal, Object.assign({ cache: 'inf', batch: true, budget: 16384, reqPad: 'tile', placement: 'owner' }, base, { concurrency: 64 }));
   assert.ok(rb.done > 0 && rb.avgChunkTok <= 16384 && rb.maxUtil <= 1 + 1e-9);
+}
+
+// 13. model: M3.1-Flash (default) runs MSA in the dense layers too, M3 ring-joint. MoE layers are the same in both;
+//     an M3.1-Flash dense layer is its M3 counterpart's projections and MLP plus an MoE layer's MSA attention, so it
+//     grows with context like an MoE layer (not like the ring), and the auto split packs more layers into the
+//     first stage. The calibration replays pin M3.
+{
+  assert.strictEqual(SIM.DEFAULTS.model, 'm3.1-flash');
+  for (const opEff of [0, 1]) {
+    const f = plan({ opEff }), m = plan({ opEff, model: 'm3' });
+    const L = (p, kind, k) => p.layer(kind, 2048, [{ n: 2048, na: 2048, k, cap: 0 }]);
+    for (const k of [0, 100000, 900000]) assert.strictEqual(L(f, 'moe', k), L(m, 'moe', k));
+    // MSA attention: a dense layer grows with context like an MoE layer (which also carries the pipeline multiplier)
+    const grow = (p, kind) => L(p, kind, 900000) - L(p, kind, 100000);
+    const dF = grow(f, 'dense'), dMoe = grow(f, 'moe');
+    assert.ok(dF > 0.5 * dMoe && dF < 2 * dMoe && grow(m, 'dense') > 3 * dMoe, `dense growth ${dF} vs moe ${dMoe}, ring ${grow(m, 'dense')}`);
+    assert.ok(L(f, 'dense', 900000) < L(m, 'dense', 900000) / 3, `long-context dense layer ${L(f, 'dense', 900000)} vs ring ${L(m, 'dense', 900000)}`);
+  }
+  const sp = (model) => SIM.makePlan({ model, galaxies: 4, stages: 16, chunk: 2048, cache: 'inf' }, cal).counts;
+  assert.ok(sp('m3.1-flash')[0] > sp('m3')[0] + 1, `split m3 ${sp('m3')} m3.1-flash ${sp('m3.1-flash')}`);
+  assert.ok(plan({ model: 'm4' }).errors.some((e) => e.includes('model')));
+  // measured M3.1-Flash decode curves: absolute (decodeTps unused), through every measured point, slower with
+  // context, and slower per user in a fuller batch; unknown names are rejected
+  for (const [name, cur] of Object.entries(SIM.DECODE_CURVES)) {
+    const c = Object.assign({}, SIM.DEFAULTS, { decodeCurve: name }), c2 = Object.assign({}, c, { decodeTps: 1 });
+    for (const [x, t] of cur.pts) assert.ok(Math.abs(SIM.decodeSpeed(c, x) / t - 1) < 1e-9 && SIM.decodeSpeed(c2, x) === SIM.decodeSpeed(c, x), `${name} at ${x}`);
+    assert.ok(SIM.decodeSpeed(c, 1e6) < SIM.decodeSpeed(c, 1e3) && SIM.decodeSpeed(c, 131072, 4) < SIM.decodeSpeed(c, 131072), name);
+    assert.ok(SIM.makePlan(Object.assign({}, c, { decodeStages: 62 }), cal).errors.length === 0, name);
+  }
+  assert.ok(plan({ decodeCurve: 'm31-nope' }).errors.some((e) => e.includes('decodeCurve')));
+  assert.ok(SIM.makePlan({ model: 'm3' }, cal).errors.length === 0);
+}
+
+// 14. speculative decoding: off by default. A cycle commits specAL tokens. Batched verification reads the KV once, so
+//     with no expert-weight cost (decodeMoeFrac 0) and a free drafter a session decodes specAL x faster; reading more
+//     experts and the drafter cost some of that back (at decodeMoeFrac 0.8 most of it on an unbatched ring). #5966's
+//     batched step costs per 8-row block, so there a verify token costs as much as another user's. Pipelined verification (each draft token a ring token) speeds
+//     a session up by specAL on an empty ring but takes specDraft + 1 places in it, so on a full ring it decodes less
+//     unless specAL > specDraft + 1 (impossible). Bad knobs are rejected.
+{
+  assert.ok(SIM.DEFAULTS.specDraft === 0);
+  for (const curve of ['m3', 'flat', 'm31-main', 'm31-card']) {
+    const c = Object.assign({}, SIM.DEFAULTS, { decodeCurve: curve }), s = (o, m) => SIM.decodeSpeed(Object.assign({}, c, o), 131072, m);
+    const plain = s({});
+    for (const m of [1, 4]) {
+      const free = { specDraft: 3, specAL: 2.5, specDraftFrac: 0, decodeMoeFrac: 0 };
+      assert.ok(Math.abs(s(free, m) / s({ decodeMoeFrac: 0 }, m) - 2.5) < 1e-9, `${curve} m ${m}: ${s(free, m)}`);
+      assert.ok(Math.abs(s(Object.assign({}, free, { specVerify: 'pipe' }), m) / s({ decodeMoeFrac: 0 }, m) - 2.5) < 1e-9, `${curve} pipe`);
+    }
+    const sb = s({ specDraft: 3, specAL: 2.5 }), sw = s({ specDraft: 7, specAL: 2.5 });
+    assert.ok(sb < 2.5 * plain && sw < sb && s({ specDraft: 3, specAL: 1 }) < plain, `${curve}: ${plain} ${sb} ${sw}`);
+    assert.ok(s({ specDraft: 3, specAL: 2.5, decodeMoeFrac: 0.4 }) > 1.2 * s({ decodeMoeFrac: 0.4 }), curve);
+  }
+  // #5966 (all weights in L1, every row through every local expert) costs per 8-row block, not per distinct expert:
+  // 24 users cost 1.47x 16 at 128K, the expert-weight share does not matter, and verifying 4 tokens per user (64 rows)
+  // costs about 4x, so even a perfect AL of 4 with a free drafter gains nothing
+  {
+    const c = Object.assign({}, SIM.DEFAULTS, { decodeCurve: 'm31-b16', specDraftFrac: 0 }), s = (o) => SIM.decodeSpeed(Object.assign({}, c, o), 131072);
+    const b = SIM.DECODE_CURVES['m31-b16'].blocks;
+    assert.ok(Math.abs((b[0] + 3 * b[1]) / (b[0] + 2 * b[1]) - 382.97 / 259.59) < 1e-9);
+    assert.ok(s({ specDraft: 3, specAL: 3 }) === s({ specDraft: 3, specAL: 3, decodeMoeFrac: 0 }) && s({ specDraft: 3, specAL: 4 }) < 1.05 * s({}), `${s({ specDraft: 3, specAL: 4 })} vs ${s({})}`);
+  }
+  assert.ok(plan({ specDraft: 3, specAL: 5 }).errors.some((e) => e.includes('specAL')) && plan({ specDraft: 1.5, specAL: 1 }).errors.some((e) => e.includes('specDraft')));
+  assert.ok(plan({ specVerify: 'tree' }).errors.some((e) => e.includes('specVerify')) && plan({ decodeStages: 62, decodeBatch: 2, specDraft: 1, specAL: 1.5, specVerify: 'pipe' }).errors.some((e) => e.includes('pipelined')));
+  assert.ok(plan({ decodeStages: 62, decodeCurve: 'm31-b16', specDraft: 3, specAL: 2.5 }).errors.length === 0);
+  const cfg = Object.assign({ cache: 'pool', chunk: 512, batch: true, budget: 8192 }, base, { concurrency: 128, decodeStages: 4, decodeSlots: 0, decodeCurve: 'flat', specDraftFrac: 0 });
+  const off = SIM.simulate(TR, cal, cfg), pipe = SIM.simulate(TR, cal, Object.assign({ specDraft: 3, specAL: 2.5, specVerify: 'pipe' }, cfg));
+  const bat = SIM.simulate(TR, cal, Object.assign({ specDraft: 3, specAL: 2.5, decodeMoeFrac: 0 }, cfg));
+  assert.ok(pipe.outDecTps < off.outDecTps && bat.outDecTps > 1.5 * off.outDecTps, `out off ${off.outDecTps} pipe ${pipe.outDecTps} batch ${bat.outDecTps}`);
 }
 
 console.log('test_model: all checks passed');

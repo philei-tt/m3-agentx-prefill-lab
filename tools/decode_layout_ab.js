@@ -14,7 +14,7 @@
 // tiers, today's kernels, round robin; best (by net revenue at the goodput point) of no batching (chunk 1024 / 2048)
 // and batching (chunk 512 / 1024, budget 4k / 8k / 16k, 4 lanes). Goodput point: p90 TTFT <= 10 s (to the first
 // decode token). Net revenue: MiniMax's
-// prices, output tokens as decoded in the window, $12 per galaxy-hour, prefill + 16 decode galaxies.
+// prices, output tokens as decoded in the window, SIM.COST's $ per galaxy-hour (results/ from before Oct 30: $12), prefill + 16 decode galaxies.
 // Usage: node tools/decode_layout_ab.js [--workers 14] [--out results/decode_layout_ab.json] > results/decode_layout_ab.txt
 'use strict';
 const fs = require('fs');

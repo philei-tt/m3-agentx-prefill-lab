@@ -1,4 +1,4 @@
-/* sim_core.js - MiniMax-M3 pipeline-prefill traffic simulator (AgentX replay x per-op roofline).
+/* sim_core.js - MiniMax-M3.1-Flash (and M3) pipeline-prefill traffic simulator (AgentX replay x per-op roofline).
  *
  * One file, no dependencies. Used by the artifact (inlined, runs in a Web Worker) and by node (sweep.js,
  * validate.js). See README.md for the model, its calibration and the knobs.
@@ -11,6 +11,12 @@
   // ------------------------------------------------------------------------------------------------------
   // Model + hardware constants
   // ------------------------------------------------------------------------------------------------------
+  // MiniMax-M3.1-Flash (HF MiniMaxAI/MiniMax-M3.1-Flash config.json) has the same shapes as MiniMax-M3: 60 layers,
+  // the first 3 with a dense MLP, the rest MoE. The one structural change is attention: M3.1-Flash runs MSA (sparse
+  // attention: indexer + top-16 blocks of 128) in all 60 layers (sparse_attention_freq all 1), where M3 ran full
+  // (ring-joint) attention in the 3 dense layers. cfg.model selects which (DEFAULTS.model); the calibration runs were
+  // taken on M3, so the calibration and its replays pin model 'm3'.
+  const MODELS = ['m3.1-flash', 'm3'];
   const M3 = {
     E: 6144, Hq: 64, Hkv: 4, d: 128, Hi: 4, di: 128, sparseKeys: 2048, Ex: 128, topk: 4, I: 3072, Is: 3072,
     Id: 12288, V: 200064, L: 60, nDense: 3, maxCtx: 1048576,
@@ -31,6 +37,42 @@
     const b = sxy / sxx; return [my - b * mx, b];
   })();
   const DECODE_REF_CTX = 100000;
+  // Measured M3.1-Flash decode with bf4 routed experts (tt-blaze, Oct 2026), tokens/s/u vs context, as named
+  // decodeCurve values. Unlike 'm3' they are absolute (decodeTps does not apply): time per token is interpolated
+  // piecewise-linearly in context between the points and extrapolated along the end segments. Ring t/s/u is
+  // 1e6 / (64 x stage step in us), the 64-stage convention of #5966.
+  //   'm31-main':  old main: tt-blaze main 87c36f578a, 4x2 stages, one user per step: 81.46 / 108.59 / 181.77 us (#5966's baseline).
+  //   'm31-5614':  tt-blaze #5614 (open; all-sparse decode with index-K split over the 8 chips of a stage), MoE layer
+  //                (the slowest stage) 101.17 / 116.14 us at 100K / 550K; at 1K, main's 81.46 us + 6.5% (#5490, which
+  //                #5614 merges, measured its 8K stage at +6.5%), since #5614 has no short-context point.
+  //   'm31-card':  main: the model card (minimax-bringup, Oct 29) of tt-blaze #6059 (open, the minimax_m3_1_flash
+  //                decode pipeline), taken as what main will run: CP8 indexer, bf4 attention weights in SRAM, 512 of
+  //                each routed expert's channels in SRAM, 62 stages; 218 / 181 / 156 /
+  //                136 at 1K / 128K / 512K / 1M; 209 users at 1M fit (decodeSlots 209).
+  //   'm31-b16':   tt-blaze #5966 (draft), batched: 4x8 stages, 16 users per step, all weights in L1: 275.99 / 286.11 us
+  //                at 128K / 512K. One stage per galaxy holds 16 sessions, so 16 decode galaxies carry 256 at these
+  //                speeds (decodeStages 256, decodeBatch 1: the batch is already in the measurement).
+  const DECODE_CURVES = Object.fromEntries(Object.entries({
+    'm31-main': [[1024, 1e6 / 64 / 81.46], [131071, 1e6 / 64 / 108.59], [524287, 1e6 / 64 / 181.77]],
+    'm31-5614': [[1024, 1e6 / 64 / (81.46 * 1.065)], [100000, 1e6 / 64 / 101.17], [550000, 1e6 / 64 / 116.14]],
+    'm31-card': [[1000, 218], [131072, 181], [524288, 156], [1048576, 136]],
+    'm31-b16': [[131071, 1e6 / 64 / 275.99], [524287, 1e6 / 64 / 286.11]],
+  }).map(([k, pts]) => {
+    const batch = k === 'm31-b16' ? 16 : 1; // sessions per step in the measurement
+    // #5966 keeps every weight in L1 and runs every row through every local expert (EP32), so its step does not
+    // depend on routing: it costs a fixed part plus one per 8-row block (#5856 at 128K: 16 users 259.59 us, 24
+    // users 382.97 us, "17-23 users cost the same as 24"), [fixed us, us per block]
+    const blocks = k === 'm31-b16' ? [259.59 - 2 * (382.97 - 259.59), 382.97 - 259.59] : null;
+    const p = pts.map(([c, t]) => [c, 1 / t]); // seconds per token
+    const at = (x) => { // piecewise linear, end segments extrapolated
+      let i = 0; while (i < p.length - 2 && x > p[i + 1][0]) i++;
+      const [x0, y0] = p[i], [x1, y1] = p[i + 1];
+      return y0 + (y1 - y0) * (x - x0) / (x1 - x0);
+    };
+    // the context-free part of a token's time (weights, collectives, hops): the curve at zero context, at most the
+    // first point; batching scales the rest (attention over each session's own KV) with the batch
+    return [k, { pts, at, batch, blocks, a: Math.min(p[0][1], Math.max(0, at(0))) }];
+  }));
   // Batched decode, m sessions per stage per step (tt-blaze #4220; not measured yet), from the batch-1 trip a + b*ctx:
   //   - the context term is attention over each session's own KV, so m sessions read m x as much: m * b * ctx;
   //   - the fixed term is mostly weight reads (llm_perf's M3 batch-1 decode breakdown: the MoE layer is ~all of the
@@ -38,14 +80,30 @@
   //     selects, 128 * (1 - (1 - 4/128)^m) experts against 4 at m = 1; the rest (dense weights, collective and hop
   //     latency) is shared by the batch.
   const decodeExperts = (m) => M3.Ex * (1 - Math.pow(1 - M3.topk / M3.Ex, m));
+  // Speculative decoding (DEFAULTS.specDraft): a drafter proposes specDraft tokens, the target verifies them with the
+  // session's own next token, D = specDraft + 1 tokens per verify cycle, and commits specAL of them on average (the
+  // acceptance length, bonus token included: 1 <= specAL <= D; AgentX submissions run at a committed AL). null = off.
+  const specOf = (cfg) => (cfg.specDraft > 0 ? { D: cfg.specDraft + 1, al: cfg.specAL, draft: cfg.specDraftFrac || 0, pipe: cfg.specVerify === 'pipe' } : null);
   // decode speed per user (tokens/s/u) for a session with `ctx` tokens of context while the ring has room, in a batch
-  // of m sessions per stage (m = 1 when omitted; fractional m = a partly filled batch)
+  // of m sessions per stage (m = 1 when omitted; fractional m = a partly filled batch). A step is the context-free
+  // part a (scaled by g for the distinct experts the step's tokens select, or for a curve with `blocks` by its 8-row
+  // blocks) plus each session's attention over its KV.
+  // With spec decode a cycle commits specAL tokens and costs the drafter (specDraftFrac of a plain step) plus the
+  // verify: 'batch' verifies the session's D tokens in its own step (KV read once, so the attention term is unchanged;
+  // the experts of m x D tokens), 'pipe' sends each through the ring as its own token (a plain step; the ring carries
+  // D x fewer sessions, see decCap).
   function decodeSpeed(cfg, ctx, m) {
-    const [a, b] = M3_DECODE_TRIP, mm = m > 1 ? m : 1, c = cfg.decodeCurve === 'm3' ? ctx : DECODE_REF_CTX;
+    const [a0, b0] = M3_DECODE_TRIP, mm = m > 1 ? m : 1;
     const f = cfg.decodeMoeFrac === undefined ? DEFAULTS.decodeMoeFrac : cfg.decodeMoeFrac;
-    const g = mm > 1 ? 1 - f + f * decodeExperts(mm) / decodeExperts(1) : 1;
-    if (cfg.decodeCurve !== 'm3' && mm === 1) return cfg.decodeTps;
-    return cfg.decodeTps * (a + b * DECODE_REF_CTX) / (a * g + mm * b * c);
+    const cur = DECODE_CURVES[cfg.decodeCurve], base = cur ? cur.batch : 1;
+    const blk = cur && cur.blocks, rowCost = (rows) => blk[0] + blk[1] * Math.ceil(rows / 8 - 1e-9);
+    const g = (n) => (!(n > 1) ? 1 : blk ? rowCost(base * n) / rowCost(base) : 1 - f + f * decodeExperts(base * n) / decodeExperts(base));
+    let a, w, k = 1; // seconds per step: context-free part, attention per session; k = tokens/s/u scale
+    if (cur) { a = cur.a; w = Math.max(cur.at(ctx), cur.a) - cur.a; }
+    else { a = a0; w = b0 * (cfg.decodeCurve === 'm3' ? ctx : DECODE_REF_CTX); k = cfg.decodeTps * (a0 + b0 * DECODE_REF_CTX); }
+    const plain = a * g(mm) + mm * w, sp = specOf(cfg);
+    if (!sp) return k / plain;
+    return k * sp.al / ((sp.pipe ? plain : a * g(mm * sp.D) + mm * w) + sp.draft * plain);
   }
   const MB = 1e6, GB = 1e9;
   // Decode KV memory, modelled from tt-blaze's M3 decode (one 4x2 mesh, 8 chips, per stage). The sparse (MSA/MoE)
@@ -55,7 +113,9 @@
   // sparse attention TP4 x CP2 (tt-blaze #4855, the default since Oct 11): mesh row r holds KV head r and the two
   // columns split its K/V by 128-token block, as index-K already is, so K and V are 136 B each over the 2 columns
   // = 136 B, + index_k 68 B = 204 B (TP8 before it replicated K/V over the columns: 340 B). Dense stages (TP4 x CP2
-  // since #4703) hold 68 B/token/chip; the embedding and LM-head stages hold none.
+  // since #4703) hold 68 B/token/chip on M3 (204 B with M3.1-Flash's MSA, still under the sparse stages' weights, so
+  // the sparse stages still bind); the embedding and LM-head stages hold none. Decode speed and memory are M3's
+  // measurements for both models (M3.1-Flash's sparse dense layers would read less KV per token at long context).
   const DEC_DRAM = 8 * 4080 * 2 ** 20;
   const DEC_KVB_CHIP = 2 * 128 * BF8 / 2 + 128 * BF8 / 2;
   const decodeWeightsChip = () => M3.Ex * 3 * M3.E * (M3.I / 2) * BF4 + M3.maxCtx * 64 * BF16 + 1024 * M3.E * BF8 + 1.5 * 2 ** 20;
@@ -63,6 +123,9 @@
   const OPS_MOE = ['norm_ag', 'qkv', 'idx_branch', 'misc', 'o_proj', 'attn_rs', 'shared', 'router', 'dispatch', 'experts', 'combine', 'moe_reduce'];
   const OPS_MSA_SEG = ['ag_kv', 'ag_idx', 'indexer', 'sparse', 'kv_a2a'];
   const OPS_DENSE = ['norm_ag', 'qkv', 'misc', 'o_proj', 'attn_rs', 'dense_mlp'];
+  // dense layer with MSA attention (M3.1-Flash): the index branch joins the dense layer's projections
+  const OPS_DENSE_MSA = ['norm_ag', 'qkv', 'idx_branch', 'misc', 'o_proj', 'attn_rs', 'dense_mlp'];
+  const MSA_OPS = ['idx_branch'].concat(OPS_MSA_SEG);
   const OPS_DENSE_SEG = ['ring', 'kv_a2a'];
   const CCL_OPS = new Set(['norm_ag', 'attn_rs', 'dispatch', 'combine', 'ag_kv', 'ag_idx', 'kv_a2a', 'shared', 'moe_reduce', 'dense_mlp']);
   // zone name (parse_zone_perf.py) -> op
@@ -351,13 +414,14 @@
   function opMs(op, roofS, eff, lat, c) {
     return (isCcl(op) ? cclLat(op, c, lat) : lat.op) + roofS * 1e3 / eff[op];
   }
-  // attention part of a layer, per-request (seq) or one kernel over the whole chunk (fused).
+  // attention part of a layer, per-request (seq) or one kernel over the whole chunk (fused). MSA for MoE layers, and
+  // for dense layers too when c.denseMsa (M3.1-Flash); ring-joint for M3's dense layers.
   // acc.g collects the KV-gather time that a prefetch could hide (MSA ag_kv/ag_idx; the dense ring's gather beyond
   // its compute).
   function attnMs(kind, c, segs, eff, lat, fused, acc) {
     const z = waveFactor(ZONE_T, c);
     let t = 0;
-    if (kind === 'moe') {
+    if (kind === 'moe' || c.denseMsa) {
       for (const op of OPS_MSA_SEG) {
         if (op === 'kv_a2a' && !c.evenSplit) continue;
         if ((op === 'ag_kv' || op === 'ag_idx') && c.sp <= 1) continue;
@@ -386,7 +450,7 @@
   }
   function layerMs(kind, c, segs, eff, lat, attn) {
     let t = 0, w = 0;
-    for (const op of kind === 'moe' ? OPS_MOE : OPS_DENSE) {
+    for (const op of kind === 'moe' ? OPS_MOE : c.denseMsa ? OPS_DENSE_MSA : OPS_DENSE) {
       const m = (op === 'norm_ag' ? 2 : 1) * opMs(op, roofTok(op, c), eff, lat, c);
       t += m; if (!isCcl(op)) w += m;
     }
@@ -408,11 +472,12 @@
   // System plan: stages, layer split, memory -> KV capacity, cost functions
   // ------------------------------------------------------------------------------------------------------
   const DEFAULTS = {
+    model: 'm3.1-flash',   // 'm3.1-flash' = MSA in every layer | 'm3' = ring-joint attention in the 3 dense layers
     galaxies: 4, replicas: 1, mesh: [2, 4], stages: 16, split: 'auto',
     opEff: 0,              // 0 = today's measured kernels, 1 = roofline target efficiencies
     torus: 'full',         // ring collectives: 'full' = only [4,4] stages (a whole 4x4 torus) | 'axes' | 'off' (makePlan)
     asyncHandoff: false,   // stage-to-stage D2D overlapped with compute (no blocking send), link-rate transfer
-    boundedDense: true,    // dense ring-joint gathers [0, kv_len) (op-bounded since #47539); false = whole lane capacity
+    boundedDense: true,    // model 'm3': dense ring-joint gathers [0, kv_len) (op-bounded since #47539); false = whole lane capacity
     msaLocal: false,       // MSA: SP-local indexer + top-k merge, fetch only selected K/V blocks (no prefix all-gather)
     // index_k cache dtype / de-replicated over TP. Today: bf8 x TP replicas (the deployed runner rejects bf16); the
     // #57827 calibration runs used bf16, so the calibration and validation replays pin idxBf16: true
@@ -521,8 +586,16 @@
     //   at 140k, 132 at 310k, 101 at 550k). KV migration to decode is not modelled: it streams layer by layer during
     //   prefill, so only the last layer of the last chunk is left at the end, and that overlaps the first token's trip.
     //   Default 'm3' at decodeTps 180: the decode target (180 tokens/s/u @100k) with the measured shape; decodeTps 98
-    //   reproduces the measured table.
+    //   reproduces the measured table. 'm31-main' / 'm31-5614' / 'm31-card' / 'm31-b16': measured M3.1-Flash bf4
+    //   decode (DECODE_CURVES), absolute (decodeTps unused); 'm31-b16' goes with decodeStages 256.
     decodeCurve: 'm3',
+    // specDraft: speculative decoding (see specOf / decodeSpeed), draft tokens per verify cycle (0 = off; M3.1-Flash
+    //   ships a DSpark draft head). specAL: tokens committed per cycle, bonus token included (1..specDraft + 1).
+    //   specVerify: 'batch' = the cycle's specDraft + 1 tokens verified together in the session's step (batched
+    //   verification, not built yet); 'pipe' = each one its own token through the ring (tt-blaze's MTP / DFlash today),
+    //   so the ring carries (specDraft + 1) x fewer sessions. specDraftFrac: the drafter's time per cycle, as a share of
+    //   a plain decode step. The drafter's own galaxies are not counted (tt-blaze's spec-decode layouts add ~4).
+    specDraft: 0, specAL: 1, specVerify: 'batch', specDraftFrac: 0.1,
     // decodeCache: the decode side's KV layout. decodeSlots sizes its memory in 1M-token slots (0 = unlimited). Every
     //   layout reserves a request's decode KV when the request is admitted to prefill and releases it when its decode
     //   ends; released KV stays cached (LRU) and a later request with the same prefix finds it there.
@@ -637,6 +710,11 @@
       const et = Math.max(em, TARGET_EFF[OP_CLASS[op] || 'matmul']);
       eff[k][op] = Math.exp((1 - a) * Math.log(em) + a * Math.log(et));
     }
+    // M3.1-Flash: the dense layers run the same MSA kernels as the MoE layers (index branch, KV/index gathers, indexer,
+    // sparse SDPA), at the efficiencies measured there; their projections and MLP keep the dense layer's own
+    const denseMsa = cfg.model !== 'm3';
+    if (denseMsa) for (const op of MSA_OPS) eff.dense[op] = eff.moe[op];
+    if (!MODELS.includes(cfg.model)) errors.push(`model must be one of ${MODELS.join(', ')}, got ${cfg.model}`);
     // ring axes (see torusFactors). 'full': only a stage that is a whole 4x4 torus runs ring collectives (fabric
     // torus mode needs the whole torus); 'axes': any 4-long axis that spans a torus row/column keeps its wrap link
     // ([2,4] -> TP ring, [4,2] -> SP ring, [8,4] -> TP ring); 'off': line collectives everywhere (the measured setup)
@@ -651,7 +729,7 @@
     const gran = owner ? 32 : 32 * sp; // tile padding: request padding unit
     // evenSplit: contiguous equal slices over SP, so the new K/V rows need an all-to-all to reach the ranks that own them
     const evenSplit = tile && !owner;
-    const ctxT = (T) => ({ sp, tp, P, T, idxB, imb: cfg.expertImb, evenSplit, bounded: cfg.boundedDense, msaLocal: cfg.msaLocal, ringSp, ringTp, prefetch: !!cfg.prefetchKV });
+    const ctxT = (T) => ({ sp, tp, P, T, idxB, imb: cfg.expertImb, evenSplit, bounded: cfg.boundedDense, msaLocal: cfg.msaLocal, ringSp, ringTp, prefetch: !!cfg.prefetchKV, denseMsa });
     const pm = cal.pipe;
     // the 1/T term was fitted on chunks of 2048 and 5120 tokens; clamp so small chunks do not extrapolate it
     const moeMult = (T) => (1 - a) * (pm.moeMult[0] + pm.moeMult[1] * 5120 / Math.max(T, 2048)) + a * 1;
@@ -740,7 +818,7 @@
     for (const k of ['hostDramGBPerGalaxy', 'ssdTBPerGalaxy']) if (!(cfg[k] >= 0)) errors.push(`${k} must be >= 0`);
     for (const k of ['pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy']) if (!(cfg[k] > 0)) errors.push(`${k} must be > 0`);
     if (!(cfg.decodeStages >= 0)) errors.push('decode pipeline stages must be >= 0 (0 = unlimited)');
-    if (!['flat', 'm3'].includes(cfg.decodeCurve)) errors.push(`decodeCurve must be 'flat' or 'm3', got ${cfg.decodeCurve}`);
+    if (!['flat', 'm3'].includes(cfg.decodeCurve) && !DECODE_CURVES[cfg.decodeCurve]) errors.push(`decodeCurve must be 'flat', 'm3' or one of ${Object.keys(DECODE_CURVES).join(', ')}, got ${cfg.decodeCurve}`);
     if (!(cfg.batchMaxReqs >= 0) || cfg.batchMaxReqs !== Math.floor(cfg.batchMaxReqs)) errors.push('max requests per batch must be a whole number >= 0 (0 = no limit)');
     if (!(cfg.batchChunksPerRequest >= 0) || cfg.batchChunksPerRequest !== Math.floor(cfg.batchChunksPerRequest)) errors.push('chunks per request per round must be a whole number >= 0 (0 = no limit)');
     if (!(cfg.batchTokensPerRequest >= 0)) errors.push('tokens per request per round must be >= 0 (0 = no limit)');
@@ -770,6 +848,11 @@
     const decPoolTok = dc === 'slots' ? 0 : decMem;
     if (!(autoDec || cfg.decodeSlots >= 0)) errors.push(`decodeSlots must be 'auto' or a number >= 0, got ${cfg.decodeSlots}`);
     if (!(cfg.decodeBatch >= 1) || cfg.decodeBatch !== Math.floor(cfg.decodeBatch)) errors.push('decode batch must be a whole number >= 1');
+    if (!(cfg.specDraft >= 0) || cfg.specDraft !== Math.floor(cfg.specDraft)) errors.push('specDraft must be a whole number >= 0 (0 = no spec decode)');
+    if (cfg.specDraft > 0 && !(cfg.specAL >= 1 && cfg.specAL <= cfg.specDraft + 1)) errors.push(`specAL must be in [1, specDraft + 1 = ${cfg.specDraft + 1}], got ${cfg.specAL}`);
+    if (!['batch', 'pipe'].includes(cfg.specVerify)) errors.push(`specVerify must be 'batch' or 'pipe', got ${cfg.specVerify}`);
+    if (!(cfg.specDraftFrac >= 0)) errors.push('specDraftFrac must be >= 0');
+    if (cfg.specDraft > 0 && cfg.specVerify === 'pipe' && cfg.decodeBatch > 1) errors.push('pipelined spec verification with batched decode is not modelled (use specVerify batch)');
     if (cfg.decodeBatch > 1 && !(cfg.decodeStages > 0)) errors.push('batched decode needs the decode pipeline stages (decodeStages > 0)');
     if (!(cfg.decodeMoeFrac >= 0 && cfg.decodeMoeFrac <= 1)) errors.push('decodeMoeFrac must be in [0, 1]');
     // fixed slots: the ring carries decodeBatch x decodeStages sessions, each in its own 1M slot
@@ -1182,8 +1265,8 @@
     // occupancy over the window, for slots held and for requests actually decoding (prefill done, not yet ended)
     let decHeld = 0, decoding = 0, decT = 0, decSpeedSum = 0; const decQ = [];
     // share of its full speed each decoding session gets: min(1, ring capacity / sessions decoding), the ring carrying
-    // decodeBatch sessions per stage
-    const decCap = cfg.decodeStages * cfg.decodeBatch;
+    // decodeBatch sessions per stage (pipelined spec verification: each session takes specDraft + 1 of those places)
+    const decCap = cfg.decodeStages * cfg.decodeBatch / (cfg.specDraft > 0 && cfg.specVerify === 'pipe' ? cfg.specDraft + 1 : 1);
     const decShare = () => (cfg.decodeStages > 0 && decoding > decCap ? decCap / decoding : 1);
     function decTick() {
       if (warmDone) {
@@ -2053,7 +2136,7 @@
   // ------------------------------------------------------------------------------------------------------
   function matrixCell(cal, cfgIn, cached, nnew, users, reqsPerUser) {
     // the #57827 matrix runs used bf16 index_k (M3_INDEX_CACHE_BF16=1)
-    const plan = makePlan(Object.assign({ cache: 'inf', batch: false, reqPad: 'chunk', idxBf16: true }, cfgIn), cal);
+    const plan = makePlan(Object.assign({ model: 'm3', cache: 'inf', batch: false, reqPad: 'chunk', idxBf16: true }, cfgIn), cal);
     const S = plan.S, C = plan.cfg.chunk, out = new Float64Array(S);
     const cap = cached + 51200;
     const cachedA = Math.floor(cached / C) * C;
@@ -2094,7 +2177,7 @@
     const pts = { 5120: [], 2048: [] };
     for (const run of ['A', 'B', 'C']) {
       const r = data.pipeline[run]; const T = r.chunk; const counts = r.layers.split(',').map(Number);
-      const plan = makePlan({ chunk: T, split: counts, stages: 16, cache: 'inf', idxBf16: true }, cal); // runs used bf16 index_k
+      const plan = makePlan({ model: 'm3', chunk: T, split: counts, stages: 16, cache: 'inf', idxBf16: true }, cal); // M3 runs, bf16 index_k
       for (const row of data.tables[run]) {
         if (row.new > T || row.loaded_steady_processed_tps == null) continue;
         const cell = (r.cells || []).find((c) => c.cached === row.cached && c.new === row.new);
@@ -2115,16 +2198,19 @@
 
   function calibrateAll(data) { const cal = calibrate(data); fitHandoff(cal, data); return cal; }
 
-  // List prices, USD per million tokens: MiniMax's own endpoint for minimax/minimax-m3 on OpenRouter (provider
-  // "Minimax", minimax/fp8; also the model-level price), read 2026-10-07 from
-  // openrouter.ai/api/v1/models/minimax/minimax-m3/endpoints. A cache miss (re-prefill
+  // List prices, USD per million tokens, for minimax/minimax-m3.1-flash on OpenRouter, read 2026-10-30 from
+  // openrouter.ai/api/v1/models/minimax/minimax-m3.1-flash/endpoints: $0.15 input / $0.015 cache read / $0.60 output.
+  // That is what 10 of its 14 endpoints charge (Tenstorrent's own fp8 endpoint, Together, Fireworks, Nebius, ...) and
+  // MiniMax's own endpoint at peak (01:00-15:00 UTC); MiniMax charges half off-peak ($0.075 / $0.0075 / $0.30), and
+  // the cheapest (SambaNova) $0.06 / $0.006 / $0.24. M3 was $0.30 / $0.06 / $1.20 (2026-10-07): half the input and
+  // output price, and a cache read now costs a tenth of a miss instead of a fifth. A cache miss (re-prefill
   // included) is billed at the input price, a prefix hit at the cache-read price; there is no cache-write charge.
   // Prefill revenue is input tokens only; output tokens are decode's, and count only in the margin (economics()),
   // which also pays for the decode galaxies.
-  const PRICE = { inUsdPerM: 0.30, cachedUsdPerM: 0.06, outUsdPerM: 1.20 };
-  // Operating cost: a rough USD per galaxy-hour, and the decode galaxies paired with the prefill: one M3 decode
-  // instance, 64 sessions (decodeSlots) on 16 galaxies.
-  const COST = { galaxyUsdPerH: 12, decodeGalaxies: 16 };
+  const PRICE = { inUsdPerM: 0.15, cachedUsdPerM: 0.015, outUsdPerM: 0.60 };
+  // Operating cost: a rough USD per galaxy-hour ($10 since Oct 30; $12 before), and the decode galaxies paired with
+  // the prefill: one M3 decode instance, 64 sessions (decodeSlots) on 16 galaxies.
+  const COST = { galaxyUsdPerH: 10, decodeGalaxies: 16 };
 
   // Hourly volume of one sweep point: input tokens of the completed requests, split into new (prefilled) and cached
   // (prefix hit), requests completed, the input revenue they bill at `price` (USD per hour), and their output tokens
@@ -2143,16 +2229,18 @@
   }
 
   // Hourly margin of one sweep point on `galaxies` prefill galaxies plus the decode galaxies: input + output revenue
-  // minus the galaxy-hours of both (USD per hour).
+  // minus the galaxy-hours of both (USD per hour), and both per galaxy-hour over all of them (revenuePerGx is the
+  // break-even cost per galaxy-hour; marginPerGx = revenuePerGx - galaxyUsdPerH).
   function economics(p, galaxies, price, cost) {
     const h = hourly(p, price);
     if (!h) return null;
     const c = Object.assign({}, COST, cost);
     const revenue = h.usd + h.outUsd, prefillUsd = galaxies * c.galaxyUsdPerH, decodeUsd = c.decodeGalaxies * c.galaxyUsdPerH;
-    const costUsd = prefillUsd + decodeUsd;
-    return { revenue, inUsd: h.usd, outUsd: h.outUsd, cost: costUsd, prefillUsd, decodeUsd, margin: revenue - costUsd, marginFrac: (revenue - costUsd) / revenue };
+    const costUsd = prefillUsd + decodeUsd, gx = galaxies + c.decodeGalaxies;
+    return { revenue, inUsd: h.usd, outUsd: h.outUsd, cost: costUsd, prefillUsd, decodeUsd, margin: revenue - costUsd, marginFrac: (revenue - costUsd) / revenue,
+      galaxies: gx, revenuePerGx: revenue / gx, marginPerGx: (revenue - costUsd) / gx };
   }
 
-  const API = { M3, HW, DEFAULTS, PRICE, COST, M3_DECODE_TSU, decodeSpeed, calibrate: calibrateAll, makePlan, splitLayers, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, economics, layerMs, roofTok, roofSeg, ownerWalk };
+  const API = { M3, MODELS, HW, DEFAULTS, PRICE, COST, M3_DECODE_TSU, DECODE_CURVES, decodeSpeed, calibrate: calibrateAll, makePlan, splitLayers, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, economics, layerMs, roofTok, roofSeg, ownerWalk };
   if (typeof module !== 'undefined' && module.exports) module.exports = API; else root.M3SIM = API;
 })(typeof self !== 'undefined' ? self : this);
