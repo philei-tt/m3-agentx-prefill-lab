@@ -361,12 +361,13 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
 
 // 14. speculative decoding: off by default. A cycle commits specAL tokens. Batched verification reads the KV once, so
 //     with no expert-weight cost (decodeMoeFrac 0) and a free drafter a session decodes specAL x faster; reading more
-//     experts and the drafter cost some of that back (at decodeMoeFrac 0.8 most of it on an unbatched ring). Pipelined verification (each draft token a ring token) speeds
+//     experts and the drafter cost some of that back (at decodeMoeFrac 0.8 most of it on an unbatched ring). #5966's
+//     batched step costs per 8-row block, so there a verify token costs as much as another user's. Pipelined verification (each draft token a ring token) speeds
 //     a session up by specAL on an empty ring but takes specDraft + 1 places in it, so on a full ring it decodes less
 //     unless specAL > specDraft + 1 (impossible). Bad knobs are rejected.
 {
   assert.ok(SIM.DEFAULTS.specDraft === 0);
-  for (const curve of ['m3', 'flat', 'm31-main', 'm31-b16']) {
+  for (const curve of ['m3', 'flat', 'm31-main', 'm31-card']) {
     const c = Object.assign({}, SIM.DEFAULTS, { decodeCurve: curve }), s = (o, m) => SIM.decodeSpeed(Object.assign({}, c, o), 131072, m);
     const plain = s({});
     for (const m of [1, 4]) {
@@ -377,6 +378,15 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
     const sb = s({ specDraft: 3, specAL: 2.5 }), sw = s({ specDraft: 7, specAL: 2.5 });
     assert.ok(sb < 2.5 * plain && sw < sb && s({ specDraft: 3, specAL: 1 }) < plain, `${curve}: ${plain} ${sb} ${sw}`);
     assert.ok(s({ specDraft: 3, specAL: 2.5, decodeMoeFrac: 0.4 }) > 1.2 * s({ decodeMoeFrac: 0.4 }), curve);
+  }
+  // #5966 (all weights in L1, every row through every local expert) costs per 8-row block, not per distinct expert:
+  // 24 users cost 1.47x 16 at 128K, the expert-weight share does not matter, and verifying 4 tokens per user (64 rows)
+  // costs about 4x, so even a perfect AL of 4 with a free drafter gains nothing
+  {
+    const c = Object.assign({}, SIM.DEFAULTS, { decodeCurve: 'm31-b16', specDraftFrac: 0 }), s = (o) => SIM.decodeSpeed(Object.assign({}, c, o), 131072);
+    const b = SIM.DECODE_CURVES['m31-b16'].blocks;
+    assert.ok(Math.abs((b[0] + 3 * b[1]) / (b[0] + 2 * b[1]) - 382.97 / 259.59) < 1e-9);
+    assert.ok(s({ specDraft: 3, specAL: 3 }) === s({ specDraft: 3, specAL: 3, decodeMoeFrac: 0 }) && s({ specDraft: 3, specAL: 4 }) < 1.05 * s({}), `${s({ specDraft: 3, specAL: 4 })} vs ${s({})}`);
   }
   assert.ok(plan({ specDraft: 3, specAL: 5 }).errors.some((e) => e.includes('specAL')) && plan({ specDraft: 1.5, specAL: 1 }).errors.some((e) => e.includes('specDraft')));
   assert.ok(plan({ specVerify: 'tree' }).errors.some((e) => e.includes('specVerify')) && plan({ decodeStages: 62, decodeBatch: 2, specDraft: 1, specAL: 1.5, specVerify: 'pipe' }).errors.some((e) => e.includes('pipelined')));

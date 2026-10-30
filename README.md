@@ -170,12 +170,15 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
   default). A drafter proposes `specDraft` tokens; the target verifies them together with the session's own next token
   (D = `specDraft` + 1 tokens per cycle) and commits `specAL` of them on average. `specAL` is the acceptance length,
   bonus token included (1 ≤ AL ≤ D); AgentX submissions run at a committed AL measured on SPEED-Bench coding
-  (tt-d-gen #1370). A cycle also costs the drafter, `specDraftFrac` (0.1) of a plain step. The drafter's stages fit in
-  the ring's spare ones (62 of 64 are used), so it adds no galaxies. M3.1-Flash ships a DSpark draft head in place of
+  (tt-d-gen #1370). A cycle also costs the drafter, `specDraftFrac` (0.1) of a plain step. The drafter's own galaxies
+  are not in the cost (`SIM.COST`); tt-blaze's spec-decode layouts add about 4 (see "Speculative decoding" below).
+  M3.1-Flash ships a DSpark draft head in place of
   M3's MTP; nobody has measured its AL or a blaze verify step.
   * `'batch'` (batched verification, proposed in "SpecDecode on Blaze", not built yet): the session's D tokens are
     verified in its own step. The KV is read once, so the attention term is unchanged. The experts are those of
-    m × D tokens, through the batched-decode model above (`decodeMoeFrac`). Per user: AL / (verify step + drafter).
+    m × D tokens, through the batched-decode model above (`decodeMoeFrac`), except on `'m31-b16'`, whose step costs per
+    8-row block (#5966: every weight in L1, every row through every local expert). Per user: AL / (verify step +
+    drafter).
   * `'pipe'` (tt-blaze's MTP / DFlash today): each draft token goes through the ring as a token of its own. A user
     speeds up by AL / (1 + drafter) on an empty ring, but each session takes D places in it, so on a full ring it
     decodes AL / D as much. Not modelled with `decodeBatch` > 1.
@@ -380,10 +383,10 @@ bf4 decode (#5966, 3 + 16 galaxies); unbatched it is **−$49/h** on main (the m
 main @87c36f5 (all on 2 + 16). Prefill is no longer the limit: it more than
 doubles with the right stack and then sits 30–50% busy, waiting on decode. Positive margin needs about 15% more decode
 throughput per galaxy than tt-blaze #5966 measures (≈ 1.05k instead of 906 output tok/s per galaxy), or 1.15× the list
-price, or ≤ $8.73 per galaxy-hour. **Speculative decoding on top of #5966 closes that gap** (next sections): batched
-verification turns the best cell positive at 1 draft / AL 1.87 or 3 drafts / AL ≥ 2.5 ($12.25 revenue per galaxy-hour
-at 3 drafts / AL 3.0, against $10 of cost). Pipelined
-verification, which blaze runs today, does not help.
+price, or ≤ $8.73 per galaxy-hour. **Speculative decoding does not close that gap** (next sections). On #5966 a
+verify token costs as much as another user's token, so spec decode lowers its throughput. On unbatched main it reaches
+break-even only at 3 drafts / AL 3.0 with a less expert-bound step, and then only before paying for the drafter's
+galaxies (about 4 more).
 
 ### Decode: what was measured (bf4 routed experts, M3.1-Flash, Oct 30)
 
@@ -482,44 +485,59 @@ Caveats:
 ### Speculative decoding (`tools/spec_sweep.js`)
 
 The tables above decode one token per session per step. They include no speculative decoding, batched or not.
-`tools/spec_sweep.js` adds spec decode to the three measured curves (main = the model card, the old main @87c36f5 and #5966), with the best stacks above (opEff 1;
-`results/spec_sweep.{json,txt}`). No AL has been measured for M3.1-Flash's DSpark head yet, so the sweep brackets it:
+`tools/spec_sweep.js` adds spec decode to the three measured curves (main = the model card, the old main @87c36f5 and
+#5966), with the best stacks above (opEff 1; `results/spec_sweep.{json,txt}`). No AL has been measured for
+M3.1-Flash's DSpark head yet, so the sweep brackets it:
 
 * 1 draft / AL 1.87: M3's MTP at bf4 experts (accept rate 0.868, Models weekly status).
 * 3 / 1.49: DeepSeek-V4 MTP's AgentX golden AL.
 * 3 / 2.5 and 3 / 3.0.
 * 7 / 3.7: Kimi-K2.5 EAGLE3's AgentX golden AL.
 
-Batched verification runs at two expert-weight shares of a step:
+How a verify step costs depends on the decode layout:
 
-* `decodeMoeFrac` 0.8, the default.
-* 0.4, a rough roofline for the old main: one expert's bf4 weights per chip is ~31 µs of its 81 µs stage.
+* **Unbatched (main, old main): per distinct expert.** One user's step reads 4 experts from DRAM; verifying D tokens
+  reads ~15 for D = 4. The step's expert-weight share decides how much that costs: `decodeMoeFrac` 0.8 (the default)
+  or 0.4 (a rough roofline for the old main: one expert's bf4 weights per chip is ~31 µs of its 81 µs stage).
+* **#5966 batched: per 8-row block.** Every weight sits in L1 and every row runs through every local expert (EP32),
+  so the step does not depend on routing. It costs ~13 µs plus ~123 µs per 8-row block (#5856 at 128K: 16 users
+  259.6 µs, 24 users 383.0 µs; "17–23 users cost the same as 24"), so a verify token costs as much as another user's.
+  The expert-weight share does not apply.
 
-Revenue per galaxy-hour over all the galaxies (prefill + 16 decode) at the best prefill galaxy count; the cost is
-$10, so above $10 is profit (two numbers: expert-weight share 0.8 / 0.4):
+Revenue per galaxy-hour over the prefill galaxies and the 16 decode galaxies, at the best prefill galaxy count. The
+drafter's galaxies are not included (see below). Cost is $10, so above $10 is profit. Two numbers mean expert-weight
+share 0.8 / 0.4:
 
 | revenue $/gx-h, best gx (opEff 1) | old main @87c36f5 | main (model card) | #5966 batched |
 |---|---|---|---|
 | no spec decode | $5.83 | $7.28 | $8.73 |
-| batch 1 / 1.87, moe 0.8 / 0.4 | $6.36 / $7.37 | $7.62 / $9.28 | **$10.23 / $11.77** |
-| batch 3 / 1.49, moe 0.8 / 0.4 | $3.52 / $4.69 | $4.14 / $5.63 | $6.67 / $8.37 |
-| batch 3 / 2.5, moe 0.8 / 0.4 | $5.38 / $7.14 | $6.25 / $8.83 | **$10.48 / $13.04** |
-| batch 3 / 3.0, moe 0.8 / 0.4 | $6.22 / $8.38 | $7.30 / **$10.24** | **$12.25 / $15.46** |
-| batch 7 / 3.7, moe 0.8 / 0.4 | $4.77 / $7.05 | $5.47 / $8.31 | **$13.37 / $17.15** |
+| batch 1 / 1.87 | $6.36 / $7.37 | $7.62 / $9.28 | $8.12 |
+| batch 3 / 1.49 | $3.52 / $4.69 | $4.14 / $5.63 | $4.00 |
+| batch 3 / 2.5 | $5.38 / $7.14 | $6.25 / $8.83 | $6.07 |
+| batch 3 / 3.0 | $6.22 / $8.38 | $7.30 / **$10.24** | $6.92 |
+| batch 7 / 3.7 | $4.77 / $7.05 | $5.47 / $8.31 | $4.86 |
 | pipelined 3 / 3.0 | $4.26 | $5.35 | $6.43 |
 
-* **On batched decode, spec decode is the path to positive.** #5966's step already holds 16 users, who touch ~51 of the
-  128 experts, so verifying 4 tokens each (64 tokens, ~111 experts) costs about 2× the step rather than 4×. One draft at
-  AL 1.87, or 3 drafts at AL 2.5 or more, then turns the best cell positive, even at the default expert-weight share. At 3 / 3.0 that is $12.25
-  per galaxy-hour on 3 + 16 galaxies (+$2.25 over cost), up to $15.46 on 4 + 16 if the step is less
-  expert-bound.
-* **Unbatched, it barely helps.** One user's step reads 4 experts; verifying 4 tokens reads ~15, so at the default share the verify
-  step costs ~2.7× and long drafts lose. Only main (the model card) at 3 / 3.0 with the 0.4 share reaches break-even ($10.24 per galaxy-hour).
+* **Spec decode is not a path to positive revenue.** It is a per-user latency lever.
+* **On #5966 it loses money in every case.** Verifying D tokens per user takes D × the rows for AL tokens, and AL < D,
+  so throughput drops to about AL / D, the same loss as pipelined verification. It also does not fit: 16 users × 4
+  tokens is 64 rows, and #5966 composes at most 24 (B = 32 fails on the semaphore pool and L1 arena).
+* **On unbatched main it helps only if the step is not expert-bound.** At share 0.4 main reaches $10.24 at
+  3 / 3.0 and $9.28 at 1 / 1.87. At the default 0.8 the gains mostly vanish, and long drafts lose.
 * **Pipelined verification (what blaze runs today) loses money on a full ring.** Each session takes D ring places for
-  AL tokens, so throughput drops by AL / D. It is a latency win at low load (392 tok/s/u at 128K on the old main), not a
-  revenue win. Long drafts with a low AL (3 / 1.49) lose in every mode.
-* Unmeasured: DSpark's AL on AgentX / SPEED-Bench, and a blaze verify step (batched verification is not built). The
-  expert-weight share decides it for unbatched decode.
+  AL tokens, so throughput drops by AL / D. It is a latency win at low load (392 tok/s/u at 128K on the old main).
+* **The drafter needs its own galaxies.** In tt-blaze the drafter is a separate branch behind a router stage. Every
+  spec-decode layout so far adds about 4 galaxies, because clusters come in 4-galaxy steps:
+  * Kimi K2.6/2.7 DFlash: 63 target + 9 drafter stages, SC16 → SC20.
+  * Kimi K3 DSpark: 95 + 14, SC24 → SC28.
+  * gpt-oss-120b DFlash: 38 + 11.
+  * GLM MTP: SC20 → SC24.
+  * DeepSeek-V3: MTP level 1 fits its 64-stage ring; deeper MTP needs SC20.
+
+  For M3.1-Flash: 62 target + 1 router + 8–14 drafter stages = 71–77, so SC20, 16 → 20 decode galaxies. That
+  takes main's best cell from $10.24 to about $8.4 per galaxy-hour.
+* Unmeasured: DSpark's AL on AgentX / SPEED-Bench, a blaze verify step (batched verification is not built), and an
+  M3.1-Flash DSpark drafter (blaze has an M3 DFlash drafter config, 5 dense layers, but no target + drafter fork).
 
 ## Findings (study of Oct 8 2026, third run: decode speed follows each session's context along the measured M3 curve, 180 tokens/s/u at 100k; with the new auto split, deployed memory defaults (bf8 index_k, 1 GB reserve), KV offload tiers (host DRAM + 16 TB SSD per galaxy) behind static slots, round-robin scheduling, sequential pool copies, derived lane counts, unaligned resume in the baseline; decode ring and decode slots unlimited, AIPerf-exact replay, `results/study.json`)
 

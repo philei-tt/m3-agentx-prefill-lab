@@ -59,6 +59,10 @@
     'm31-b16': [[131071, 1e6 / 64 / 275.99], [524287, 1e6 / 64 / 286.11]],
   }).map(([k, pts]) => {
     const batch = k === 'm31-b16' ? 16 : 1; // sessions per step in the measurement
+    // #5966 keeps every weight in L1 and runs every row through every local expert (EP32), so its step does not
+    // depend on routing: it costs a fixed part plus one per 8-row block (#5856 at 128K: 16 users 259.59 us, 24
+    // users 382.97 us, "17-23 users cost the same as 24"), [fixed us, us per block]
+    const blocks = k === 'm31-b16' ? [259.59 - 2 * (382.97 - 259.59), 382.97 - 259.59] : null;
     const p = pts.map(([c, t]) => [c, 1 / t]); // seconds per token
     const at = (x) => { // piecewise linear, end segments extrapolated
       let i = 0; while (i < p.length - 2 && x > p[i + 1][0]) i++;
@@ -67,7 +71,7 @@
     };
     // the context-free part of a token's time (weights, collectives, hops): the curve at zero context, at most the
     // first point; batching scales the rest (attention over each session's own KV) with the batch
-    return [k, { pts, at, batch, a: Math.min(p[0][1], Math.max(0, at(0))) }];
+    return [k, { pts, at, batch, blocks, a: Math.min(p[0][1], Math.max(0, at(0))) }];
   }));
   // Batched decode, m sessions per stage per step (tt-blaze #4220; not measured yet), from the batch-1 trip a + b*ctx:
   //   - the context term is attention over each session's own KV, so m sessions read m x as much: m * b * ctx;
@@ -82,7 +86,8 @@
   const specOf = (cfg) => (cfg.specDraft > 0 ? { D: cfg.specDraft + 1, al: cfg.specAL, draft: cfg.specDraftFrac || 0, pipe: cfg.specVerify === 'pipe' } : null);
   // decode speed per user (tokens/s/u) for a session with `ctx` tokens of context while the ring has room, in a batch
   // of m sessions per stage (m = 1 when omitted; fractional m = a partly filled batch). A step is the context-free
-  // part a (scaled by g for the distinct experts the step's tokens select) plus each session's attention over its KV.
+  // part a (scaled by g for the distinct experts the step's tokens select, or for a curve with `blocks` by its 8-row
+  // blocks) plus each session's attention over its KV.
   // With spec decode a cycle commits specAL tokens and costs the drafter (specDraftFrac of a plain step) plus the
   // verify: 'batch' verifies the session's D tokens in its own step (KV read once, so the attention term is unchanged;
   // the experts of m x D tokens), 'pipe' sends each through the ring as its own token (a plain step; the ring carries
@@ -91,7 +96,8 @@
     const [a0, b0] = M3_DECODE_TRIP, mm = m > 1 ? m : 1;
     const f = cfg.decodeMoeFrac === undefined ? DEFAULTS.decodeMoeFrac : cfg.decodeMoeFrac;
     const cur = DECODE_CURVES[cfg.decodeCurve], base = cur ? cur.batch : 1;
-    const g = (n) => (n > 1 ? 1 - f + f * decodeExperts(base * n) / decodeExperts(base) : 1);
+    const blk = cur && cur.blocks, rowCost = (rows) => blk[0] + blk[1] * Math.ceil(rows / 8 - 1e-9);
+    const g = (n) => (!(n > 1) ? 1 : blk ? rowCost(base * n) / rowCost(base) : 1 - f + f * decodeExperts(base * n) / decodeExperts(base));
     let a, w, k = 1; // seconds per step: context-free part, attention per session; k = tokens/s/u scale
     if (cur) { a = cur.a; w = Math.max(cur.at(ctx), cur.a) - cur.a; }
     else { a = a0; w = b0 * (cfg.decodeCurve === 'm3' ? ctx : DECODE_REF_CTX); k = cfg.decodeTps * (a0 + b0 * DECODE_REF_CTX); }
@@ -588,7 +594,7 @@
     //   specVerify: 'batch' = the cycle's specDraft + 1 tokens verified together in the session's step (batched
     //   verification, not built yet); 'pipe' = each one its own token through the ring (tt-blaze's MTP / DFlash today),
     //   so the ring carries (specDraft + 1) x fewer sessions. specDraftFrac: the drafter's time per cycle, as a share of
-    //   a plain decode step (its stages fit in the ring's spare ones: 62 of 64 are used, so no extra galaxies).
+    //   a plain decode step. The drafter's own galaxies are not counted (tt-blaze's spec-decode layouts add ~4).
     specDraft: 0, specAL: 1, specVerify: 'batch', specDraftFrac: 0.1,
     // decodeCache: the decode side's KV layout. decodeSlots sizes its memory in 1M-token slots (0 = unlimited). Every
     //   layout reserves a request's decode KV when the request is admitted to prefill and releases it when its decode
