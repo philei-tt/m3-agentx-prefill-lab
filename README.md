@@ -362,25 +362,31 @@ Tools: `tools/best_net_sweep.js`, `tools/revenue_paths.js` (fixed prefill stack:
 stages per galaxy, chunk 512, fused batching on a fixed-lane pool with host tiers) and `tools/stack_search.js` (the best
 prefill stack per galaxy count); results in `results/{best_net_sweep,revenue_paths,stack_search}.{json,txt}`.
 
-**Short answer: not with today's decode.** With the best prefill stack the best case is **−$25/h** on measured batched
-bf4 decode (3 + 16 galaxies) and **−$77/h** on today's unbatched decode. Prefill is no longer the limit: it more than
+**Short answer: not with today's decode.** With the best prefill stack the best case is **−$24/h** on measured batched
+bf4 decode (#5966, 3 + 16 galaxies); unbatched it is **−$78/h** on tt-blaze main, −$68/h with #5614 and −$49/h with the
+model card's bf4 attention (all on 2 + 16). Prefill is no longer the limit: it more than
 doubles with the right stack and then sits 30–50% busy, waiting on decode. Positive margin needs about 15% more decode
 throughput per galaxy than tt-blaze #5966 measures (≈ 1.05k instead of 906 output tok/s per galaxy), or 1.15× the list
-price, or ≤ $8.69 per galaxy-hour.
+price, or ≤ $8.73 per galaxy-hour.
 
 ### Decode: what was measured (bf4 routed experts, M3.1-Flash, Oct 30)
 
-| decode | tok/s/u | output tok/s per galaxy | as modelled |
-|---|---|---|---|
-| tt-blaze main, 4x2 stages, 1 user per step | 192 / 144 / 86 at 1K / 128K / 512K | 576 at 128K | `decodeCurve 'm3'`, `decodeTps 154` (within 4% of all three), 62 stages |
-| tt-blaze #5966 (draft), 4x8 stages, 16 users per step, weights in L1 | 56.6 / 54.6 at 128K / 512K | 906 / 874 | `'flat'`, `decodeTps 56`, 256 sessions (16 stages × 16) |
-| (reference) the 180 tokens/s/u target with modelled batching (`decodeMoeFrac` 0.8) | 180 at 100K, batch 1 | 682 (batch 1) – 956 (batch 16) at 112K | the default |
+Each is a named `decodeCurve` (`SIM.DECODE_CURVES`): the measured tokens/s/u, interpolated piecewise-linearly in time
+per token (absolute: `decodeTps` does not apply). Ring t/s/u = 1e6 / (64 × stage step), #5966's convention.
 
-The measured unbatched decode is slower than the target (154 vs 180 at 100K, 86 vs 101 at 512K). Batched, #5966's 906 tok/s
-per galaxy lands between the model's batch 8 and 16 (862 / 956 at 112K) with far fewer sessions in flight (256 against
-496 / 992), and does not slow with context. #5614 (open) brings
-the unbatched MoE layer to 101 / 116 µs at 100K / 550K (~154 / 134 tok/s/u), and a model card on Slack (bf4
-attention weights as well) quotes 181 at 128K; neither is modelled here. 32 users per step does not work yet in #5966.
+| `decodeCurve` | source | tok/s/u | output tok/s per galaxy | ring / memory |
+|---|---|---|---|---|
+| `m31-main` | tt-blaze main, 4x2 stages, 1 user per step | 192 / 144 / 86 at 1K / 128K / 512K | 576 at 128K | 62 stages, 145 slots (modelled) |
+| `m31-5614` | tt-blaze #5614 (open): all-sparse, index-K split over 8 chips | 154 / 135 at 100K / 550K (MoE stage 101 / 116 µs); 180 at 1K (main + 6.5%, #5490's 8K cost) | 615 at 100K | 62 stages, 193 slots (index-K split: 4/3 of 145) |
+| `m31-card` | model card (minimax-bringup, Oct 29): bf4 attention weights as well | 218 / 181 / 156 / 136 at 1K / 128K / 512K / 1M | 725 at 128K | 62 stages, 209 slots (as stated) |
+| `m31-b16` | tt-blaze #5966 (draft): 4x8 stages, 16 users per step, weights in L1 | 56.6 / 54.6 at 128K / 512K | 906 / 874 | 256 sessions (16 stages × 16) |
+| `'m3'` at 180 (default) | the target, M3's shape; modelled batching (`decodeMoeFrac` 0.8) | 180 at 100K, batch 1 | 682 (batch 1) – 956 (batch 16) at 112K | 62 stages |
+
+Unbatched, all three measurements are below the 180 target at 100K except the model card (189), and they reach
+8.8–11.6k output tok/s on the 62-stage ring. Batched, #5966's 906 tok/s per galaxy lands between the model's batch 8
+and 16 (862 / 956 at 112K) with far fewer sessions in flight (256 against 496 / 992), and does not slow with context.
+32 users per step does not work yet in #5966. The model card's bf4 attention weights are under question for accuracy;
+it states bf8 attention costs ~0.5 tok/s/u.
 
 ### Prefill: the best stack (`tools/stack_search.js`)
 
@@ -404,8 +410,10 @@ behind). Halving the stages to [4,4] helps at 4–6 galaxies with M3.1-Flash's c
 |---|---|---|---|---|---|
 | decode 180 target, batch 8 (modelled) | −$48 | −$40 | −$44 | −$64 | −$84 |
 | decode 180 target, batch 16 (modelled) | −$48 | −$38 | −$35 | −$54 | −$74 |
-| **bf4 unbatched, measured (main)** | **−$77** | −$78 | −$88 | −$108 | −$128 |
-| **bf4 batched, measured (#5966)** | −$48 | **−$25** | −$28 | −$45 | −$65 |
+| **bf4 unbatched, tt-blaze main** | **−$78** | −$79 | −$89 | −$109 | −$129 |
+| **bf4 unbatched, #5614** | **−$68** | −$72 | −$75 | −$94 | −$114 |
+| **bf4 + bf4 attention, model card** | **−$49** | −$53 | −$55 | −$71 | −$92 |
+| **bf4 batched, #5966** | −$48 | **−$24** | −$27 | −$45 | −$65 |
 | 270 tokens/s/u @100K, batch 16 | +$0.3 | +$16 | **+$24** | +$17 | −$3 |
 | 360 tokens/s/u @100K, batch 16 | +$29 | +$69 | +$78 | **+$91** | +$72 |
 
@@ -414,29 +422,34 @@ behind). Halving the stages to [4,4] helps at 4–6 galaxies with M3.1-Flash's c
 | net $/h, fixed best-net base (opEff 1) | 4 gx | 6 gx | 8 gx |
 |---|---|---|---|
 | decode 180 target (best of batch 8 / 16) | −$47 | −$55 | −$75 |
-| bf4 unbatched, measured | −$88 | −$108 | −$128 |
-| bf4 batched, measured | −$35 | −$45 | −$66 |
+| bf4 unbatched, tt-blaze main | −$89 | −$109 | −$129 |
+| bf4 unbatched, #5614 | −$80 | −$94 | −$114 |
+| bf4 + bf4 attention, model card | −$63 | −$71 | −$91 |
+| bf4 batched, #5966 | −$34 | −$44 | −$65 |
 | 270 @100K | +$1 | +$7 | −$4 |
 | 360 @100K | +$30 | +$38 | +$48 |
 
 * **Decode caps revenue.** A request bills $0.0029 (56% cache reads at a 96% hit rate, 25% new input, 19% output)
   and needs ~900 output tokens: $3.15 per M output tokens decoded. At $10 per galaxy-hour a decode galaxy has to
-  decode ~880 output tok/s just to pay for itself. Today's unbatched decode does ~570, #5966 ~906, so decode alone is
-  at or below break-even before any prefill is paid for. More prefill galaxies only lose money; the best prefill stack
+  decode ~880 output tok/s just to pay for itself. Measured unbatched decode does ~550–710 (main, #5614, model card), #5966
+  ~900, so decode alone is at or below break-even before any prefill is paid for. More prefill galaxies only lose money; the best prefill stack
   gains $10–12/h in decode-bound cells (it feeds the same decode from fewer prefill galaxies).
 * **M3.1-Flash vs M3 (fixed base, opEff 0.5, 4 gx):** +7.5% goodput (dense layers 1.5 ms instead of 6.0 at 140k
   context) and +$7/h. The price is half M3's, and a cache read bills a tenth of a miss instead of a fifth: the same
   point nets +$248/h at M3's prices.
 
-**Break-even at the best measured cell** (batched #5966 decode, 3 + 16 galaxies, revenue $165/h): 1.15× list price,
-or $8.69 per galaxy-hour, or ~16.7k output tok/s from the 16 decode galaxies (+15%). With the 180 target and modelled
-batch 16 (4 + 16): 1.21× or $8.25. With today's unbatched decode (2 + 16): 1.76× or $5.70.
+**Break-even at the best measured cell** (batched #5966 decode, 3 + 16 galaxies, revenue $166/h): 1.15× list price,
+or $8.73 per galaxy-hour, or ~16.7k output tok/s from the 16 decode galaxies (+15%). Unbatched (2 + 16): main 1.77× or
+$5.65, #5614 1.61× or $6.21, model card 1.37× or $7.28. With the 180 target and modelled batch 16 (4 + 16): 1.21× or
+$8.25.
 
 Caveats:
 * Decode memory and decode KV migration are modelled as for M3's 4x2 decode; #5966 keeps all weights in L1, so it
   has more DRAM for KV than modelled (not binding here). A part-filled batched step is not modelled faster than a full
   one, which slightly understates #5966 at low load.
-* #5966 is one layer at 16 users; the 64-stage ring is assumed to run at that step. M3.1-Flash ships no MTP module.
+* #5966 is one layer at 16 users, and #5614 one MoE layer at two contexts; the 64-stage ring is assumed to run at the
+  slowest stage's step. Batching on top of the unbatched curves is not modelled (#5966 already ports #5614's
+  indexer work). M3.1-Flash ships no MTP module.
 * Full paging is the ideal paged-attention kernel; the arena is the implementable fallback (3–4% less goodput).
 * $10 per galaxy-hour is a rough operating cost. AgentX is cache-heavy (96% hits), so its requests bill little per
   token of compute; a workload with fewer hits bills more for the same prefill work.

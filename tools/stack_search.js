@@ -11,7 +11,8 @@
 //    The winner is also run with cache 'inf' (peak useful tok/s, no SLO) for reference.
 // 2) Revenue: each winner (and its budget halved / doubled) under the decode scenarios of tools/revenue_paths.js on
 //    16 decode galaxies (paged decode KV + tiers, queue backpressure without a limit): the 180 tokens/s/u target at
-//    decode batch 8 / 16 (modelled batching), measured bf4 unbatched and batched (#5966), and 270 / 360 at batch 16.
+//    decode batch 8 / 16 (modelled batching), the measured bf4 curves of revenue_paths.js (tt-blaze main, #5614, the
+//    model card, batched #5966), and 270 / 360 at batch 16.
 //    Net $/h at SIM.PRICE and SIM.COST at the goodput point. Decode-bound cells leave prefill idle, so the 4-galaxy
 //    winners also run on 2 and 3 prefill galaxies ([4,4] stages: 4 / 6; [4,2]: 8 / 12).
 // Usage: node tools/stack_search.js [--workers 14] [--out results/stack_search.json] > results/stack_search.txt
@@ -47,8 +48,10 @@ const DIMS = {
 const DECODE = [
   { name: '180 target, batch 8 (modelled)', cfg: { decodeStages: 62, decodeTps: 180, decodeCurve: 'm3', decodeBatch: 8 } },
   { name: '180 target, batch 16 (modelled)', cfg: { decodeStages: 62, decodeTps: 180, decodeCurve: 'm3', decodeBatch: 16 } },
-  { name: 'bf4 unbatched (main, measured)', cfg: { decodeStages: 62, decodeTps: 154, decodeCurve: 'm3', decodeBatch: 1 } },
-  { name: 'bf4 batched 4x8 x16 (#5966)', cfg: { decodeStages: 256, decodeTps: 56, decodeCurve: 'flat', decodeBatch: 1 } },
+  { name: 'bf4 unbatched (main, measured)', cfg: { decodeStages: 62, decodeCurve: 'm31-main', decodeBatch: 1 } },
+  { name: 'bf4 unbatched (#5614, measured)', cfg: { decodeStages: 62, decodeCurve: 'm31-5614', decodeBatch: 1, decodeSlots: 193 } },
+  { name: 'bf4 + bf4 attn (model card)', cfg: { decodeStages: 62, decodeCurve: 'm31-card', decodeBatch: 1, decodeSlots: 209 } },
+  { name: 'bf4 batched 4x8 x16 (#5966)', cfg: { decodeStages: 256, decodeCurve: 'm31-b16', decodeBatch: 1 } },
   { name: '270 @100k, batch 16', cfg: { decodeStages: 62, decodeTps: 270, decodeCurve: 'm3', decodeBatch: 16 } },
   { name: '360 @100k, batch 16', cfg: { decodeStages: 62, decodeTps: 360, decodeCurve: 'm3', decodeBatch: 16 } },
 ];

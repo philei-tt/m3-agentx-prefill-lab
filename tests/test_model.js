@@ -347,6 +347,15 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   const sp = (model) => SIM.makePlan({ model, galaxies: 4, stages: 16, chunk: 2048, cache: 'inf' }, cal).counts;
   assert.ok(sp('m3.1-flash')[0] > sp('m3')[0] + 1, `split m3 ${sp('m3')} m3.1-flash ${sp('m3.1-flash')}`);
   assert.ok(plan({ model: 'm4' }).errors.some((e) => e.includes('model')));
+  // measured M3.1-Flash decode curves: absolute (decodeTps unused), through every measured point, slower with
+  // context, and slower per user in a fuller batch; unknown names are rejected
+  for (const [name, cur] of Object.entries(SIM.DECODE_CURVES)) {
+    const c = Object.assign({}, SIM.DEFAULTS, { decodeCurve: name }), c2 = Object.assign({}, c, { decodeTps: 1 });
+    for (const [x, t] of cur.pts) assert.ok(Math.abs(SIM.decodeSpeed(c, x) / t - 1) < 1e-9 && SIM.decodeSpeed(c2, x) === SIM.decodeSpeed(c, x), `${name} at ${x}`);
+    assert.ok(SIM.decodeSpeed(c, 1e6) < SIM.decodeSpeed(c, 1e3) && SIM.decodeSpeed(c, 131072, 4) < SIM.decodeSpeed(c, 131072), name);
+    assert.ok(SIM.makePlan(Object.assign({}, c, { decodeStages: 62 }), cal).errors.length === 0, name);
+  }
+  assert.ok(plan({ decodeCurve: 'm31-nope' }).errors.some((e) => e.includes('decodeCurve')));
   assert.ok(SIM.makePlan({ model: 'm3' }, cal).errors.length === 0);
 }
 

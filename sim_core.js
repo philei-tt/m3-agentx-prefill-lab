@@ -37,6 +37,35 @@
     const b = sxy / sxx; return [my - b * mx, b];
   })();
   const DECODE_REF_CTX = 100000;
+  // Measured M3.1-Flash decode with bf4 routed experts (tt-blaze, Oct 2026), tokens/s/u vs context, as named
+  // decodeCurve values. Unlike 'm3' they are absolute (decodeTps does not apply): time per token is interpolated
+  // piecewise-linearly in context between the points and extrapolated along the end segments. Ring t/s/u is
+  // 1e6 / (64 x stage step in us), the 64-stage convention of #5966.
+  //   'm31-main':  tt-blaze main 87c36f578a, 4x2 stages, one user per step: 81.46 / 108.59 / 181.77 us (#5966's baseline).
+  //   'm31-5614':  tt-blaze #5614 (open; all-sparse decode with index-K split over the 8 chips of a stage), MoE layer
+  //                (the slowest stage) 101.17 / 116.14 us at 100K / 550K; at 1K, main's 81.46 us + 6.5% (#5490, which
+  //                #5614 merges, measured its 8K stage at +6.5%), since #5614 has no short-context point.
+  //   'm31-card':  model card (minimax-bringup, Oct 29): bf4 attention weights as well, 62 stages; 218 / 181 / 156 /
+  //                136 at 1K / 128K / 512K / 1M; 209 users at 1M fit (decodeSlots 209).
+  //   'm31-b16':   tt-blaze #5966 (draft), batched: 4x8 stages, 16 users per step, all weights in L1: 275.99 / 286.11 us
+  //                at 128K / 512K. One stage per galaxy holds 16 sessions, so 16 decode galaxies carry 256 at these
+  //                speeds (decodeStages 256, decodeBatch 1: the batch is already in the measurement).
+  const DECODE_CURVES = Object.fromEntries(Object.entries({
+    'm31-main': [[1024, 1e6 / 64 / 81.46], [131071, 1e6 / 64 / 108.59], [524287, 1e6 / 64 / 181.77]],
+    'm31-5614': [[1024, 1e6 / 64 / (81.46 * 1.065)], [100000, 1e6 / 64 / 101.17], [550000, 1e6 / 64 / 116.14]],
+    'm31-card': [[1000, 218], [131072, 181], [524288, 156], [1048576, 136]],
+    'm31-b16': [[131071, 1e6 / 64 / 275.99], [524287, 1e6 / 64 / 286.11]],
+  }).map(([k, pts]) => {
+    const p = pts.map(([c, t]) => [c, 1 / t]); // seconds per token
+    const at = (x) => { // piecewise linear, end segments extrapolated
+      let i = 0; while (i < p.length - 2 && x > p[i + 1][0]) i++;
+      const [x0, y0] = p[i], [x1, y1] = p[i + 1];
+      return y0 + (y1 - y0) * (x - x0) / (x1 - x0);
+    };
+    // the context-free part of a token's time (weights, collectives, hops): the curve at zero context, at most the
+    // first point; batching scales the rest (attention over each session's own KV) with the batch
+    return [k, { pts, at, a: Math.min(p[0][1], Math.max(0, at(0))) }];
+  }));
   // Batched decode, m sessions per stage per step (tt-blaze #4220; not measured yet), from the batch-1 trip a + b*ctx:
   //   - the context term is attention over each session's own KV, so m sessions read m x as much: m * b * ctx;
   //   - the fixed term is mostly weight reads (llm_perf's M3 batch-1 decode breakdown: the MoE layer is ~all of the
@@ -50,6 +79,8 @@
     const [a, b] = M3_DECODE_TRIP, mm = m > 1 ? m : 1, c = cfg.decodeCurve === 'm3' ? ctx : DECODE_REF_CTX;
     const f = cfg.decodeMoeFrac === undefined ? DEFAULTS.decodeMoeFrac : cfg.decodeMoeFrac;
     const g = mm > 1 ? 1 - f + f * decodeExperts(mm) / decodeExperts(1) : 1;
+    const cur = DECODE_CURVES[cfg.decodeCurve];
+    if (cur) { const t = Math.max(cur.at(ctx), cur.a); return 1 / (cur.a * g + mm * (t - cur.a)); }
     if (cfg.decodeCurve !== 'm3' && mm === 1) return cfg.decodeTps;
     return cfg.decodeTps * (a + b * DECODE_REF_CTX) / (a * g + mm * b * c);
   }
@@ -534,7 +565,8 @@
     //   at 140k, 132 at 310k, 101 at 550k). KV migration to decode is not modelled: it streams layer by layer during
     //   prefill, so only the last layer of the last chunk is left at the end, and that overlaps the first token's trip.
     //   Default 'm3' at decodeTps 180: the decode target (180 tokens/s/u @100k) with the measured shape; decodeTps 98
-    //   reproduces the measured table.
+    //   reproduces the measured table. 'm31-main' / 'm31-5614' / 'm31-card' / 'm31-b16': measured M3.1-Flash bf4
+    //   decode (DECODE_CURVES), absolute (decodeTps unused); 'm31-b16' goes with decodeStages 256.
     decodeCurve: 'm3',
     // decodeCache: the decode side's KV layout. decodeSlots sizes its memory in 1M-token slots (0 = unlimited). Every
     //   layout reserves a request's decode KV when the request is admitted to prefill and releases it when its decode
@@ -758,7 +790,7 @@
     for (const k of ['hostDramGBPerGalaxy', 'ssdTBPerGalaxy']) if (!(cfg[k] >= 0)) errors.push(`${k} must be >= 0`);
     for (const k of ['pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy']) if (!(cfg[k] > 0)) errors.push(`${k} must be > 0`);
     if (!(cfg.decodeStages >= 0)) errors.push('decode pipeline stages must be >= 0 (0 = unlimited)');
-    if (!['flat', 'm3'].includes(cfg.decodeCurve)) errors.push(`decodeCurve must be 'flat' or 'm3', got ${cfg.decodeCurve}`);
+    if (!['flat', 'm3'].includes(cfg.decodeCurve) && !DECODE_CURVES[cfg.decodeCurve]) errors.push(`decodeCurve must be 'flat', 'm3' or one of ${Object.keys(DECODE_CURVES).join(', ')}, got ${cfg.decodeCurve}`);
     if (!(cfg.batchMaxReqs >= 0) || cfg.batchMaxReqs !== Math.floor(cfg.batchMaxReqs)) errors.push('max requests per batch must be a whole number >= 0 (0 = no limit)');
     if (!(cfg.batchChunksPerRequest >= 0) || cfg.batchChunksPerRequest !== Math.floor(cfg.batchChunksPerRequest)) errors.push('chunks per request per round must be a whole number >= 0 (0 = no limit)');
     if (!(cfg.batchTokensPerRequest >= 0)) errors.push('tokens per request per round must be >= 0 (0 = no limit)');
@@ -2174,6 +2206,6 @@
     return { revenue, inUsd: h.usd, outUsd: h.outUsd, cost: costUsd, prefillUsd, decodeUsd, margin: revenue - costUsd, marginFrac: (revenue - costUsd) / revenue };
   }
 
-  const API = { M3, MODELS, HW, DEFAULTS, PRICE, COST, M3_DECODE_TSU, decodeSpeed, calibrate: calibrateAll, makePlan, splitLayers, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, economics, layerMs, roofTok, roofSeg, ownerWalk };
+  const API = { M3, MODELS, HW, DEFAULTS, PRICE, COST, M3_DECODE_TSU, DECODE_CURVES, decodeSpeed, calibrate: calibrateAll, makePlan, splitLayers, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, economics, layerMs, roofTok, roofSeg, ownerWalk };
   if (typeof module !== 'undefined' && module.exports) module.exports = API; else root.M3SIM = API;
 })(typeof self !== 'undefined' ? self : this);
