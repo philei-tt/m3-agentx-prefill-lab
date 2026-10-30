@@ -20,8 +20,8 @@ const { usd } = require('../lib/price.js');
 
 const DG = SIM.COST.decodeGalaxies, ALL_GX = [2, 3, 4, 6];
 const DECODE = [
-  { name: 'main', cfg: { decodeStages: 62, decodeCurve: 'm31-main', decodeBatch: 1 } },
-  { name: 'model card', cfg: { decodeStages: 62, decodeCurve: 'm31-card', decodeBatch: 1, decodeSlots: 209 } },
+  { name: 'old main @87c36f5', cfg: { decodeStages: 62, decodeCurve: 'm31-main', decodeBatch: 1 } },
+  { name: 'main (model card)', cfg: { decodeStages: 62, decodeCurve: 'm31-card', decodeBatch: 1, decodeSlots: 209 } },
   { name: '#5966 batched', cfg: { decodeStages: 256, decodeCurve: 'm31-b16', decodeBatch: 1 } },
 ];
 const SPEC = [{ name: 'off', cfg: { specDraft: 0 } }];

@@ -376,8 +376,8 @@ stages per galaxy, chunk 512, fused batching on a fixed-lane pool with host tier
 prefill stack per galaxy count); results in `results/{best_net_sweep,revenue_paths,stack_search}.{json,txt}`.
 
 **Short answer: not with today's decode.** With the best prefill stack the best case is **−$24/h** on measured batched
-bf4 decode (#5966, 3 + 16 galaxies); unbatched it is **−$78/h** on tt-blaze main, −$68/h with #5614 and −$49/h with the
-model card's bf4 attention (all on 2 + 16). Prefill is no longer the limit: it more than
+bf4 decode (#5966, 3 + 16 galaxies); unbatched it is **−$49/h** on main (the model card, our unbatched baseline), −$68/h with #5614 and −$78/h on the old
+main @87c36f5 (all on 2 + 16). Prefill is no longer the limit: it more than
 doubles with the right stack and then sits 30–50% busy, waiting on decode. Positive margin needs about 15% more decode
 throughput per galaxy than tt-blaze #5966 measures (≈ 1.05k instead of 906 output tok/s per galaxy), or 1.15× the list
 price, or ≤ $8.73 per galaxy-hour. **Speculative decoding on top of #5966 closes that gap** (next sections): batched
@@ -392,17 +392,26 @@ per token (absolute: `decodeTps` does not apply). Ring t/s/u = 1e6 / (64 × stag
 
 | `decodeCurve` | source | tok/s/u | output tok/s per galaxy | ring / memory |
 |---|---|---|---|---|
-| `m31-main` | tt-blaze main, 4x2 stages, 1 user per step | 192 / 144 / 86 at 1K / 128K / 512K | 576 at 128K | 62 stages, 145 slots (modelled) |
+| `m31-main` | old main: tt-blaze main @87c36f5, 4x2 stages, 1 user per step | 192 / 144 / 86 at 1K / 128K / 512K | 576 at 128K | 62 stages, 145 slots (modelled) |
 | `m31-5614` | tt-blaze #5614 (open): all-sparse, index-K split over 8 chips | 154 / 135 at 100K / 550K (MoE stage 101 / 116 µs); 180 at 1K (main + 6.5%, #5490's 8K cost) | 615 at 100K | 62 stages, 193 slots (index-K split: 4/3 of 145) |
-| `m31-card` | model card (minimax-bringup, Oct 29): bf4 attention weights as well | 218 / 181 / 156 / 136 at 1K / 128K / 512K / 1M | 725 at 128K | 62 stages, 209 slots (as stated) |
+| `m31-card` | **main**: the model card (minimax-bringup, Oct 29) of tt-blaze #6059 (open; stack #6064 → #6066 → #6059 → #6063), taken as what main will run: its own CP8 indexer, bf4 attention weights in SRAM, 512 of each routed expert's 3072 channels in SRAM, HiFi4 | 218 / 181 / 156 / 136 at 1K / 128K / 512K / 1M | 725 at 128K | 62 stages, 209 slots (as stated) |
 | `m31-b16` | tt-blaze #5966 (draft): 4x8 stages, 16 users per step, weights in L1 | 56.6 / 54.6 at 128K / 512K | 906 / 874 | 256 sessions (16 stages × 16) |
 | `'m3'` at 180 (default) | the target, M3's shape; modelled batching (`decodeMoeFrac` 0.8) | 180 at 100K, batch 1 | 682 (batch 1) – 956 (batch 16) at 112K | 62 stages |
 
-Unbatched, all three measurements are below the 180 target at 100K except the model card (189), and they reach
+Unbatched, all three measurements are below the 180 target at 100K except main (the model card, 189), and they reach
 8.8–11.6k output tok/s on the 62-stage ring. Batched, #5966's 906 tok/s per galaxy lands between the model's batch 8
 and 16 (862 / 956 at 112K) with far fewer sessions in flight (256 against 496 / 992), and does not slow with context.
 32 users per step does not work yet in #5966. The model card's bf4 attention weights are under question for accuracy;
-it states bf8 attention costs ~0.5 tok/s/u.
+it states bf8 attention costs 0.4 tok/s/u at 128K, so its speed holds with bf8 attention (bf8 routed experts: 135).
+
+**main is the model card,** which comes from tt-blaze #6059 ("Add MiniMax M3.1 Flash decode pipeline", Nikhil
+Soraba, open since Oct 29). It is a new `minimax_m3_1_flash` model, separate from `minimax_m3`. `BLAZE_M31_ATTN_DTYPE`
+defaults to bf4 (bf8 is the card's accuracy knob). Routed experts are hot / cold, with resident channels in SRAM and
+the rest streamed from DRAM. It was measured end to end (62 stages, GPQA-Diamond 174/198), so it is taken as what main
+will run; the older main @87c36f5 stays as a reference. It is not tt-blaze #5614, which changes `minimax_m3`'s decode
+with no dtype or weight-placement changes: #5490's index-K split over 8 chips, index-K prefetch, the block-max scan
+split over two RISCs and a direct CP exchange. Both store index-K once per stage over its 8 chips (209 vs 193 users at
+1M), but #6059 does it with its own indexer ops.
 
 ### Prefill: the best stack (`tools/stack_search.js`)
 
@@ -426,9 +435,9 @@ behind). Halving the stages to [4,4] helps at 4–6 galaxies with M3.1-Flash's c
 |---|---|---|---|---|---|
 | decode 180 target, batch 8 (modelled) | −$48 | −$40 | −$44 | −$64 | −$84 |
 | decode 180 target, batch 16 (modelled) | −$48 | −$38 | −$35 | −$54 | −$74 |
-| **bf4 unbatched, tt-blaze main** | **−$78** | −$79 | −$89 | −$109 | −$129 |
+| bf4 unbatched, old main @87c36f5 | **−$78** | −$79 | −$89 | −$109 | −$129 |
 | **bf4 unbatched, #5614** | **−$68** | −$72 | −$75 | −$94 | −$114 |
-| **bf4 + bf4 attention, model card** | **−$49** | −$53 | −$55 | −$71 | −$92 |
+| **bf4 unbatched, main (model card)** | **−$49** | −$53 | −$55 | −$71 | −$92 |
 | **bf4 batched, #5966** | −$48 | **−$24** | −$27 | −$45 | −$65 |
 | 270 tokens/s/u @100K, batch 16 | +$0.3 | +$16 | **+$24** | +$17 | −$3 |
 | 360 tokens/s/u @100K, batch 16 | +$29 | +$69 | +$78 | **+$91** | +$72 |
@@ -438,16 +447,16 @@ behind). Halving the stages to [4,4] helps at 4–6 galaxies with M3.1-Flash's c
 | net $/h, fixed best-net base (opEff 1) | 4 gx | 6 gx | 8 gx |
 |---|---|---|---|
 | decode 180 target (best of batch 8 / 16) | −$47 | −$55 | −$75 |
-| bf4 unbatched, tt-blaze main | −$89 | −$109 | −$129 |
+| bf4 unbatched, old main @87c36f5 | −$89 | −$109 | −$129 |
 | bf4 unbatched, #5614 | −$80 | −$94 | −$114 |
-| bf4 + bf4 attention, model card | −$63 | −$71 | −$91 |
+| bf4 unbatched, main (model card) | −$63 | −$71 | −$91 |
 | bf4 batched, #5966 | −$34 | −$44 | −$65 |
 | 270 @100K | +$1 | +$7 | −$4 |
 | 360 @100K | +$30 | +$38 | +$48 |
 
 * **Decode caps revenue.** A request bills $0.0029 (56% cache reads at a 96% hit rate, 25% new input, 19% output)
   and needs ~900 output tokens: $3.15 per M output tokens decoded. At $10 per galaxy-hour a decode galaxy has to
-  decode ~880 output tok/s just to pay for itself. Measured unbatched decode does ~550–710 (main, #5614, model card), #5966
+  decode ~880 output tok/s just to pay for itself. Measured unbatched decode does ~550–710 (old main, #5614, main = model card), #5966
   ~900, so decode alone is at or below break-even before any prefill is paid for. More prefill galaxies only lose money; the best prefill stack
   gains $10–12/h in decode-bound cells (it feeds the same decode from fewer prefill galaxies).
 * **M3.1-Flash vs M3 (fixed base, opEff 0.5, 4 gx):** +7.5% goodput (dense layers 1.5 ms instead of 6.0 at 140k
@@ -455,8 +464,8 @@ behind). Halving the stages to [4,4] helps at 4–6 galaxies with M3.1-Flash's c
   point nets +$248/h at M3's prices.
 
 **Break-even at the best measured cell** (batched #5966 decode, 3 + 16 galaxies, revenue $166/h): 1.15× list price,
-or $8.73 per galaxy-hour, or ~16.7k output tok/s from the 16 decode galaxies (+15%). Unbatched (2 + 16): main 1.77× or
-$5.65, #5614 1.61× or $6.21, model card 1.37× or $7.28. With the 180 target and modelled batch 16 (4 + 16): 1.21× or
+or $8.73 per galaxy-hour, or ~16.7k output tok/s from the 16 decode galaxies (+15%). Unbatched (2 + 16): main (model card) 1.37× or
+$7.28, #5614 1.61× or $6.21, old main 1.77× or $5.65. With the 180 target and modelled batch 16 (4 + 16): 1.21× or
 $8.25.
 
 Caveats:
@@ -473,7 +482,7 @@ Caveats:
 ### Speculative decoding (`tools/spec_sweep.js`)
 
 The tables above decode one token per session per step. They include no speculative decoding, batched or not.
-`tools/spec_sweep.js` adds spec decode to the three measured curves (main, the model card and #5966), with the best stacks above (opEff 1;
+`tools/spec_sweep.js` adds spec decode to the three measured curves (main = the model card, the old main @87c36f5 and #5966), with the best stacks above (opEff 1;
 `results/spec_sweep.{json,txt}`). No AL has been measured for M3.1-Flash's DSpark head yet, so the sweep brackets it:
 
 * 1 draft / AL 1.87: M3's MTP at bf4 experts (accept rate 0.868, Models weekly status).
@@ -484,12 +493,12 @@ The tables above decode one token per session per step. They include no speculat
 Batched verification runs at two expert-weight shares of a step:
 
 * `decodeMoeFrac` 0.8, the default.
-* 0.4, a rough roofline for main: one expert's bf4 weights per chip is ~31 µs of the 81 µs stage.
+* 0.4, a rough roofline for the old main: one expert's bf4 weights per chip is ~31 µs of its 81 µs stage.
 
 Revenue per galaxy-hour over all the galaxies (prefill + 16 decode) at the best prefill galaxy count; the cost is
 $10, so above $10 is profit (two numbers: expert-weight share 0.8 / 0.4):
 
-| revenue $/gx-h, best gx (opEff 1) | main | model card | #5966 batched |
+| revenue $/gx-h, best gx (opEff 1) | old main @87c36f5 | main (model card) | #5966 batched |
 |---|---|---|---|
 | no spec decode | $5.83 | $7.28 | $8.73 |
 | batch 1 / 1.87, moe 0.8 / 0.4 | $6.36 / $7.37 | $7.62 / $9.28 | **$10.23 / $11.77** |
@@ -505,9 +514,9 @@ $10, so above $10 is profit (two numbers: expert-weight share 0.8 / 0.4):
   per galaxy-hour on 3 + 16 galaxies (+$2.25 over cost), up to $15.46 on 4 + 16 if the step is less
   expert-bound.
 * **Unbatched, it barely helps.** One user's step reads 4 experts; verifying 4 tokens reads ~15, so at the default share the verify
-  step costs ~2.7× and long drafts lose. Only the model card at 3 / 3.0 with the 0.4 share reaches break-even ($10.24 per galaxy-hour).
+  step costs ~2.7× and long drafts lose. Only main (the model card) at 3 / 3.0 with the 0.4 share reaches break-even ($10.24 per galaxy-hour).
 * **Pipelined verification (what blaze runs today) loses money on a full ring.** Each session takes D ring places for
-  AL tokens, so throughput drops by AL / D. It is a latency win at low load (392 tok/s/u at 128K on main), not a
+  AL tokens, so throughput drops by AL / D. It is a latency win at low load (392 tok/s/u at 128K on the old main), not a
   revenue win. Long drafts with a low AL (3 / 1.49) lose in every mode.
 * Unmeasured: DSpark's AL on AgentX / SPEED-Bench, and a blaze verify step (batched verification is not built). The
   expert-weight share decides it for unbatched decode.

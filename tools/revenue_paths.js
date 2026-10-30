@@ -35,9 +35,9 @@ const BASE = {
 const MODELS = ['m3', 'm3.1-flash'], OPEFF = [0.5, 1], GALAXIES = [4, 6, 8], BUDGETS = [4096, 8192, 16384], DBATCH = [8, 16];
 const DEC_TPS = [180, 270, 360], DEC_BATCH = [16, 32], DEC_BUDGETS = [4096, 8192];
 const DEC_MEASURED = [
-  { name: 'bf4 unbatched (main)', cfg: { decodeCurve: 'm31-main', decodeStages: 62, decodeBatch: 1 } },
+  { name: 'bf4 old main @87c36f5', cfg: { decodeCurve: 'm31-main', decodeStages: 62, decodeBatch: 1 } },
   { name: 'bf4 unbatched (#5614)', cfg: { decodeCurve: 'm31-5614', decodeStages: 62, decodeBatch: 1, decodeSlots: 193 } },
-  { name: 'bf4 + bf4 attn (model card)', cfg: { decodeCurve: 'm31-card', decodeStages: 62, decodeBatch: 1, decodeSlots: 209 } },
+  { name: 'bf4 main (model card)', cfg: { decodeCurve: 'm31-card', decodeStages: 62, decodeBatch: 1, decodeSlots: 209 } },
   { name: 'bf4 batched 4x8 x16 (#5966)', cfg: { decodeCurve: 'm31-b16', decodeStages: 256, decodeBatch: 1 } },
 ];
 

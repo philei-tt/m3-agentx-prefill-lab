@@ -39,17 +39,17 @@
 
 -- measured M3.1-Flash decode, bf4 routed experts: net $/h by prefill galaxies (best budget)
   decode, opEff                            4 gx     6 gx     8 gx
-  bf4 unbatched (main), 0.5             −$89.72    −$109    −$129
-  bf4 unbatched (main), 1               −$89.14    −$109    −$129
+  bf4 old main @87c36f5, 0.5            −$89.72    −$109    −$129
+  bf4 old main @87c36f5, 1              −$89.14    −$109    −$129
   bf4 unbatched (#5614), 0.5            −$81.98  −$93.56    −$114
   bf4 unbatched (#5614), 1              −$80.31  −$93.70    −$114
-  bf4 + bf4 attn (model card), 0.5      −$64.05  −$74.77  −$91.21
-  bf4 + bf4 attn (model card), 1        −$62.86  −$71.44  −$91.45
+  bf4 main (model card), 0.5            −$64.05  −$74.77  −$91.21
+  bf4 main (model card), 1              −$62.86  −$71.44  −$91.45
   bf4 batched 4x8 x16 (#5966), 0.5      −$39.39  −$47.56  −$63.89
   bf4 batched 4x8 x16 (#5966), 1        −$33.83  −$43.83  −$64.67
-  best, bf4 unbatched (main), opEff 1: net −$89.14/h (in $91.43 + out $19.43 - cost $200) | at M3 prices  $145/h | break-even $5.54/gx-h or 1.80x list | 4 + 16 gx, budget 4k, decode batch 1 | goodput 53.2k @C=1464, hit 95%, output 9.0k tok/s, decode p10/p50 10/12 tok/s/u
+  best, bf4 old main @87c36f5, opEff 1: net −$89.14/h (in $91.43 + out $19.43 - cost $200) | at M3 prices  $145/h | break-even $5.54/gx-h or 1.80x list | 4 + 16 gx, budget 4k, decode batch 1 | goodput 53.2k @C=1464, hit 95%, output 9.0k tok/s, decode p10/p50 10/12 tok/s/u
   best, bf4 unbatched (#5614), opEff 1: net −$80.31/h (in $98.87 + out $20.82 - cost $200) | at M3 prices  $176/h | break-even $5.98/gx-h or 1.67x list | 4 + 16 gx, budget 4k, decode batch 1 | goodput 54.8k @C=1400, hit 96%, output 9.6k tok/s, decode p10/p50 11/13 tok/s/u
-  best, bf4 + bf4 attn (model card), opEff 1: net −$62.86/h (in $112 + out $24.98 - cost $200) | at M3 prices  $229/h | break-even $6.86/gx-h or 1.46x list | 4 + 16 gx, budget 4k, decode batch 1 | goodput 62.7k @C=1320, hit 96%, output 11.6k tok/s, decode p10/p50 16/18 tok/s/u
+  best, bf4 main (model card), opEff 1: net −$62.86/h (in $112 + out $24.98 - cost $200) | at M3 prices  $229/h | break-even $6.86/gx-h or 1.46x list | 4 + 16 gx, budget 4k, decode batch 1 | goodput 62.7k @C=1320, hit 96%, output 11.6k tok/s, decode p10/p50 16/18 tok/s/u
   best, bf4 batched 4x8 x16 (#5966), opEff 1: net −$33.83/h (in $135 + out $30.81 - cost $200) | at M3 prices  $324/h | break-even $8.31/gx-h or 1.20x list | 4 + 16 gx, budget 4k, decode batch 1 | goodput 70.5k @C=1152, hit 96%, output 14.3k tok/s, decode p10/p50 30/32 tok/s/u
 
 668 s

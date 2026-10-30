@@ -41,11 +41,13 @@
   // decodeCurve values. Unlike 'm3' they are absolute (decodeTps does not apply): time per token is interpolated
   // piecewise-linearly in context between the points and extrapolated along the end segments. Ring t/s/u is
   // 1e6 / (64 x stage step in us), the 64-stage convention of #5966.
-  //   'm31-main':  tt-blaze main 87c36f578a, 4x2 stages, one user per step: 81.46 / 108.59 / 181.77 us (#5966's baseline).
+  //   'm31-main':  old main: tt-blaze main 87c36f578a, 4x2 stages, one user per step: 81.46 / 108.59 / 181.77 us (#5966's baseline).
   //   'm31-5614':  tt-blaze #5614 (open; all-sparse decode with index-K split over the 8 chips of a stage), MoE layer
   //                (the slowest stage) 101.17 / 116.14 us at 100K / 550K; at 1K, main's 81.46 us + 6.5% (#5490, which
   //                #5614 merges, measured its 8K stage at +6.5%), since #5614 has no short-context point.
-  //   'm31-card':  model card (minimax-bringup, Oct 29): bf4 attention weights as well, 62 stages; 218 / 181 / 156 /
+  //   'm31-card':  main: the model card (minimax-bringup, Oct 29) of tt-blaze #6059 (open, the minimax_m3_1_flash
+  //                decode pipeline), taken as what main will run: CP8 indexer, bf4 attention weights in SRAM, 512 of
+  //                each routed expert's channels in SRAM, 62 stages; 218 / 181 / 156 /
   //                136 at 1K / 128K / 512K / 1M; 209 users at 1M fit (decodeSlots 209).
   //   'm31-b16':   tt-blaze #5966 (draft), batched: 4x8 stages, 16 users per step, all weights in L1: 275.99 / 286.11 us
   //                at 128K / 512K. One stage per galaxy holds 16 sessions, so 16 decode galaxies carry 256 at these

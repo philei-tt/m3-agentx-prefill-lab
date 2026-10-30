@@ -48,9 +48,9 @@ const DIMS = {
 const DECODE = [
   { name: '180 target, batch 8 (modelled)', cfg: { decodeStages: 62, decodeTps: 180, decodeCurve: 'm3', decodeBatch: 8 } },
   { name: '180 target, batch 16 (modelled)', cfg: { decodeStages: 62, decodeTps: 180, decodeCurve: 'm3', decodeBatch: 16 } },
-  { name: 'bf4 unbatched (main, measured)', cfg: { decodeStages: 62, decodeCurve: 'm31-main', decodeBatch: 1 } },
+  { name: 'bf4 old main @87c36f5', cfg: { decodeStages: 62, decodeCurve: 'm31-main', decodeBatch: 1 } },
   { name: 'bf4 unbatched (#5614, measured)', cfg: { decodeStages: 62, decodeCurve: 'm31-5614', decodeBatch: 1, decodeSlots: 193 } },
-  { name: 'bf4 + bf4 attn (model card)', cfg: { decodeStages: 62, decodeCurve: 'm31-card', decodeBatch: 1, decodeSlots: 209 } },
+  { name: 'bf4 main (model card)', cfg: { decodeStages: 62, decodeCurve: 'm31-card', decodeBatch: 1, decodeSlots: 209 } },
   { name: 'bf4 batched 4x8 x16 (#5966)', cfg: { decodeStages: 256, decodeCurve: 'm31-b16', decodeBatch: 1 } },
   { name: '270 @100k, batch 16', cfg: { decodeStages: 62, decodeTps: 270, decodeCurve: 'm3', decodeBatch: 16 } },
   { name: '360 @100k, batch 16', cfg: { decodeStages: 62, decodeTps: 360, decodeCurve: 'm3', decodeBatch: 16 } },
