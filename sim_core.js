@@ -56,6 +56,7 @@
     'm31-card': [[1000, 218], [131072, 181], [524288, 156], [1048576, 136]],
     'm31-b16': [[131071, 1e6 / 64 / 275.99], [524287, 1e6 / 64 / 286.11]],
   }).map(([k, pts]) => {
+    const batch = k === 'm31-b16' ? 16 : 1; // sessions per step in the measurement
     const p = pts.map(([c, t]) => [c, 1 / t]); // seconds per token
     const at = (x) => { // piecewise linear, end segments extrapolated
       let i = 0; while (i < p.length - 2 && x > p[i + 1][0]) i++;
@@ -64,7 +65,7 @@
     };
     // the context-free part of a token's time (weights, collectives, hops): the curve at zero context, at most the
     // first point; batching scales the rest (attention over each session's own KV) with the batch
-    return [k, { pts, at, a: Math.min(p[0][1], Math.max(0, at(0))) }];
+    return [k, { pts, at, batch, a: Math.min(p[0][1], Math.max(0, at(0))) }];
   }));
   // Batched decode, m sessions per stage per step (tt-blaze #4220; not measured yet), from the batch-1 trip a + b*ctx:
   //   - the context term is attention over each session's own KV, so m sessions read m x as much: m * b * ctx;
@@ -73,16 +74,28 @@
   //     selects, 128 * (1 - (1 - 4/128)^m) experts against 4 at m = 1; the rest (dense weights, collective and hop
   //     latency) is shared by the batch.
   const decodeExperts = (m) => M3.Ex * (1 - Math.pow(1 - M3.topk / M3.Ex, m));
+  // Speculative decoding (DEFAULTS.specDraft): a drafter proposes specDraft tokens, the target verifies them with the
+  // session's own next token, D = specDraft + 1 tokens per verify cycle, and commits specAL of them on average (the
+  // acceptance length, bonus token included: 1 <= specAL <= D; AgentX submissions run at a committed AL). null = off.
+  const specOf = (cfg) => (cfg.specDraft > 0 ? { D: cfg.specDraft + 1, al: cfg.specAL, draft: cfg.specDraftFrac || 0, pipe: cfg.specVerify === 'pipe' } : null);
   // decode speed per user (tokens/s/u) for a session with `ctx` tokens of context while the ring has room, in a batch
-  // of m sessions per stage (m = 1 when omitted; fractional m = a partly filled batch)
+  // of m sessions per stage (m = 1 when omitted; fractional m = a partly filled batch). A step is the context-free
+  // part a (scaled by g for the distinct experts the step's tokens select) plus each session's attention over its KV.
+  // With spec decode a cycle commits specAL tokens and costs the drafter (specDraftFrac of a plain step) plus the
+  // verify: 'batch' verifies the session's D tokens in its own step (KV read once, so the attention term is unchanged;
+  // the experts of m x D tokens), 'pipe' sends each through the ring as its own token (a plain step; the ring carries
+  // D x fewer sessions, see decCap).
   function decodeSpeed(cfg, ctx, m) {
-    const [a, b] = M3_DECODE_TRIP, mm = m > 1 ? m : 1, c = cfg.decodeCurve === 'm3' ? ctx : DECODE_REF_CTX;
+    const [a0, b0] = M3_DECODE_TRIP, mm = m > 1 ? m : 1;
     const f = cfg.decodeMoeFrac === undefined ? DEFAULTS.decodeMoeFrac : cfg.decodeMoeFrac;
-    const g = mm > 1 ? 1 - f + f * decodeExperts(mm) / decodeExperts(1) : 1;
-    const cur = DECODE_CURVES[cfg.decodeCurve];
-    if (cur) { const t = Math.max(cur.at(ctx), cur.a); return 1 / (cur.a * g + mm * (t - cur.a)); }
-    if (cfg.decodeCurve !== 'm3' && mm === 1) return cfg.decodeTps;
-    return cfg.decodeTps * (a + b * DECODE_REF_CTX) / (a * g + mm * b * c);
+    const cur = DECODE_CURVES[cfg.decodeCurve], base = cur ? cur.batch : 1;
+    const g = (n) => (n > 1 ? 1 - f + f * decodeExperts(base * n) / decodeExperts(base) : 1);
+    let a, w, k = 1; // seconds per step: context-free part, attention per session; k = tokens/s/u scale
+    if (cur) { a = cur.a; w = Math.max(cur.at(ctx), cur.a) - cur.a; }
+    else { a = a0; w = b0 * (cfg.decodeCurve === 'm3' ? ctx : DECODE_REF_CTX); k = cfg.decodeTps * (a0 + b0 * DECODE_REF_CTX); }
+    const plain = a * g(mm) + mm * w, sp = specOf(cfg);
+    if (!sp) return k / plain;
+    return k * sp.al / ((sp.pipe ? plain : a * g(mm * sp.D) + mm * w) + sp.draft * plain);
   }
   const MB = 1e6, GB = 1e9;
   // Decode KV memory, modelled from tt-blaze's M3 decode (one 4x2 mesh, 8 chips, per stage). The sparse (MSA/MoE)
@@ -568,6 +581,13 @@
     //   reproduces the measured table. 'm31-main' / 'm31-5614' / 'm31-card' / 'm31-b16': measured M3.1-Flash bf4
     //   decode (DECODE_CURVES), absolute (decodeTps unused); 'm31-b16' goes with decodeStages 256.
     decodeCurve: 'm3',
+    // specDraft: speculative decoding (see specOf / decodeSpeed), draft tokens per verify cycle (0 = off; M3.1-Flash
+    //   ships a DSpark draft head). specAL: tokens committed per cycle, bonus token included (1..specDraft + 1).
+    //   specVerify: 'batch' = the cycle's specDraft + 1 tokens verified together in the session's step (batched
+    //   verification, not built yet); 'pipe' = each one its own token through the ring (tt-blaze's MTP / DFlash today),
+    //   so the ring carries (specDraft + 1) x fewer sessions. specDraftFrac: the drafter's time per cycle, as a share of
+    //   a plain decode step (its stages fit in the ring's spare ones: 62 of 64 are used, so no extra galaxies).
+    specDraft: 0, specAL: 1, specVerify: 'batch', specDraftFrac: 0.1,
     // decodeCache: the decode side's KV layout. decodeSlots sizes its memory in 1M-token slots (0 = unlimited). Every
     //   layout reserves a request's decode KV when the request is admitted to prefill and releases it when its decode
     //   ends; released KV stays cached (LRU) and a later request with the same prefix finds it there.
@@ -820,6 +840,11 @@
     const decPoolTok = dc === 'slots' ? 0 : decMem;
     if (!(autoDec || cfg.decodeSlots >= 0)) errors.push(`decodeSlots must be 'auto' or a number >= 0, got ${cfg.decodeSlots}`);
     if (!(cfg.decodeBatch >= 1) || cfg.decodeBatch !== Math.floor(cfg.decodeBatch)) errors.push('decode batch must be a whole number >= 1');
+    if (!(cfg.specDraft >= 0) || cfg.specDraft !== Math.floor(cfg.specDraft)) errors.push('specDraft must be a whole number >= 0 (0 = no spec decode)');
+    if (cfg.specDraft > 0 && !(cfg.specAL >= 1 && cfg.specAL <= cfg.specDraft + 1)) errors.push(`specAL must be in [1, specDraft + 1 = ${cfg.specDraft + 1}], got ${cfg.specAL}`);
+    if (!['batch', 'pipe'].includes(cfg.specVerify)) errors.push(`specVerify must be 'batch' or 'pipe', got ${cfg.specVerify}`);
+    if (!(cfg.specDraftFrac >= 0)) errors.push('specDraftFrac must be >= 0');
+    if (cfg.specDraft > 0 && cfg.specVerify === 'pipe' && cfg.decodeBatch > 1) errors.push('pipelined spec verification with batched decode is not modelled (use specVerify batch)');
     if (cfg.decodeBatch > 1 && !(cfg.decodeStages > 0)) errors.push('batched decode needs the decode pipeline stages (decodeStages > 0)');
     if (!(cfg.decodeMoeFrac >= 0 && cfg.decodeMoeFrac <= 1)) errors.push('decodeMoeFrac must be in [0, 1]');
     // fixed slots: the ring carries decodeBatch x decodeStages sessions, each in its own 1M slot
@@ -1232,8 +1257,8 @@
     // occupancy over the window, for slots held and for requests actually decoding (prefill done, not yet ended)
     let decHeld = 0, decoding = 0, decT = 0, decSpeedSum = 0; const decQ = [];
     // share of its full speed each decoding session gets: min(1, ring capacity / sessions decoding), the ring carrying
-    // decodeBatch sessions per stage
-    const decCap = cfg.decodeStages * cfg.decodeBatch;
+    // decodeBatch sessions per stage (pipelined spec verification: each session takes specDraft + 1 of those places)
+    const decCap = cfg.decodeStages * cfg.decodeBatch / (cfg.specDraft > 0 && cfg.specVerify === 'pipe' ? cfg.specDraft + 1 : 1);
     const decShare = () => (cfg.decodeStages > 0 && decoding > decCap ? decCap / decoding : 1);
     function decTick() {
       if (warmDone) {

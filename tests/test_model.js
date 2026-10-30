@@ -359,4 +359,32 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   assert.ok(SIM.makePlan({ model: 'm3' }, cal).errors.length === 0);
 }
 
+// 14. speculative decoding: off by default. A cycle commits specAL tokens. Batched verification reads the KV once, so
+//     with no expert-weight cost (decodeMoeFrac 0) and a free drafter a session decodes specAL x faster; reading more
+//     experts and the drafter cost some of that back (at decodeMoeFrac 0.8 most of it on an unbatched ring). Pipelined verification (each draft token a ring token) speeds
+//     a session up by specAL on an empty ring but takes specDraft + 1 places in it, so on a full ring it decodes less
+//     unless specAL > specDraft + 1 (impossible). Bad knobs are rejected.
+{
+  assert.ok(SIM.DEFAULTS.specDraft === 0);
+  for (const curve of ['m3', 'flat', 'm31-main', 'm31-b16']) {
+    const c = Object.assign({}, SIM.DEFAULTS, { decodeCurve: curve }), s = (o, m) => SIM.decodeSpeed(Object.assign({}, c, o), 131072, m);
+    const plain = s({});
+    for (const m of [1, 4]) {
+      const free = { specDraft: 3, specAL: 2.5, specDraftFrac: 0, decodeMoeFrac: 0 };
+      assert.ok(Math.abs(s(free, m) / s({ decodeMoeFrac: 0 }, m) - 2.5) < 1e-9, `${curve} m ${m}: ${s(free, m)}`);
+      assert.ok(Math.abs(s(Object.assign({}, free, { specVerify: 'pipe' }), m) / s({ decodeMoeFrac: 0 }, m) - 2.5) < 1e-9, `${curve} pipe`);
+    }
+    const sb = s({ specDraft: 3, specAL: 2.5 }), sw = s({ specDraft: 7, specAL: 2.5 });
+    assert.ok(sb < 2.5 * plain && sw < sb && s({ specDraft: 3, specAL: 1 }) < plain, `${curve}: ${plain} ${sb} ${sw}`);
+    assert.ok(s({ specDraft: 3, specAL: 2.5, decodeMoeFrac: 0.4 }) > 1.2 * s({ decodeMoeFrac: 0.4 }), curve);
+  }
+  assert.ok(plan({ specDraft: 3, specAL: 5 }).errors.some((e) => e.includes('specAL')) && plan({ specDraft: 1.5, specAL: 1 }).errors.some((e) => e.includes('specDraft')));
+  assert.ok(plan({ specVerify: 'tree' }).errors.some((e) => e.includes('specVerify')) && plan({ decodeStages: 62, decodeBatch: 2, specDraft: 1, specAL: 1.5, specVerify: 'pipe' }).errors.some((e) => e.includes('pipelined')));
+  assert.ok(plan({ decodeStages: 62, decodeCurve: 'm31-b16', specDraft: 3, specAL: 2.5 }).errors.length === 0);
+  const cfg = Object.assign({ cache: 'pool', chunk: 512, batch: true, budget: 8192 }, base, { concurrency: 128, decodeStages: 4, decodeSlots: 0, decodeCurve: 'flat', specDraftFrac: 0 });
+  const off = SIM.simulate(TR, cal, cfg), pipe = SIM.simulate(TR, cal, Object.assign({ specDraft: 3, specAL: 2.5, specVerify: 'pipe' }, cfg));
+  const bat = SIM.simulate(TR, cal, Object.assign({ specDraft: 3, specAL: 2.5, decodeMoeFrac: 0 }, cfg));
+  assert.ok(pipe.outDecTps < off.outDecTps && bat.outDecTps > 1.5 * off.outDecTps, `out off ${off.outDecTps} pipe ${pipe.outDecTps} batch ${bat.outDecTps}`);
+}
+
 console.log('test_model: all checks passed');

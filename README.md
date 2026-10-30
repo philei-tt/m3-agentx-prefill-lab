@@ -98,7 +98,7 @@ points from before both have no margin. Override with `--price-out`, `--galaxy-u
 | `lib/price.js` | `--price-in` / `--price-cached` / `--price-out` / `--galaxy-usd` / `--decode-galaxies` overrides of `SIM.PRICE` and `SIM.COST` for the CLIs. |
 | `lib/paths.js` | Where data and results are read from: env `M3SIM_DATA` / `M3SIM_RESULTS`, else `./data` and `./results`, else the exabox scratch copies. |
 | `on_node.sh` | `JOB=<slurm id> ./on_node.sh <cmd>` runs on the compute node with soft ulimits raised to the hard limits. |
-| `tools/` | Helpers: `feature_table.js` (README tables), `study_detail.js`, `grid_by_topology.js`, `dump_cells.js` (per-cell stage medians), `traffic_stats.js`, `smoke.sh` (every feature path), `investigate.sh`, `decode_layout_ab.js` (decode KV layouts vs revenue), `best_net_sweep.js` (net revenue grid), `revenue_paths.js` (M3 vs M3.1-Flash, kernels and decode speed vs net revenue, break-even cost and price), `stack_search.js` (best prefill stack per galaxy count, then net revenue per decode scenario). |
+| `tools/` | Helpers: `feature_table.js` (README tables), `study_detail.js`, `grid_by_topology.js`, `dump_cells.js` (per-cell stage medians), `traffic_stats.js`, `smoke.sh` (every feature path), `investigate.sh`, `decode_layout_ab.js` (decode KV layouts vs revenue), `best_net_sweep.js` (net revenue grid), `revenue_paths.js` (M3 vs M3.1-Flash, kernels and decode speed vs net revenue, break-even cost and price), `stack_search.js` (best prefill stack per galaxy count, then net revenue per decode scenario), `spec_sweep.js` (speculative decoding on the measured decode curves). |
 
 Data:
 * `data/traffic.bin` + `traffic.json`: the preprocessed corpus, 5 MB, derived from the Apache-2.0 HF dataset.
@@ -166,6 +166,19 @@ The replay rules below were ported from the AIPerf source (`ai-dynamo/aiperf` @ 
   128 × (1 − (124/128)^m) against 4 at m = 1; the rest is shared. At 130k context: 171 / 94 / 50 / 27 tokens/s/u
   at m = 1 / 2 / 4 / 8, so a full 62-stage ring decodes 10.6k / 11.6k / 12.4k / 13.3k tokens/s. Fixed slots must hold
   the full ring, m × stages slots, or the plan is out of memory: with 145 slots and 62 stages they hold m = 2 at most.
+* **Speculative decoding** (`specDraft`, `specAL`, `specVerify`, `specDraftFrac`; page: "Spec decode"; off by
+  default). A drafter proposes `specDraft` tokens; the target verifies them together with the session's own next token
+  (D = `specDraft` + 1 tokens per cycle) and commits `specAL` of them on average. `specAL` is the acceptance length,
+  bonus token included (1 ≤ AL ≤ D); AgentX submissions run at a committed AL measured on SPEED-Bench coding
+  (tt-d-gen #1370). A cycle also costs the drafter, `specDraftFrac` (0.1) of a plain step. The drafter's stages fit in
+  the ring's spare ones (62 of 64 are used), so it adds no galaxies. M3.1-Flash ships a DSpark draft head in place of
+  M3's MTP; nobody has measured its AL or a blaze verify step.
+  * `'batch'` (batched verification, proposed in "SpecDecode on Blaze", not built yet): the session's D tokens are
+    verified in its own step. The KV is read once, so the attention term is unchanged. The experts are those of
+    m × D tokens, through the batched-decode model above (`decodeMoeFrac`). Per user: AL / (verify step + drafter).
+  * `'pipe'` (tt-blaze's MTP / DFlash today): each draft token goes through the ring as a token of its own. A user
+    speeds up by AL / (1 + drafter) on an empty ring, but each session takes D places in it, so on a full ring it
+    decodes AL / D as much. Not modelled with `decodeBatch` > 1.
 * **Decode KV layouts** (`decodeCache`; page: "Decode KV layout"). Every layout reserves a request's decode KV when it is admitted to prefill and releases it when
   its decode ends; the released KV stays cached.
   * `'slots'` (default, today): one 1M slot per request. A released slot keeps its stream's KV, LRU over idle slots
@@ -367,7 +380,9 @@ bf4 decode (#5966, 3 + 16 galaxies); unbatched it is **−$78/h** on tt-blaze ma
 model card's bf4 attention (all on 2 + 16). Prefill is no longer the limit: it more than
 doubles with the right stack and then sits 30–50% busy, waiting on decode. Positive margin needs about 15% more decode
 throughput per galaxy than tt-blaze #5966 measures (≈ 1.05k instead of 906 output tok/s per galaxy), or 1.15× the list
-price, or ≤ $8.73 per galaxy-hour.
+price, or ≤ $8.73 per galaxy-hour. **Speculative decoding on top of #5966 closes that gap** (next sections): batched
+verification turns the best cell positive at 1 draft / AL 1.87 or 3 drafts / AL ≥ 2.5 (+$44/h at 3 drafts / AL 3.0). Pipelined
+verification, which blaze runs today, does not help.
 
 ### Decode: what was measured (bf4 routed experts, M3.1-Flash, Oct 30)
 
@@ -449,10 +464,49 @@ Caveats:
   one, which slightly understates #5966 at low load.
 * #5966 is one layer at 16 users, and #5614 one MoE layer at two contexts; the 64-stage ring is assumed to run at the
   slowest stage's step. Batching on top of the unbatched curves is not modelled (#5966 already ports #5614's
-  indexer work). M3.1-Flash ships no MTP module.
+  indexer work). No speculative decoding in these tables (see the next section).
 * Full paging is the ideal paged-attention kernel; the arena is the implementable fallback (3–4% less goodput).
 * $10 per galaxy-hour is a rough operating cost. AgentX is cache-heavy (96% hits), so its requests bill little per
   token of compute; a workload with fewer hits bills more for the same prefill work.
+
+### Speculative decoding (`tools/spec_sweep.js`)
+
+The tables above decode one token per session per step. They include no speculative decoding, batched or not.
+`tools/spec_sweep.js` adds spec decode to the three measured curves (main, the model card and #5966), with the best stacks above (opEff 1;
+`results/spec_sweep.{json,txt}`). No AL has been measured for M3.1-Flash's DSpark head yet, so the sweep brackets it:
+
+* 1 draft / AL 1.87: M3's MTP at bf4 experts (accept rate 0.868, Models weekly status).
+* 3 / 1.49: DeepSeek-V4 MTP's AgentX golden AL.
+* 3 / 2.5 and 3 / 3.0.
+* 7 / 3.7: Kimi-K2.5 EAGLE3's AgentX golden AL.
+
+Batched verification runs at two expert-weight shares of a step:
+
+* `decodeMoeFrac` 0.8, the default.
+* 0.4, a rough roofline for main: one expert's bf4 weights per chip is ~31 µs of the 81 µs stage.
+
+| net $/h, best gx (opEff 1) | main | model card | #5966 batched |
+|---|---|---|---|
+| no spec decode | −$78 | −$49 | −$24 |
+| batch 1 / 1.87, moe 0.8 / 0.4 | −$67 / −$47 | −$43 / −$13 | **+$4 / +$34** |
+| batch 3 / 1.49, moe 0.8 / 0.4 | −$118 / −$99 | −$108 / −$82 | −$62 / −$31 |
+| batch 3 / 2.5, moe 0.8 / 0.4 | −$86 / −$51 | −$68 / −$21 | **+$9 / +$61** |
+| batch 3 / 3.0, moe 0.8 / 0.4 | −$70 / −$29 | −$49 / +$4 | **+$44 / +$109** |
+| batch 7 / 3.7, moe 0.8 / 0.4 | −$97 / −$53 | −$84 / −$30 | **+$67 / +$144** |
+| pipelined 3 / 3.0 | −$106 | −$86 | −$65 |
+
+* **On batched decode, spec decode is the path to positive.** #5966's step already holds 16 users, who touch ~51 of the
+  128 experts, so verifying 4 tokens each (64 tokens, ~111 experts) costs about 2× the step rather than 4×. One draft at
+  AL 1.87, or 3 drafts at AL 2.5 or more, then turns the best cell positive, even at the default expert-weight share. At 3 / 3.0 that is +$44/h at
+  4 + 16 galaxies (21.2k output tok/s, break-even 0.82× list or $12.20/gx-h), up to +$109/h if the step is less
+  expert-bound.
+* **Unbatched, it barely helps.** One user's step reads 4 experts; verifying 4 tokens reads ~15, so at the default share the verify
+  step costs ~2.7× and long drafts lose. Only the model card at 3 / 3.0 with the 0.4 share reaches break-even (+$4).
+* **Pipelined verification (what blaze runs today) loses money on a full ring.** Each session takes D ring places for
+  AL tokens, so throughput drops by AL / D. It is a latency win at low load (392 tok/s/u at 128K on main), not a
+  revenue win. Long drafts with a low AL (3 / 1.49) lose in every mode.
+* Unmeasured: DSpark's AL on AgentX / SPEED-Bench, and a blaze verify step (batched verification is not built). The
+  expert-weight share decides it for unbatched decode.
 
 ## Findings (study of Oct 8 2026, third run: decode speed follows each session's context along the measured M3 curve, 180 tokens/s/u at 100k; with the new auto split, deployed memory defaults (bf8 index_k, 1 GB reserve), KV offload tiers (host DRAM + 16 TB SSD per galaxy) behind static slots, round-robin scheduling, sequential pool copies, derived lane counts, unaligned resume in the baseline; decode ring and decode slots unlimited, AIPerf-exact replay, `results/study.json`)
 

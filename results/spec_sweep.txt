@@ -1,0 +1,87 @@
+== Spec decode: net $/h, best prefill stacks (opEff 1, best of budget x1 / x2), M3.1-Flash prices ($0.15 / $0.015 / $0.6), $10 per galaxy-hour, 16 decode galaxies
+   spec: drafts / acceptance length (tokens per cycle); moe = expert-weight share of a decode step; drafter 10% of a step
+
+-- decode: main
+  spec                                         2 gx     3 gx     4 gx     6 gx   tok/s/u @128Kbest: output tok/s
+  off                                       −$78.32  −$79.24  −$88.97    −$109             144      8.8k @2 gx
+  batch 1/1.87 (M3 MTP), moe 0.8            −$66.73  −$69.11  −$77.23  −$97.17             160      9.8k @2 gx
+  batch 1/1.87 (M3 MTP), moe 0.4            −$47.33  −$50.34  −$55.71  −$75.02             194     11.7k @2 gx
+  batch 3/1.49 (DSv4 MTP), moe 0.8            −$118    −$123    −$133    −$153              77      4.8k @2 gx
+  batch 3/1.49 (DSv4 MTP), moe 0.4          −$98.81    −$101    −$111    −$131             110      6.8k @2 gx
+  batch 3/2.5, moe 0.8                      −$86.21  −$87.80  −$97.29    −$118             129      7.9k @2 gx
+  batch 3/2.5, moe 0.4                      −$51.46  −$55.15  −$60.87  −$80.14             185     11.2k @2 gx
+  batch 3/3, moe 0.8                        −$69.87  −$71.76  −$79.79  −$99.92             155      9.5k @2 gx
+  batch 3/3, moe 0.4                        −$29.07  −$32.28  −$35.92  −$55.37             222     13.4k @2 gx
+  batch 7/3.7 (K2.5 EAGLE3), moe 0.8        −$97.42  −$99.39    −$109    −$130             111      6.8k @2 gx
+  batch 7/3.7 (K2.5 EAGLE3), moe 0.4        −$53.02  −$57.57  −$62.88  −$82.42             181     11.0k @2 gx
+  pipe 3/3.0                                  −$106    −$109    −$119    −$139             392      6.2k @2 gx
+
+-- decode: model card
+  spec                                         2 gx     3 gx     4 gx     6 gx   tok/s/u @128Kbest: output tok/s
+  off                                       −$49.03  −$53.50  −$54.63  −$71.42             181     11.4k @2 gx
+  batch 1/1.87 (M3 MTP), moe 0.8            −$42.80  −$45.61  −$47.65  −$63.08             194     12.1k @2 gx
+  batch 1/1.87 (M3 MTP), moe 0.4            −$12.99  −$17.36  −$20.46  −$31.93             238     14.8k @2 gx
+  batch 3/1.49 (DSv4 MTP), moe 0.8            −$108    −$111    −$118    −$137              91      5.7k @2 gx
+  batch 3/1.49 (DSv4 MTP), moe 0.4          −$81.53  −$83.10  −$88.96    −$107             133      8.3k @2 gx
+  batch 3/2.5, moe 0.8                      −$68.40  −$71.31  −$75.77  −$93.89             152      9.5k @2 gx
+  batch 3/2.5, moe 0.4                      −$21.04  −$27.73  −$31.18  −$43.86             222     13.8k @2 gx
+  batch 3/3, moe 0.8                        −$48.51  −$53.28  −$55.16  −$71.60             183     11.4k @2 gx
+  batch 3/3, moe 0.4                          $4.37    $1.54   −$3.03  −$12.64             267     16.6k @2 gx
+  batch 7/3.7 (K2.5 EAGLE3), moe 0.8        −$84.10  −$86.07  −$92.04    −$110             129      8.0k @2 gx
+  batch 7/3.7 (K2.5 EAGLE3), moe 0.4        −$30.48  −$34.33  −$38.11  −$50.96             213     13.2k @2 gx
+  pipe 3/3.0                                −$86.49  −$88.32  −$94.12    −$112             494      7.9k @2 gx
+
+-- decode: #5966 batched
+  spec                                         2 gx     3 gx     4 gx     6 gx   tok/s/u @128Kbest: output tok/s
+  off                                       −$48.02  −$24.11  −$26.93  −$44.71              57     14.3k @3 gx
+  batch 1/1.87 (M3 MTP), moe 0.8            −$38.63    $4.46    $0.25  −$14.52              67     17.0k @3 gx
+  batch 1/1.87 (M3 MTP), moe 0.4            −$29.29   $33.58   $31.98   $19.97              79     19.7k @3 gx
+  batch 3/1.49 (DSv4 MTP), moe 0.8          −$61.82  −$63.24  −$67.12  −$86.73              41     10.0k @2 gx
+  batch 3/1.49 (DSv4 MTP), moe 0.4          −$50.65  −$31.03  −$33.61  −$50.87              54     13.6k @3 gx
+  batch 3/2.5, moe 0.8                      −$36.38    $9.05    $6.82   −$7.82              70     17.5k @3 gx
+  batch 3/2.5, moe 0.4                      −$22.51   $53.39   $60.78   $51.59              90     22.9k @4 gx
+  batch 3/3, moe 0.8                        −$26.00   $42.77   $43.92   $32.04              84     21.2k @4 gx
+  batch 3/3, moe 0.4                        −$12.82   $68.35     $109     $100             108     27.4k @4 gx
+  batch 7/3.7 (K2.5 EAGLE3), moe 0.8        −$20.62   $56.38   $67.34   $58.02              93     23.5k @4 gx
+  batch 7/3.7 (K2.5 EAGLE3), moe 0.4         −$5.58   $78.63     $143     $144             125     31.7k @6 gx
+  pipe 3/3.0                                −$64.88  −$67.92  −$74.88  −$95.00             154      9.8k @2 gx
+
+-- best per decode x spec
+  main, off                                            net −$78.32/h (in $82.59 + out $19.09 - cost $180) | break-even $5.65/gx-h or 1.77x list | 2 + 16 gx, budget 8k | goodput 45.3k @C=776, output 8.8k tok/s, decode p10/p50 24/32 tok/s/u, prefill busy 43%
+  main, batch 1/1.87 (M3 MTP), moe 0.8                 net −$66.73/h (in $92.17 + out $21.11 - cost $180) | break-even $6.29/gx-h or 1.59x list | 2 + 16 gx, budget 8k | goodput 48.8k @C=744, output 9.8k tok/s, decode p10/p50 32/39 tok/s/u, prefill busy 46%
+  main, batch 1/1.87 (M3 MTP), moe 0.4                 net −$47.33/h (in $107 + out $25.25 - cost $180) | break-even $7.37/gx-h or 1.36x list | 2 + 16 gx, budget 8k | goodput 55.6k @C=712, output 11.7k tok/s, decode p10/p50 50/63 tok/s/u, prefill busy 52%
+  main, batch 3/1.49 (DSv4 MTP), moe 0.8               net   −$118/h (in $51.49 + out $10.28 - cost $180) | break-even $3.43/gx-h or 2.91x list | 2 + 16 gx, budget 16k | goodput 30.2k @C=984, output 4.8k tok/s, decode p10/p50 7/8 tok/s/u, prefill busy 28%
+  main, batch 3/1.49 (DSv4 MTP), moe 0.4               net −$98.81/h (in $66.40 + out $14.80 - cost $180) | break-even $4.51/gx-h or 2.22x list | 2 + 16 gx, budget 8k | goodput 39.0k @C=896, output 6.8k tok/s, decode p10/p50 13/15 tok/s/u, prefill busy 37%
+  main, batch 3/2.5, moe 0.8                           net −$86.21/h (in $76.65 + out $17.14 - cost $180) | break-even $5.21/gx-h or 1.92x list | 2 + 16 gx, budget 16k | goodput 41.6k @C=784, output 7.9k tok/s, decode p10/p50 21/24 tok/s/u, prefill busy 37%
+  main, batch 3/2.5, moe 0.4                           net −$51.46/h (in $104 + out $24.28 - cost $180) | break-even $7.14/gx-h or 1.40x list | 2 + 16 gx, budget 8k | goodput 54.0k @C=712, output 11.2k tok/s, decode p10/p50 47/56 tok/s/u, prefill busy 50%
+  main, batch 3/3, moe 0.8                             net −$69.87/h (in $89.67 + out $20.46 - cost $180) | break-even $6.12/gx-h or 1.63x list | 2 + 16 gx, budget 8k | goodput 47.5k @C=728, output 9.5k tok/s, decode p10/p50 33/37 tok/s/u, prefill busy 45%
+  main, batch 3/3, moe 0.4                             net −$29.07/h (in $122 + out $29.00 - cost $180) | break-even $8.38/gx-h or 1.19x list | 2 + 16 gx, budget 8k | goodput 62.0k @C=704, output 13.4k tok/s, decode p10/p50 70/84 tok/s/u, prefill busy 57%
+  main, batch 7/3.7 (K2.5 EAGLE3), moe 0.8             net −$97.42/h (in $67.80 + out $14.78 - cost $180) | break-even $4.59/gx-h or 2.18x list | 2 + 16 gx, budget 8k | goodput 37.9k @C=856, output 6.8k tok/s, decode p10/p50 14/16 tok/s/u, prefill busy 36%
+  main, batch 7/3.7 (K2.5 EAGLE3), moe 0.4             net −$53.02/h (in $103 + out $23.79 - cost $180) | break-even $7.05/gx-h or 1.42x list | 2 + 16 gx, budget 8k | goodput 53.5k @C=712, output 11.0k tok/s, decode p10/p50 46/52 tok/s/u, prefill busy 50%
+  main, pipe 3/3.0                                     net   −$106/h (in $60.79 + out $13.37 - cost $180) | break-even $4.12/gx-h or 2.43x list | 2 + 16 gx, budget 8k | goodput 36.8k @C=928, output 6.2k tok/s, decode p10/p50 10/13 tok/s/u, prefill busy 35%
+  model card, off                                      net −$49.03/h (in $106 + out $24.60 - cost $180) | break-even $7.28/gx-h or 1.37x list | 2 + 16 gx, budget 8k | goodput 54.8k @C=712, output 11.4k tok/s, decode p10/p50 50/57 tok/s/u, prefill busy 51%
+  model card, batch 1/1.87 (M3 MTP), moe 0.8           net −$42.80/h (in $111 + out $26.18 - cost $180) | break-even $7.62/gx-h or 1.31x list | 2 + 16 gx, budget 8k | goodput 57.5k @C=704, output 12.1k tok/s, decode p10/p50 56/63 tok/s/u, prefill busy 53%
+  model card, batch 1/1.87 (M3 MTP), moe 0.4           net −$12.99/h (in $135 + out $32.07 - cost $180) | break-even $9.28/gx-h or 1.08x list | 2 + 16 gx, budget 8k | goodput 66.7k @C=704, output 14.8k tok/s, decode p10/p50 89/110 tok/s/u, prefill busy 61%
+  model card, batch 3/1.49 (DSv4 MTP), moe 0.8         net   −$108/h (in $59.24 + out $12.30 - cost $180) | break-even $3.97/gx-h or 2.52x list | 2 + 16 gx, budget 8k | goodput 34.4k @C=920, output 5.7k tok/s, decode p10/p50 9/10 tok/s/u, prefill busy 33%
+  model card, batch 3/1.49 (DSv4 MTP), moe 0.4         net −$81.53/h (in $80.54 + out $17.93 - cost $180) | break-even $5.47/gx-h or 1.83x list | 2 + 16 gx, budget 8k | goodput 42.6k @C=752, output 8.3k tok/s, decode p10/p50 24/27 tok/s/u, prefill busy 41%
+  model card, batch 3/2.5, moe 0.8                     net −$68.40/h (in $91.12 + out $20.48 - cost $180) | break-even $6.20/gx-h or 1.61x list | 2 + 16 gx, budget 8k | goodput 47.4k @C=712, output 9.5k tok/s, decode p10/p50 34/38 tok/s/u, prefill busy 45%
+  model card, batch 3/2.5, moe 0.4                     net −$21.04/h (in $129 + out $29.86 - cost $180) | break-even $8.83/gx-h or 1.13x list | 2 + 16 gx, budget 16k | goodput 63.3k @C=712, output 13.8k tok/s, decode p10/p50 77/96 tok/s/u, prefill busy 55%
+  model card, batch 3/3, moe 0.8                       net −$48.51/h (in $107 + out $24.55 - cost $180) | break-even $7.30/gx-h or 1.37x list | 2 + 16 gx, budget 8k | goodput 54.7k @C=712, output 11.4k tok/s, decode p10/p50 49/55 tok/s/u, prefill busy 51%
+  model card, batch 3/3, moe 0.4                       net   $4.37/h (in $149 + out $35.78 - cost $180) | break-even $10.24/gx-h or 0.98x list | 2 + 16 gx, budget 8k | goodput 72.2k @C=704, output 16.6k tok/s, decode p10/p50 119/159 tok/s/u, prefill busy 66%
+  model card, batch 7/3.7 (K2.5 EAGLE3), moe 0.8       net −$84.10/h (in $78.63 + out $17.27 - cost $180) | break-even $5.33/gx-h or 1.88x list | 2 + 16 gx, budget 16k | goodput 41.4k @C=744, output 8.0k tok/s, decode p10/p50 23/25 tok/s/u, prefill busy 37%
+  model card, batch 7/3.7 (K2.5 EAGLE3), moe 0.4       net −$30.48/h (in $121 + out $28.49 - cost $180) | break-even $8.31/gx-h or 1.20x list | 2 + 16 gx, budget 8k | goodput 61.4k @C=704, output 13.2k tok/s, decode p10/p50 67/76 tok/s/u, prefill busy 57%
+  model card, pipe 3/3.0                               net −$86.49/h (in $76.54 + out $16.97 - cost $180) | break-even $5.19/gx-h or 1.92x list | 2 + 16 gx, budget 8k | goodput 41.6k @C=776, output 7.9k tok/s, decode p10/p50 21/24 tok/s/u, prefill busy 40%
+  #5966 batched, off                                   net −$24.11/h (in $135 + out $30.87 - cost $190) | break-even $8.73/gx-h or 1.15x list | 3 + 16 gx, budget 16k | goodput 70.7k @C=1072, output 14.3k tok/s, decode p10/p50 32/35 tok/s/u, prefill busy 42%
+  #5966 batched, batch 1/1.87 (M3 MTP), moe 0.8        net   $4.46/h (in $158 + out $36.64 - cost $190) | break-even $10.23/gx-h or 0.98x list | 3 + 16 gx, budget 8k | goodput 80.9k @C=1104, output 17.0k tok/s, decode p10/p50 44/47 tok/s/u, prefill busy 51%
+  #5966 batched, batch 1/1.87 (M3 MTP), moe 0.4        net  $33.58/h (in $181 + out $42.63 - cost $190) | break-even $11.77/gx-h or 0.85x list | 3 + 16 gx, budget 16k | goodput 90.5k @C=1088, output 19.7k tok/s, decode p10/p50 66/73 tok/s/u, prefill busy 53%
+  #5966 batched, batch 3/1.49 (DSv4 MTP), moe 0.8      net −$61.82/h (in $96.60 + out $21.58 - cost $180) | break-even $6.57/gx-h or 1.52x list | 2 + 16 gx, budget 8k | goodput 49.5k @C=736, output 10.0k tok/s, decode p10/p50 39/41 tok/s/u, prefill busy 47%
+  #5966 batched, batch 3/1.49 (DSv4 MTP), moe 0.4      net −$31.03/h (in $130 + out $29.42 - cost $190) | break-even $8.37/gx-h or 1.20x list | 3 + 16 gx, budget 8k | goodput 67.8k @C=1144, output 13.6k tok/s, decode p10/p50 27/29 tok/s/u, prefill busy 44%
+  #5966 batched, batch 3/2.5, moe 0.8                  net   $9.05/h (in $161 + out $37.91 - cost $190) | break-even $10.48/gx-h or 0.95x list | 3 + 16 gx, budget 8k | goodput 82.9k @C=1096, output 17.5k tok/s, decode p10/p50 48/51 tok/s/u, prefill busy 52%
+  #5966 batched, batch 3/2.5, moe 0.4                  net  $60.78/h (in $211 + out $49.42 - cost $200) | break-even $13.04/gx-h or 0.77x list | 4 + 16 gx, budget 8k | goodput 108.3k @C=1464, output 22.9k tok/s, decode p10/p50 46/49 tok/s/u, prefill busy 55%
+  #5966 batched, batch 3/3, moe 0.8                    net  $43.92/h (in $198 + out $45.72 - cost $200) | break-even $12.20/gx-h or 0.82x list | 4 + 16 gx, budget 8k | goodput 103.0k @C=1480, output 21.2k tok/s, decode p10/p50 38/41 tok/s/u, prefill busy 52%
+  #5966 batched, batch 3/3, moe 0.4                    net    $109/h (in $250 + out $59.15 - cost $200) | break-even $15.46/gx-h or 0.65x list | 4 + 16 gx, budget 8k | goodput 123.7k @C=1464, output 27.4k tok/s, decode p10/p50 69/79 tok/s/u, prefill busy 62%
+  #5966 batched, batch 7/3.7 (K2.5 EAGLE3), moe 0.8    net  $67.34/h (in $217 + out $50.73 - cost $200) | break-even $13.37/gx-h or 0.75x list | 4 + 16 gx, budget 8k | goodput 110.0k @C=1448, output 23.5k tok/s, decode p10/p50 50/53 tok/s/u, prefill busy 55%
+  #5966 batched, batch 7/3.7 (K2.5 EAGLE3), moe 0.4    net    $144/h (in $296 + out $68.50 - cost $220) | break-even $16.55/gx-h or 0.60x list | 6 + 16 gx, budget 8k | goodput 154.6k @C=2352, output 31.7k tok/s, decode p10/p50 35/37 tok/s/u, prefill busy 49%
+  #5966 batched, pipe 3/3.0                            net −$64.88/h (in $93.93 + out $21.19 - cost $180) | break-even $6.40/gx-h or 1.56x list | 2 + 16 gx, budget 8k | goodput 49.1k @C=728, output 9.8k tok/s, decode p10/p50 36/39 tok/s/u, prefill busy 46%
+
+356 s

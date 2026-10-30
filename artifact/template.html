@@ -278,6 +278,12 @@ details.panel > summary { font-family: var(--f-display); font-weight: 600; font-
         <div class="row"><label for="decodeStages">Decode pipeline stages (0 = unlimited)</label><input id="decodeStages" type="number" min="0" step="1"></div>
         <div class="row"><label for="decodeBatch">Decode batch (users per stage)</label><input id="decodeBatch" type="number" min="1" step="1"></div>
         <div class="hint">The ring holds stages × batch sessions at full speed. A bigger batch slows each user.</div>
+        <div class="row"><label for="decodeMoeFrac">Expert-weight share of a decode step</label><input id="decodeMoeFrac" type="number" min="0" max="1" step="0.1"></div>
+        <div class="row"><label for="specDraft">Spec decode: draft tokens per cycle (0 = off)</label><input id="specDraft" type="number" min="0" step="1"></div>
+        <div class="row"><label for="specAL">Spec decode: acceptance length (tokens per cycle)</label><input id="specAL" type="number" min="1" step="0.1"></div>
+        <div class="row"><label for="specVerify">Spec verification</label><select id="specVerify"><option value="batch">batched (one step per cycle)</option><option value="pipe">pipelined (one ring token per draft)</option></select></div>
+        <div class="row"><label for="specDraftFrac">Drafter time (share of a decode step)</label><input id="specDraftFrac" type="number" min="0" step="0.05"></div>
+        <div class="hint">Each cycle commits the acceptance length in tokens, bonus token included; it runs from 1 to drafts + 1. Batched verification reads the KV once but reads the experts of drafts + 1 tokens, so it pays off when the expert-weight share is low. Pipelined verification speeds up each user but fills drafts + 1 ring places per session, so on a full ring it decodes less.</div>
         <div class="row"><label for="decodeCache">Decode KV layout</label><select id="decodeCache"><option value="slots">fixed 1M slots</option><option value="paging">paged</option></select></div>
         <div class="hint" id="decMemHint"></div>
         <div class="row check"><input id="decodeHostTier" type="checkbox"><label for="decodeHostTier">Decode offload tiers (host DRAM + SSD of the decode galaxies)</label></div>
@@ -831,8 +837,8 @@ function mkWorker() {
 
 // ---------------------------------------------------------------- form <-> cfg
 const FIELDS = ['model', 'galaxies', 'replicas', 'mesh', 'torus', 'stages', 'split', 'opEff', 'asyncHandoff', 'msaLocal', 'reqPad', 'placement', 'chunk', 'batch', 'budget', 'batchMaxReqs', 'batchDynShape', 'batchChunksPerRequest', 'batchTokensPerRequest', 'attn', 'prefetchKV', 'policy',
-  'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'decodeStages', 'decodeBatch', 'decodeCurve', 'decodeCache', 'decodeHostTier', 'decodeBackpressure', 'decodeQueueMax', 'duration', 'seed'];
-const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchMaxReqs', 'batchChunksPerRequest', 'batchTokensPerRequest', 'lanes', 'arenaTokens', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeStages', 'decodeBatch', 'decodeQueueMax', 'duration', 'seed']);
+  'cache', 'laneScope', 'copyMode', 'lanesOverride', 'lanes', 'laneArena', 'arenaTokens', 'hostTier', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'idxDerep', 'idxBf16', 'reserveGB', 'decodeTps', 'decodeStages', 'decodeBatch', 'decodeMoeFrac', 'decodeCurve', 'specDraft', 'specAL', 'specVerify', 'specDraftFrac', 'decodeCache', 'decodeHostTier', 'decodeBackpressure', 'decodeQueueMax', 'duration', 'seed'];
+const NUMS = new Set(['galaxies', 'replicas', 'stages', 'opEff', 'chunk', 'budget', 'batchMaxReqs', 'batchChunksPerRequest', 'batchTokensPerRequest', 'lanes', 'arenaTokens', 'hostDramGBPerGalaxy', 'ssdTBPerGalaxy', 'pcieGBsPerGalaxy', 'ssdReadGBsPerGalaxy', 'ssdWriteGBsPerGalaxy', 'reserveGB', 'decodeTps', 'decodeStages', 'decodeBatch', 'decodeMoeFrac', 'specDraft', 'specAL', 'specDraftFrac', 'decodeQueueMax', 'duration', 'seed']);
 function setForm(cfg) {
   const c = Object.assign({}, SIM.DEFAULTS, cfg);
   for (const f of FIELDS) {
