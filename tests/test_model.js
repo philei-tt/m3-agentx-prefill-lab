@@ -139,7 +139,7 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   const m3 = Object.assign({}, SIM.DEFAULTS, { decodeCurve: 'm3' });
   assert.ok(Math.abs(SIM.decodeSpeed(m3, 100000) - 180) < 1e-9 && SIM.decodeSpeed(m3, 550000) < SIM.decodeSpeed(m3, 8000) && SIM.decodeSpeed(Object.assign({}, SIM.DEFAULTS, { decodeCurve: 'flat' }), 550000) === 180 && SIM.DEFAULTS.decodeCurve === 'm3');
   for (const [x, t] of SIM.M3_DECODE_TSU) assert.ok(Math.abs(SIM.decodeSpeed(m3, x) * 98 / 180 / t - 1) < 0.006, `curve at ${x}`);
-  const cu = SIM.simulate(TR, cal, Object.assign({ decodeCurve: 'm3' }, cfg)), cw = SIM.simulate(TR, cal, Object.assign({ decodeCurve: 'm3', decodeStages: 1e6 }, cfg));
+  const cu = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeCurve: 'm3' })), cw = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeCurve: 'm3', decodeStages: 1e6 }));
   assert.ok(cu.decodeTpsMean < 180 && cu.decodeTpsMean > 100 && Math.abs(cw.usefulTps - cu.usefulTps) < 1e-3 * cu.usefulTps, `m3 mean speed ${cu.decodeTpsMean}`);
   // starvation causes: shares of the window, summing to at most 1; none from slots without a slot limit
   const n = SIM.simulate(TR, cal, Object.assign({}, cfg, { decodeSlots: 0 }));
@@ -326,6 +326,28 @@ assert.ok(r.avgSegsPerChunk >= 1 && r.done > 0 && r.maxUtil <= 1 + 1e-9);
   assert.ok(pE < pO && pO < pF, `pad even ${pE} owner ${pO} fixed ${pF}`);
   const rb = SIM.simulate(TR, cal, Object.assign({ cache: 'inf', batch: true, budget: 16384, reqPad: 'tile', placement: 'owner' }, base, { concurrency: 64 }));
   assert.ok(rb.done > 0 && rb.avgChunkTok <= 16384 && rb.maxUtil <= 1 + 1e-9);
+}
+
+// 13. model: M3.1-Flash (default) runs MSA in the dense layers too, M3 ring-joint. MoE layers are the same in both;
+//     an M3.1-Flash dense layer is its M3 counterpart's projections and MLP plus an MoE layer's MSA attention, so it
+//     grows with context like an MoE layer (not like the ring), and the auto split packs more layers into the
+//     first stage. The calibration replays pin M3.
+{
+  assert.strictEqual(SIM.DEFAULTS.model, 'm3.1-flash');
+  for (const opEff of [0, 1]) {
+    const f = plan({ opEff }), m = plan({ opEff, model: 'm3' });
+    const L = (p, kind, k) => p.layer(kind, 2048, [{ n: 2048, na: 2048, k, cap: 0 }]);
+    for (const k of [0, 100000, 900000]) assert.strictEqual(L(f, 'moe', k), L(m, 'moe', k));
+    // MSA attention: a dense layer grows with context like an MoE layer (which also carries the pipeline multiplier)
+    const grow = (p, kind) => L(p, kind, 900000) - L(p, kind, 100000);
+    const dF = grow(f, 'dense'), dMoe = grow(f, 'moe');
+    assert.ok(dF > 0.5 * dMoe && dF < 2 * dMoe && grow(m, 'dense') > 3 * dMoe, `dense growth ${dF} vs moe ${dMoe}, ring ${grow(m, 'dense')}`);
+    assert.ok(L(f, 'dense', 900000) < L(m, 'dense', 900000) / 3, `long-context dense layer ${L(f, 'dense', 900000)} vs ring ${L(m, 'dense', 900000)}`);
+  }
+  const sp = (model) => SIM.makePlan({ model, galaxies: 4, stages: 16, chunk: 2048, cache: 'inf' }, cal).counts;
+  assert.ok(sp('m3.1-flash')[0] > sp('m3')[0] + 1, `split m3 ${sp('m3')} m3.1-flash ${sp('m3.1-flash')}`);
+  assert.ok(plan({ model: 'm4' }).errors.some((e) => e.includes('model')));
+  assert.ok(SIM.makePlan({ model: 'm3' }, cal).errors.length === 0);
 }
 
 console.log('test_model: all checks passed');

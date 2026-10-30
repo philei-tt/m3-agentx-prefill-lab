@@ -1,4 +1,4 @@
-/* sim_core.js - MiniMax-M3 pipeline-prefill traffic simulator (AgentX replay x per-op roofline).
+/* sim_core.js - MiniMax-M3.1-Flash (and M3) pipeline-prefill traffic simulator (AgentX replay x per-op roofline).
  *
  * One file, no dependencies. Used by the artifact (inlined, runs in a Web Worker) and by node (sweep.js,
  * validate.js). See README.md for the model, its calibration and the knobs.
@@ -11,6 +11,12 @@
   // ------------------------------------------------------------------------------------------------------
   // Model + hardware constants
   // ------------------------------------------------------------------------------------------------------
+  // MiniMax-M3.1-Flash (HF MiniMaxAI/MiniMax-M3.1-Flash config.json) has the same shapes as MiniMax-M3: 60 layers,
+  // the first 3 with a dense MLP, the rest MoE. The one structural change is attention: M3.1-Flash runs MSA (sparse
+  // attention: indexer + top-16 blocks of 128) in all 60 layers (sparse_attention_freq all 1), where M3 ran full
+  // (ring-joint) attention in the 3 dense layers. cfg.model selects which (DEFAULTS.model); the calibration runs were
+  // taken on M3, so the calibration and its replays pin model 'm3'.
+  const MODELS = ['m3.1-flash', 'm3'];
   const M3 = {
     E: 6144, Hq: 64, Hkv: 4, d: 128, Hi: 4, di: 128, sparseKeys: 2048, Ex: 128, topk: 4, I: 3072, Is: 3072,
     Id: 12288, V: 200064, L: 60, nDense: 3, maxCtx: 1048576,
@@ -55,7 +61,9 @@
   // sparse attention TP4 x CP2 (tt-blaze #4855, the default since Oct 11): mesh row r holds KV head r and the two
   // columns split its K/V by 128-token block, as index-K already is, so K and V are 136 B each over the 2 columns
   // = 136 B, + index_k 68 B = 204 B (TP8 before it replicated K/V over the columns: 340 B). Dense stages (TP4 x CP2
-  // since #4703) hold 68 B/token/chip; the embedding and LM-head stages hold none.
+  // since #4703) hold 68 B/token/chip on M3 (204 B with M3.1-Flash's MSA, still under the sparse stages' weights, so
+  // the sparse stages still bind); the embedding and LM-head stages hold none. Decode speed and memory are M3's
+  // measurements for both models (M3.1-Flash's sparse dense layers would read less KV per token at long context).
   const DEC_DRAM = 8 * 4080 * 2 ** 20;
   const DEC_KVB_CHIP = 2 * 128 * BF8 / 2 + 128 * BF8 / 2;
   const decodeWeightsChip = () => M3.Ex * 3 * M3.E * (M3.I / 2) * BF4 + M3.maxCtx * 64 * BF16 + 1024 * M3.E * BF8 + 1.5 * 2 ** 20;
@@ -63,6 +71,9 @@
   const OPS_MOE = ['norm_ag', 'qkv', 'idx_branch', 'misc', 'o_proj', 'attn_rs', 'shared', 'router', 'dispatch', 'experts', 'combine', 'moe_reduce'];
   const OPS_MSA_SEG = ['ag_kv', 'ag_idx', 'indexer', 'sparse', 'kv_a2a'];
   const OPS_DENSE = ['norm_ag', 'qkv', 'misc', 'o_proj', 'attn_rs', 'dense_mlp'];
+  // dense layer with MSA attention (M3.1-Flash): the index branch joins the dense layer's projections
+  const OPS_DENSE_MSA = ['norm_ag', 'qkv', 'idx_branch', 'misc', 'o_proj', 'attn_rs', 'dense_mlp'];
+  const MSA_OPS = ['idx_branch'].concat(OPS_MSA_SEG);
   const OPS_DENSE_SEG = ['ring', 'kv_a2a'];
   const CCL_OPS = new Set(['norm_ag', 'attn_rs', 'dispatch', 'combine', 'ag_kv', 'ag_idx', 'kv_a2a', 'shared', 'moe_reduce', 'dense_mlp']);
   // zone name (parse_zone_perf.py) -> op
@@ -351,13 +362,14 @@
   function opMs(op, roofS, eff, lat, c) {
     return (isCcl(op) ? cclLat(op, c, lat) : lat.op) + roofS * 1e3 / eff[op];
   }
-  // attention part of a layer, per-request (seq) or one kernel over the whole chunk (fused).
+  // attention part of a layer, per-request (seq) or one kernel over the whole chunk (fused). MSA for MoE layers, and
+  // for dense layers too when c.denseMsa (M3.1-Flash); ring-joint for M3's dense layers.
   // acc.g collects the KV-gather time that a prefetch could hide (MSA ag_kv/ag_idx; the dense ring's gather beyond
   // its compute).
   function attnMs(kind, c, segs, eff, lat, fused, acc) {
     const z = waveFactor(ZONE_T, c);
     let t = 0;
-    if (kind === 'moe') {
+    if (kind === 'moe' || c.denseMsa) {
       for (const op of OPS_MSA_SEG) {
         if (op === 'kv_a2a' && !c.evenSplit) continue;
         if ((op === 'ag_kv' || op === 'ag_idx') && c.sp <= 1) continue;
@@ -386,7 +398,7 @@
   }
   function layerMs(kind, c, segs, eff, lat, attn) {
     let t = 0, w = 0;
-    for (const op of kind === 'moe' ? OPS_MOE : OPS_DENSE) {
+    for (const op of kind === 'moe' ? OPS_MOE : c.denseMsa ? OPS_DENSE_MSA : OPS_DENSE) {
       const m = (op === 'norm_ag' ? 2 : 1) * opMs(op, roofTok(op, c), eff, lat, c);
       t += m; if (!isCcl(op)) w += m;
     }
@@ -408,11 +420,12 @@
   // System plan: stages, layer split, memory -> KV capacity, cost functions
   // ------------------------------------------------------------------------------------------------------
   const DEFAULTS = {
+    model: 'm3.1-flash',   // 'm3.1-flash' = MSA in every layer | 'm3' = ring-joint attention in the 3 dense layers
     galaxies: 4, replicas: 1, mesh: [2, 4], stages: 16, split: 'auto',
     opEff: 0,              // 0 = today's measured kernels, 1 = roofline target efficiencies
     torus: 'full',         // ring collectives: 'full' = only [4,4] stages (a whole 4x4 torus) | 'axes' | 'off' (makePlan)
     asyncHandoff: false,   // stage-to-stage D2D overlapped with compute (no blocking send), link-rate transfer
-    boundedDense: true,    // dense ring-joint gathers [0, kv_len) (op-bounded since #47539); false = whole lane capacity
+    boundedDense: true,    // model 'm3': dense ring-joint gathers [0, kv_len) (op-bounded since #47539); false = whole lane capacity
     msaLocal: false,       // MSA: SP-local indexer + top-k merge, fetch only selected K/V blocks (no prefix all-gather)
     // index_k cache dtype / de-replicated over TP. Today: bf8 x TP replicas (the deployed runner rejects bf16); the
     // #57827 calibration runs used bf16, so the calibration and validation replays pin idxBf16: true
@@ -637,6 +650,11 @@
       const et = Math.max(em, TARGET_EFF[OP_CLASS[op] || 'matmul']);
       eff[k][op] = Math.exp((1 - a) * Math.log(em) + a * Math.log(et));
     }
+    // M3.1-Flash: the dense layers run the same MSA kernels as the MoE layers (index branch, KV/index gathers, indexer,
+    // sparse SDPA), at the efficiencies measured there; their projections and MLP keep the dense layer's own
+    const denseMsa = cfg.model !== 'm3';
+    if (denseMsa) for (const op of MSA_OPS) eff.dense[op] = eff.moe[op];
+    if (!MODELS.includes(cfg.model)) errors.push(`model must be one of ${MODELS.join(', ')}, got ${cfg.model}`);
     // ring axes (see torusFactors). 'full': only a stage that is a whole 4x4 torus runs ring collectives (fabric
     // torus mode needs the whole torus); 'axes': any 4-long axis that spans a torus row/column keeps its wrap link
     // ([2,4] -> TP ring, [4,2] -> SP ring, [8,4] -> TP ring); 'off': line collectives everywhere (the measured setup)
@@ -651,7 +669,7 @@
     const gran = owner ? 32 : 32 * sp; // tile padding: request padding unit
     // evenSplit: contiguous equal slices over SP, so the new K/V rows need an all-to-all to reach the ranks that own them
     const evenSplit = tile && !owner;
-    const ctxT = (T) => ({ sp, tp, P, T, idxB, imb: cfg.expertImb, evenSplit, bounded: cfg.boundedDense, msaLocal: cfg.msaLocal, ringSp, ringTp, prefetch: !!cfg.prefetchKV });
+    const ctxT = (T) => ({ sp, tp, P, T, idxB, imb: cfg.expertImb, evenSplit, bounded: cfg.boundedDense, msaLocal: cfg.msaLocal, ringSp, ringTp, prefetch: !!cfg.prefetchKV, denseMsa });
     const pm = cal.pipe;
     // the 1/T term was fitted on chunks of 2048 and 5120 tokens; clamp so small chunks do not extrapolate it
     const moeMult = (T) => (1 - a) * (pm.moeMult[0] + pm.moeMult[1] * 5120 / Math.max(T, 2048)) + a * 1;
@@ -2053,7 +2071,7 @@
   // ------------------------------------------------------------------------------------------------------
   function matrixCell(cal, cfgIn, cached, nnew, users, reqsPerUser) {
     // the #57827 matrix runs used bf16 index_k (M3_INDEX_CACHE_BF16=1)
-    const plan = makePlan(Object.assign({ cache: 'inf', batch: false, reqPad: 'chunk', idxBf16: true }, cfgIn), cal);
+    const plan = makePlan(Object.assign({ model: 'm3', cache: 'inf', batch: false, reqPad: 'chunk', idxBf16: true }, cfgIn), cal);
     const S = plan.S, C = plan.cfg.chunk, out = new Float64Array(S);
     const cap = cached + 51200;
     const cachedA = Math.floor(cached / C) * C;
@@ -2094,7 +2112,7 @@
     const pts = { 5120: [], 2048: [] };
     for (const run of ['A', 'B', 'C']) {
       const r = data.pipeline[run]; const T = r.chunk; const counts = r.layers.split(',').map(Number);
-      const plan = makePlan({ chunk: T, split: counts, stages: 16, cache: 'inf', idxBf16: true }, cal); // runs used bf16 index_k
+      const plan = makePlan({ model: 'm3', chunk: T, split: counts, stages: 16, cache: 'inf', idxBf16: true }, cal); // M3 runs, bf16 index_k
       for (const row of data.tables[run]) {
         if (row.new > T || row.loaded_steady_processed_tps == null) continue;
         const cell = (r.cells || []).find((c) => c.cached === row.cached && c.new === row.new);
@@ -2115,13 +2133,16 @@
 
   function calibrateAll(data) { const cal = calibrate(data); fitHandoff(cal, data); return cal; }
 
-  // List prices, USD per million tokens: MiniMax's own endpoint for minimax/minimax-m3 on OpenRouter (provider
-  // "Minimax", minimax/fp8; also the model-level price), read 2026-10-07 from
-  // openrouter.ai/api/v1/models/minimax/minimax-m3/endpoints. A cache miss (re-prefill
+  // List prices, USD per million tokens, for minimax/minimax-m3.1-flash on OpenRouter, read 2026-10-30 from
+  // openrouter.ai/api/v1/models/minimax/minimax-m3.1-flash/endpoints: $0.15 input / $0.015 cache read / $0.60 output.
+  // That is what 10 of its 14 endpoints charge (Tenstorrent's own fp8 endpoint, Together, Fireworks, Nebius, ...) and
+  // MiniMax's own endpoint at peak (01:00-15:00 UTC); MiniMax charges half off-peak ($0.075 / $0.0075 / $0.30), and
+  // the cheapest (SambaNova) $0.06 / $0.006 / $0.24. M3 was $0.30 / $0.06 / $1.20 (2026-10-07): half the input and
+  // output price, and a cache read now costs a tenth of a miss instead of a fifth. A cache miss (re-prefill
   // included) is billed at the input price, a prefix hit at the cache-read price; there is no cache-write charge.
   // Prefill revenue is input tokens only; output tokens are decode's, and count only in the margin (economics()),
   // which also pays for the decode galaxies.
-  const PRICE = { inUsdPerM: 0.30, cachedUsdPerM: 0.06, outUsdPerM: 1.20 };
+  const PRICE = { inUsdPerM: 0.15, cachedUsdPerM: 0.015, outUsdPerM: 0.60 };
   // Operating cost: a rough USD per galaxy-hour, and the decode galaxies paired with the prefill: one M3 decode
   // instance, 64 sessions (decodeSlots) on 16 galaxies.
   const COST = { galaxyUsdPerH: 12, decodeGalaxies: 16 };
@@ -2153,6 +2174,6 @@
     return { revenue, inUsd: h.usd, outUsd: h.outUsd, cost: costUsd, prefillUsd, decodeUsd, margin: revenue - costUsd, marginFrac: (revenue - costUsd) / revenue };
   }
 
-  const API = { M3, HW, DEFAULTS, PRICE, COST, M3_DECODE_TSU, decodeSpeed, calibrate: calibrateAll, makePlan, splitLayers, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, economics, layerMs, roofTok, roofSeg, ownerWalk };
+  const API = { M3, MODELS, HW, DEFAULTS, PRICE, COST, M3_DECODE_TSU, decodeSpeed, calibrate: calibrateAll, makePlan, splitLayers, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, economics, layerMs, roofTok, roofSeg, ownerWalk };
   if (typeof module !== 'undefined' && module.exports) module.exports = API; else root.M3SIM = API;
 })(typeof self !== 'undefined' ? self : this);
