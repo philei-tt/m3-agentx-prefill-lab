@@ -381,7 +381,8 @@ model card's bf4 attention (all on 2 + 16). Prefill is no longer the limit: it m
 doubles with the right stack and then sits 30–50% busy, waiting on decode. Positive margin needs about 15% more decode
 throughput per galaxy than tt-blaze #5966 measures (≈ 1.05k instead of 906 output tok/s per galaxy), or 1.15× the list
 price, or ≤ $8.73 per galaxy-hour. **Speculative decoding on top of #5966 closes that gap** (next sections): batched
-verification turns the best cell positive at 1 draft / AL 1.87 or 3 drafts / AL ≥ 2.5 (+$44/h at 3 drafts / AL 3.0). Pipelined
+verification turns the best cell positive at 1 draft / AL 1.87 or 3 drafts / AL ≥ 2.5 ($12.25 revenue per galaxy-hour
+at 3 drafts / AL 3.0, against $10 of cost). Pipelined
 verification, which blaze runs today, does not help.
 
 ### Decode: what was measured (bf4 routed experts, M3.1-Flash, Oct 30)
@@ -485,23 +486,26 @@ Batched verification runs at two expert-weight shares of a step:
 * `decodeMoeFrac` 0.8, the default.
 * 0.4, a rough roofline for main: one expert's bf4 weights per chip is ~31 µs of the 81 µs stage.
 
-| net $/h, best gx (opEff 1) | main | model card | #5966 batched |
+Revenue per galaxy-hour over all the galaxies (prefill + 16 decode) at the best prefill galaxy count; the cost is
+$10, so above $10 is profit (two numbers: expert-weight share 0.8 / 0.4):
+
+| revenue $/gx-h, best gx (opEff 1) | main | model card | #5966 batched |
 |---|---|---|---|
-| no spec decode | −$78 | −$49 | −$24 |
-| batch 1 / 1.87, moe 0.8 / 0.4 | −$67 / −$47 | −$43 / −$13 | **+$4 / +$34** |
-| batch 3 / 1.49, moe 0.8 / 0.4 | −$118 / −$99 | −$108 / −$82 | −$62 / −$31 |
-| batch 3 / 2.5, moe 0.8 / 0.4 | −$86 / −$51 | −$68 / −$21 | **+$9 / +$61** |
-| batch 3 / 3.0, moe 0.8 / 0.4 | −$70 / −$29 | −$49 / +$4 | **+$44 / +$109** |
-| batch 7 / 3.7, moe 0.8 / 0.4 | −$97 / −$53 | −$84 / −$30 | **+$67 / +$144** |
-| pipelined 3 / 3.0 | −$106 | −$86 | −$65 |
+| no spec decode | $5.83 | $7.28 | $8.73 |
+| batch 1 / 1.87, moe 0.8 / 0.4 | $6.36 / $7.37 | $7.62 / $9.28 | **$10.23 / $11.77** |
+| batch 3 / 1.49, moe 0.8 / 0.4 | $3.52 / $4.69 | $4.14 / $5.63 | $6.67 / $8.37 |
+| batch 3 / 2.5, moe 0.8 / 0.4 | $5.38 / $7.14 | $6.25 / $8.83 | **$10.48 / $13.04** |
+| batch 3 / 3.0, moe 0.8 / 0.4 | $6.22 / $8.38 | $7.30 / **$10.24** | **$12.25 / $15.46** |
+| batch 7 / 3.7, moe 0.8 / 0.4 | $4.77 / $7.05 | $5.47 / $8.31 | **$13.37 / $17.15** |
+| pipelined 3 / 3.0 | $4.26 | $5.35 | $6.43 |
 
 * **On batched decode, spec decode is the path to positive.** #5966's step already holds 16 users, who touch ~51 of the
   128 experts, so verifying 4 tokens each (64 tokens, ~111 experts) costs about 2× the step rather than 4×. One draft at
-  AL 1.87, or 3 drafts at AL 2.5 or more, then turns the best cell positive, even at the default expert-weight share. At 3 / 3.0 that is +$44/h at
-  4 + 16 galaxies (21.2k output tok/s, break-even 0.82× list or $12.20/gx-h), up to +$109/h if the step is less
+  AL 1.87, or 3 drafts at AL 2.5 or more, then turns the best cell positive, even at the default expert-weight share. At 3 / 3.0 that is $12.25
+  per galaxy-hour on 3 + 16 galaxies (+$2.25 over cost), up to $15.46 on 4 + 16 if the step is less
   expert-bound.
 * **Unbatched, it barely helps.** One user's step reads 4 experts; verifying 4 tokens reads ~15, so at the default share the verify
-  step costs ~2.7× and long drafts lose. Only the model card at 3 / 3.0 with the 0.4 share reaches break-even (+$4).
+  step costs ~2.7× and long drafts lose. Only the model card at 3 / 3.0 with the 0.4 share reaches break-even ($10.24 per galaxy-hour).
 * **Pipelined verification (what blaze runs today) loses money on a full ring.** Each session takes D ring places for
   AL tokens, so throughput drops by AL / D. It is a latency win at low load (392 tok/s/u at 128K on main), not a
   revenue win. Long drafts with a low AL (3 / 1.49) lose in every mode.

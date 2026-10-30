@@ -2221,14 +2221,16 @@
   }
 
   // Hourly margin of one sweep point on `galaxies` prefill galaxies plus the decode galaxies: input + output revenue
-  // minus the galaxy-hours of both (USD per hour).
+  // minus the galaxy-hours of both (USD per hour), and both per galaxy-hour over all of them (revenuePerGx is the
+  // break-even cost per galaxy-hour; marginPerGx = revenuePerGx - galaxyUsdPerH).
   function economics(p, galaxies, price, cost) {
     const h = hourly(p, price);
     if (!h) return null;
     const c = Object.assign({}, COST, cost);
     const revenue = h.usd + h.outUsd, prefillUsd = galaxies * c.galaxyUsdPerH, decodeUsd = c.decodeGalaxies * c.galaxyUsdPerH;
-    const costUsd = prefillUsd + decodeUsd;
-    return { revenue, inUsd: h.usd, outUsd: h.outUsd, cost: costUsd, prefillUsd, decodeUsd, margin: revenue - costUsd, marginFrac: (revenue - costUsd) / revenue };
+    const costUsd = prefillUsd + decodeUsd, gx = galaxies + c.decodeGalaxies;
+    return { revenue, inUsd: h.usd, outUsd: h.outUsd, cost: costUsd, prefillUsd, decodeUsd, margin: revenue - costUsd, marginFrac: (revenue - costUsd) / revenue,
+      galaxies: gx, revenuePerGx: revenue / gx, marginPerGx: (revenue - costUsd) / gx };
   }
 
   const API = { M3, MODELS, HW, DEFAULTS, PRICE, COST, M3_DECODE_TSU, DECODE_CURVES, decodeSpeed, calibrate: calibrateAll, makePlan, splitLayers, chunkStageMs, loadTraffic, simulate, matrixCell, planSummary, hourly, economics, layerMs, roofTok, roofSeg, ownerWalk };

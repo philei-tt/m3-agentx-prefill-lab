@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Speculative decoding on the measured M3.1-Flash decode curves: net revenue with the best prefill stacks of
+// Speculative decoding on the measured M3.1-Flash decode curves: revenue per galaxy-hour (prefill + decode galaxies) with the best prefill stacks of
 // tools/stack_search.js (results/stack_search.json, opEff 1; 2 and 3 galaxies run the 4-galaxy stack), at the
 // winner's budget and twice it, on 16 decode galaxies (paged decode KV + tiers, queue backpressure without a limit).
 //   decode: tt-blaze main and the model card (unbatched, 62 stages), #5966 (16 users per 4x8 stage, 256 sessions).
@@ -53,8 +53,8 @@ async function main() {
   })))));
   pool.close();
   const k = (x) => (x / 1e3).toFixed(1) + 'k';
-  const best = (f) => rows.filter((r) => r.econ && f(r)).sort((a, b) => b.econ.margin - a.econ.margin)[0];
-  console.log(`== Spec decode: net $/h, best prefill stacks (opEff 1, best of budget x1 / x2), M3.1-Flash prices ($${SIM.PRICE.inUsdPerM} / $${SIM.PRICE.cachedUsdPerM} / $${SIM.PRICE.outUsdPerM}), $${SIM.COST.galaxyUsdPerH} per galaxy-hour, ${DG} decode galaxies`);
+  const best = (f) => rows.filter((r) => r.econ && f(r)).sort((a, b) => b.econ.marginPerGx - a.econ.marginPerGx)[0];
+  console.log(`== Spec decode: revenue $ per galaxy-hour over prefill + decode galaxies (cost $${SIM.COST.galaxyUsdPerH}: above it is profit), best prefill stacks (opEff 1, best of budget x1 / x2), M3.1-Flash prices ($${SIM.PRICE.inUsdPerM} / $${SIM.PRICE.cachedUsdPerM} / $${SIM.PRICE.outUsdPerM}), $${SIM.COST.galaxyUsdPerH} per galaxy-hour, ${DG} decode galaxies`);
   console.log(`   spec: drafts / acceptance length (tokens per cycle); moe = expert-weight share of a decode step; drafter ${DEC_SIDE.specDraftFrac * 100}% of a step`);
   for (const d of DECODE) {
     console.log(`\n-- decode: ${d.name}`);
@@ -62,15 +62,15 @@ async function main() {
     for (const s of SPEC) {
       const tsu = SIM.decodeSpeed(Object.assign({}, SIM.DEFAULTS, DEC_SIDE, d.cfg, s.cfg), 131072);
       const b = best((r) => r.dec === d.name && r.spec === s.name);
-      console.log('  ' + [s.name, ...ALL_GX.map((gx) => { const r = best((x) => x.dec === d.name && x.spec === s.name && x.gx === gx); return r ? usd(r.econ.margin) : '–'; }),
+      console.log('  ' + [s.name, ...ALL_GX.map((gx) => { const r = best((x) => x.dec === d.name && x.spec === s.name && x.gx === gx); return r ? usd(r.econ.revenuePerGx) : '–'; }),
         tsu.toFixed(0), b ? `${k(b.at.outDecTps)} @${b.gx} gx` : '–'].map((x, i) => (i === 0 ? x.padEnd(40) : i <= ALL_GX.length ? x.padStart(9) : x.padStart(16))).join(''));
     }
   }
-  console.log(`\n-- best per decode x spec`);
+  console.log(`\n-- best per decode x spec (by revenue per galaxy-hour)`);
   for (const d of DECODE) for (const s of SPEC) {
     const b = best((r) => r.dec === d.name && r.spec === s.name); if (!b) continue;
     const e = b.econ, p = b.at;
-    console.log(`  ${(d.name + ', ' + s.name).padEnd(52)} net ${usd(e.margin).padStart(7)}/h (in ${usd(e.inUsd)} + out ${usd(e.outUsd)} - cost ${usd(e.cost)}) | break-even ${usd(e.revenue / (b.gx + DG))}/gx-h or ${(e.cost / e.revenue).toFixed(2)}x list`
+    console.log(`  ${(d.name + ', ' + s.name).padEnd(52)} revenue ${usd(e.revenuePerGx).padStart(6)}/gx-h, net ${usd(e.marginPerGx)}/gx-h (${usd(e.margin)}/h on ${e.galaxies} gx) | ${(e.cost / e.revenue).toFixed(2)}x list to break even`
       + ` | ${b.gx} + ${DG} gx, budget ${b.budget / 1024}k | goodput ${k(b.goodput)} @C=${p.conc}, output ${k(p.outDecTps)} tok/s, decode p10/p50 ${Math.round(p.tsuP10)}/${Math.round(p.tsuP50)} tok/s/u, prefill busy ${Math.round(100 * p.maxUtil)}%`);
   }
   fs.writeFileSync(get('--out', path.join(RESULTS, 'spec_sweep.json')), JSON.stringify({ slo: SLO, decode: DECODE, spec: SPEC, decSide: DEC_SIDE, price: SIM.PRICE, cost: SIM.COST,
